@@ -5,7 +5,9 @@ Exposes all remctl features as JSON endpoints over HTTP. Designed for
 Tailscale-only access with Bearer token authentication.
 
 Reads directly from the iCloud Reminders CoreData SQLite database.
-Writes via remctl-bridge (Swift EventKit) or falls back to remctl CLI.
+Writes via AppleScript (update/complete/uncomplete/delete) for reliable
+iCloud sync, with remctl-bridge (Swift EventKit) for creates and list
+operations. Falls back to remctl CLI as a last resort.
 
 Zero external dependencies — stdlib only.
 """
@@ -414,157 +416,6 @@ def resolve_ck_id(pk):
     return None, None
 
 
-def sync_after_bridge_write(pk):
-    """After EventKit writes, fix fields that EventKit doesn't update properly.
-
-    EventKit updates ZDUEDATE but NOT:
-    1. ZDISPLAYDATEDATE — what Reminders.app actually uses for its UI
-    2. ZRESOLUTIONTOKENMAP_V3_JSONDATA — iCloud conflict resolution tokens
-
-    Without updating the resolution tokens, iCloud may accept the change
-    locally but other devices (iPhone/iPad) will ignore it because the
-    version counter for 'dueDate' wasn't incremented.
-    """
-    try:
-        db_path = find_main_db()
-        if not db_path:
-            return
-        conn = sqlite3.connect(str(db_path))
-
-        r = conn.execute(
-            "SELECT ZDUEDATE, ZSTARTDATE, ZDISPLAYDATEDATE, ZRESOLUTIONTOKENMAP_V3_JSONDATA "
-            "FROM ZREMCDREMINDER WHERE Z_PK = ?", (pk,)
-        ).fetchone()
-        if not r:
-            conn.close()
-            return
-
-        updates = []
-        params = []
-
-        # 1. Sync ZDISPLAYDATEDATE to match ZDUEDATE
-        if r[0] is not None and r[0] != r[2]:
-            updates.append("ZDISPLAYDATEDATE = ?")
-            params.append(r[0])
-
-        # 2. Clear phantom ZSTARTDATE that EventKit auto-sets
-        if r[1] is not None:
-            updates.append("ZSTARTDATE = NULL")
-
-        # 3. Increment the resolution token counters for iCloud sync
-        token_blob = r[3]
-        if token_blob:
-            try:
-                raw = token_blob.decode("utf-8") if isinstance(token_blob, bytes) else token_blob
-                token_root = json.loads(raw)
-                # Tokens are nested under "map" key
-                tokens = token_root.get("map", token_root)
-                now_ts = datetime.now().timestamp() - 978307200  # Apple epoch
-                for field in ("dueDate", "lastModifiedDate", "completed", "completionDate"):
-                    if field in tokens:
-                        tokens[field]["counter"] = tokens[field].get("counter", 0) + 1
-                        tokens[field]["modificationTime"] = now_ts
-                # Write back with same structure
-                if "map" in token_root:
-                    token_root["map"] = tokens
-                else:
-                    token_root = tokens
-                updates.append("ZRESOLUTIONTOKENMAP_V3_JSONDATA = ?")
-                params.append(json.dumps(token_root).encode("utf-8"))
-            except (json.JSONDecodeError, TypeError, UnicodeDecodeError) as e:
-                sys.stderr.write(f"[sync_after_bridge_write] Token parse error: {e}\n")
-
-        # 4. Set CKDIRTYFLAGS to trigger iCloud re-push
-        updates.append("ZCKDIRTYFLAGS = 2")
-
-        if updates:
-            params.append(pk)
-            sql = f"UPDATE ZREMCDREMINDER SET {', '.join(updates)} WHERE Z_PK = ?"
-            conn.execute(sql, params)
-            conn.commit()
-
-        conn.close()
-    except Exception as e:
-        sys.stderr.write(f"[sync_after_bridge_write] Warning: {e}\n")
-
-
-def sync_to_icloud_via_applescript(pk, action_data):
-    """Fire an AppleScript write in the background to trigger proper iCloud sync.
-
-    EventKit writes update CoreData locally but remindd won't push them
-    to CloudKit. The ONLY reliable way to get iCloud sync is to have
-    remindd make the change itself, which happens through AppleScript.
-
-    This runs in a background thread (Popen, no wait) so the API response
-    is instant. The iCloud sync happens 30-60s later when AppleScript completes.
-    """
-    try:
-        db_path = find_main_db()
-        if not db_path:
-            return
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        conn.row_factory = sqlite3.Row
-        r = conn.execute(
-            "SELECT r.ZCKIDENTIFIER, r.ZTITLE, l.ZNAME as list_name "
-            "FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l ON r.ZLIST = l.Z_PK "
-            "WHERE r.Z_PK = ?", (pk,)
-        ).fetchone()
-        conn.close()
-        if not r or not r["ZCKIDENTIFIER"]:
-            return
-
-        ck_id = r["ZCKIDENTIFIER"]
-        list_name = r["list_name"] or "Reminders"
-        esc_list = list_name.replace('"', '\\"').replace("'", "'")
-
-        # Build AppleScript commands based on what was changed
-        commands = []
-        if action_data.get("due"):
-            # Parse the due date and format for AppleScript
-            due_str = action_data["due"]
-            try:
-                from datetime import datetime as _dt
-                for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
-                    try:
-                        dt = _dt.strptime(due_str, fmt)
-                        as_date = dt.strftime('%A, %B %d, %Y at %I:%M:%S %p')
-                        commands.append(f'set due date of r to date "{as_date}"')
-                        break
-                    except ValueError:
-                        continue
-            except Exception:
-                pass
-
-        action = action_data.get("action", "")
-        if action == "complete":
-            commands.append("set completed of r to true")
-        elif action == "uncomplete":
-            commands.append("set completed of r to false")
-
-        if not commands:
-            # Fallback: touch name to force sync
-            commands.append("set name of r to name of r")
-
-        cmd_str = "\n".join(commands)
-        script = (
-            f'tell application "Reminders"\n'
-            f'tell list "{esc_list}"\n'
-            f'set r to (first reminder whose id is "x-apple-reminder://{ck_id}")\n'
-            f'{cmd_str}\n'
-            f'end tell\nend tell'
-        )
-
-        # Fire and forget — don't wait for completion (takes 30-60s)
-        subprocess.Popen(
-            ["osascript", "-e", script],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        sys.stderr.write(f"[icloud_sync] Background AppleScript fired for #{pk}\n")
-    except Exception as e:
-        sys.stderr.write(f"[icloud_sync] Warning: {e}\n")
-
-
 def applescript_write(pk, action_data):
     """Write via AppleScript (goes through remindd → reliable iCloud sync).
 
@@ -602,18 +453,14 @@ def applescript_write(pk, action_data):
                 commands.append(f'set body of r to "{esc(action_data["notes"])}"')
             if action_data.get("due"):
                 due_str = action_data["due"]
-                try:
-                    from datetime import datetime as _dt
-                    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
-                        try:
-                            dt = _dt.strptime(due_str, fmt)
-                            as_date = dt.strftime('%A, %B %d, %Y at %I:%M:%S %p')
-                            commands.append(f'set due date of r to date "{as_date}"')
-                            break
-                        except ValueError:
-                            continue
-                except Exception:
-                    pass
+                for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+                    try:
+                        dt = datetime.strptime(due_str, fmt)
+                        as_date = dt.strftime('%A, %B %d, %Y at %I:%M:%S %p')
+                        commands.append(f'set due date of r to date "{as_date}"')
+                        break
+                    except ValueError:
+                        continue
             pm = {"high": 1, "medium": 5, "low": 9, "none": 0}
             if action_data.get("priority") is not None:
                 pri = action_data["priority"]
@@ -665,12 +512,12 @@ def applescript_write(pk, action_data):
 
 
 def bridge_call(action_data, original_pk=None):
-    """Write to Reminders with reliable iCloud sync.
+    """Write to Reminders.
 
     Strategy:
-    1. For update/complete/uncomplete/delete: use AppleScript (reliable iCloud sync)
-    2. For create/list operations: use EventKit bridge (AppleScript can't do these well)
-    3. Fall back to bridge if AppleScript fails
+    1. update/complete/uncomplete/delete: AppleScript first (reliable iCloud sync)
+    2. create/list ops: EventKit bridge (AppleScript can't create well)
+    3. AppleScript failure or no bridge: remctl CLI fallback
     """
     resolved_pk = None
 
@@ -1516,10 +1363,7 @@ def main():
     else:
         token, token_source = load_or_create_token(args.token)
 
-    if args.generate_token:
-        run_server(args.port, token, token_source)
-    else:
-        run_server(args.port, token, token_source)
+    run_server(args.port, token, token_source)
 
 
 if __name__ == "__main__":
