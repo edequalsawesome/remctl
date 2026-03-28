@@ -207,6 +207,9 @@ func applyFields(_ reminder: EKReminder, _ cmd: Command, store: EKEventStore) {
         if let dueStr = cmd.due, !dueStr.isEmpty, let date = parseISO(dueStr) {
             reminder.dueDateComponents = Calendar.current.dateComponents(
                 [.year, .month, .day, .hour, .minute, .second, .timeZone], from: date)
+            // Clear startDateComponents — EventKit auto-sets it, but Reminders.app
+            // doesn't use it for normal reminders and it can confuse iCloud sync
+            reminder.startDateComponents = nil
         }
     }
     // If due was explicitly null in JSON, the Decodable will still decode it;
