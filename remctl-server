@@ -15,6 +15,7 @@ Zero external dependencies — stdlib only.
 import argparse
 import json
 import os
+import re
 import secrets
 import signal
 import sqlite3
@@ -25,6 +26,7 @@ from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
+from urllib.request import urlopen, Request
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -640,6 +642,92 @@ def remctl_cli_fallback(action_data):
         return {"ok": False, "error": "remctl not found"}
 
 
+# ── OpenGraph Metadata ───────────────────────────────────────────────────────
+
+_og_cache = {}          # url -> (data_dict, expiry_time)
+_OG_CACHE_TTL = 3600    # 1 hour
+
+def fetch_og_metadata(url):
+    """Fetch OpenGraph metadata from a URL. Returns dict or None."""
+    now = time.monotonic()
+
+    # Check cache
+    cached = _og_cache.get(url)
+    if cached and cached[1] > now:
+        return cached[0]
+
+    try:
+        req = Request(url, headers={
+            "User-Agent": "RemCTL/1.0 (OpenGraph Preview)",
+            "Accept": "text/html,application/xhtml+xml",
+        })
+        with urlopen(req, timeout=5) as resp:
+            content_type = resp.headers.get("Content-Type", "")
+            if "html" not in content_type.lower() and "xml" not in content_type.lower():
+                return None
+            html = resp.read(65536).decode("utf-8", errors="ignore")
+    except Exception:
+        return None
+
+    def og(prop):
+        # Match both property="og:X" and name="og:X", content before or after
+        for pattern in [
+            rf'<meta[^>]+(?:property|name)=["\']og:{prop}["\'][^>]+content=["\']([^"\']+)',
+            rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']og:{prop}["\']',
+        ]:
+            m = re.search(pattern, html, re.I)
+            if m:
+                return m.group(1).strip()
+        return None
+
+    title = og("title")
+    if not title:
+        m = re.search(r"<title[^>]*>([^<]+)</title>", html, re.I)
+        title = m.group(1).strip() if m else None
+
+    description = og("description")
+    if not description:
+        m = re.search(
+            r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)',
+            html, re.I,
+        )
+        if not m:
+            m = re.search(
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']description["\']',
+                html, re.I,
+            )
+        description = m.group(1).strip() if m else None
+
+    image = og("image")
+    site_name = og("site_name")
+
+    parsed = urlparse(url)
+    domain = parsed.netloc
+    if domain.startswith("www."):
+        domain = domain[4:]
+
+    if not title and not description:
+        return None
+
+    data = {
+        "title": title,
+        "description": description,
+        "image": image,
+        "siteName": site_name,
+        "domain": domain,
+    }
+
+    _og_cache[url] = (data, now + _OG_CACHE_TTL)
+
+    # Evict stale entries periodically (keep cache bounded)
+    if len(_og_cache) > 500:
+        stale = [k for k, (_, exp) in _og_cache.items() if exp <= now]
+        for k in stale:
+            del _og_cache[k]
+
+    return data
+
+
 # ── HTTP Handler ─────────────────────────────────────────────────────────────
 
 class RemctlHandler(BaseHTTPRequestHandler):
@@ -1054,6 +1142,23 @@ class RemctlHandler(BaseHTTPRequestHandler):
             return
 
         db.close()
+
+        # GET /api/v1/og?url=... — OpenGraph metadata (no DB needed)
+        if path == "/api/v1/og":
+            target_url = qs.get("url", [""])[0]
+            if not target_url:
+                self._error("Missing 'url' query parameter", 400)
+                self._log_timing("GET", path, 400, t0)
+                return
+            data = fetch_og_metadata(target_url)
+            if data is None:
+                self._ok({"title": None, "description": None, "image": None,
+                          "siteName": None, "domain": urlparse(target_url).netloc})
+            else:
+                self._ok(data)
+            self._log_timing("GET", path, 200, t0)
+            return
+
         self._error(f"Not found: {path}", 404)
         self._log_timing("GET", path, 404, t0)
 
