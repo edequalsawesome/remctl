@@ -488,6 +488,49 @@ def sync_after_bridge_write(pk):
         sys.stderr.write(f"[sync_after_bridge_write] Warning: {e}\n")
 
 
+def nudge_remindd(pk):
+    """Trigger remindd to properly sync a reminder to iCloud.
+
+    EventKit writes update CoreData but remindd doesn't push them to
+    CloudKit because it didn't initiate the change. A trivial AppleScript
+    edit (set name to itself) forces remindd to process the record through
+    its proper CloudKit sync pipeline, which pushes ALL pending changes
+    including our bridge's date/completion updates.
+    """
+    try:
+        db_path = find_main_db()
+        if not db_path:
+            return
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        r = conn.execute(
+            "SELECT r.ZCKIDENTIFIER, r.ZTITLE, l.ZNAME as list_name "
+            "FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l ON r.ZLIST = l.Z_PK "
+            "WHERE r.Z_PK = ?", (pk,)
+        ).fetchone()
+        conn.close()
+        if not r or not r["ZCKIDENTIFIER"]:
+            return
+
+        ck_id = r["ZCKIDENTIFIER"]
+        list_name = r["list_name"] or "Reminders"
+        esc_list = list_name.replace('"', '\\"')
+
+        script = (
+            f'tell application "Reminders"\n'
+            f'tell list "{esc_list}"\n'
+            f'set r to (first reminder whose id is "x-apple-reminder://{ck_id}")\n'
+            f'set name of r to name of r\n'
+            f'end tell\nend tell'
+        )
+        subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=15
+        )
+    except Exception as e:
+        sys.stderr.write(f"[nudge_remindd] Warning: {e}\n")
+
+
 def bridge_call(action_data, original_pk=None):
     """Call remctl-bridge (Swift EventKit helper) for write operations.
 
@@ -517,11 +560,13 @@ def bridge_call(action_data, original_pk=None):
             )
             if result.returncode == 0 and result.stdout.strip():
                 parsed = json.loads(result.stdout)
-                # After successful bridge write, fix display date + resolution tokens
                 if pk:
                     import time
                     time.sleep(0.3)  # Let EventKit commit to CoreData
+                    # Fix ZDISPLAYDATEDATE for local Reminders.app UI
                     sync_after_bridge_write(pk)
+                    # Nudge remindd via AppleScript to trigger proper iCloud sync
+                    nudge_remindd(pk)
                 return parsed
             # Bridge failed, try remctl CLI fallback
         except (subprocess.TimeoutExpired, json.JSONDecodeError):
