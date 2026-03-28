@@ -342,6 +342,20 @@ def preload_extras(db, pks):
 
 # ── Serialization ────────────────────────────────────────────────────────────
 
+def q_rich_link(db, pk):
+    """Look up a rich link URL from ZREMCDOBJECT for a reminder."""
+    try:
+        row = db.execute(
+            "SELECT ZURL FROM ZREMCDOBJECT "
+            "WHERE (ZREMINDER2 = ? OR ZREMINDER = ?) "
+            "AND ZUTI = 'public.url' AND ZMARKEDFORDELETION = 0 LIMIT 1",
+            (pk, pk)
+        ).fetchone()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
 def reminder_to_dict(r, db=None, section=None, _sc=None, _ht=None):
     """Convert a reminder row to JSON-serializable dict."""
     sc = (_sc or {}).get(r["Z_PK"], q_subtask_count(db, r["Z_PK"]) if db else 0)
@@ -363,8 +377,12 @@ def reminder_to_dict(r, db=None, section=None, _sc=None, _ht=None):
         d["section"] = section
     if r["ZNOTES"]:
         d["notes"] = r["ZNOTES"]
-    if r["ZICSURL"]:
-        d["url"] = r["ZICSURL"]
+    # Check ZICSURL first, then look up rich link from ZREMCDOBJECT
+    url = r["ZICSURL"]
+    if not url and db:
+        url = q_rich_link(db, r["Z_PK"])
+    if url:
+        d["url"] = url
     if r["ZDUEDATE"]:
         d["dueDate"] = ts(r["ZDUEDATE"]).isoformat()
     if r["ZCREATIONDATE"]:
