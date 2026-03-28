@@ -55,8 +55,43 @@ let isoDateOnly: ISO8601DateFormatter = {
     return f
 }()
 
+/// Handles naive ISO datetimes like "2026-03-28T15:00:00" (no timezone)
+/// by interpreting them as local time — the intuitive behavior for a CLI.
+let localFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+    f.timeZone = TimeZone.current
+    f.locale = Locale(identifier: "en_US_POSIX")
+    return f
+}()
+
+let localDateTimeShort: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "yyyy-MM-dd HH:mm"
+    f.timeZone = TimeZone.current
+    f.locale = Locale(identifier: "en_US_POSIX")
+    return f
+}()
+
 func parseISO(_ s: String) -> Date? {
-    isoFormatter.date(from: s) ?? isoDateOnly.date(from: s)
+    // 1. Full ISO 8601 with timezone (e.g., "2026-03-28T15:00:00Z" or "+02:00")
+    if let d = isoFormatter.date(from: s) { return d }
+    // 2. Naive datetime as local time (e.g., "2026-03-28T15:00:00")
+    if let d = localFormatter.date(from: s) { return d }
+    // 3. Shorter format (e.g., "2026-03-28 15:00")
+    if let d = localDateTimeShort.date(from: s) { return d }
+    // 4. Date-only as local midnight (e.g., "2026-03-28")
+    if let d = isoDateOnly.date(from: s) {
+        // Convert from UTC midnight to local midnight
+        let cal = Calendar.current
+        let comps = cal.dateComponents(in: TimeZone(identifier: "UTC")!, from: d)
+        var local = DateComponents()
+        local.year = comps.year; local.month = comps.month; local.day = comps.day
+        local.hour = 0; local.minute = 0; local.second = 0
+        local.timeZone = TimeZone.current
+        return cal.date(from: local) ?? d
+    }
+    return nil
 }
 
 // MARK: - Alarm parsing
