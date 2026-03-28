@@ -414,31 +414,78 @@ def resolve_ck_id(pk):
     return None, None
 
 
-def sync_display_date(pk):
-    """After EventKit updates ZDUEDATE, sync ZDISPLAYDATEDATE to match.
+def sync_after_bridge_write(pk):
+    """After EventKit writes, fix fields that EventKit doesn't update properly.
 
-    Reminders.app uses ZDISPLAYDATEDATE (not ZDUEDATE) for its UI views.
-    EventKit only updates ZDUEDATE, leaving ZDISPLAYDATEDATE stale.
-    This causes reminders to appear under the wrong date and become
-    uneditable in Reminders.app.
+    EventKit updates ZDUEDATE but NOT:
+    1. ZDISPLAYDATEDATE — what Reminders.app actually uses for its UI
+    2. ZRESOLUTIONTOKENMAP_V3_JSONDATA — iCloud conflict resolution tokens
+
+    Without updating the resolution tokens, iCloud may accept the change
+    locally but other devices (iPhone/iPad) will ignore it because the
+    version counter for 'dueDate' wasn't incremented.
     """
     try:
         db_path = find_main_db()
         if not db_path:
             return
         conn = sqlite3.connect(str(db_path))
+
         r = conn.execute(
-            "SELECT ZDUEDATE FROM ZREMCDREMINDER WHERE Z_PK = ?", (pk,)
+            "SELECT ZDUEDATE, ZSTARTDATE, ZDISPLAYDATEDATE, ZRESOLUTIONTOKENMAP_V3_JSONDATA "
+            "FROM ZREMCDREMINDER WHERE Z_PK = ?", (pk,)
         ).fetchone()
-        if r and r[0] is not None:
-            conn.execute(
-                "UPDATE ZREMCDREMINDER SET ZDISPLAYDATEDATE = ? WHERE Z_PK = ?",
-                (r[0], pk)
-            )
+        if not r:
+            conn.close()
+            return
+
+        updates = []
+        params = []
+
+        # 1. Sync ZDISPLAYDATEDATE to match ZDUEDATE
+        if r[0] is not None and r[0] != r[2]:
+            updates.append("ZDISPLAYDATEDATE = ?")
+            params.append(r[0])
+
+        # 2. Clear phantom ZSTARTDATE that EventKit auto-sets
+        if r[1] is not None:
+            updates.append("ZSTARTDATE = NULL")
+
+        # 3. Increment the resolution token counters for iCloud sync
+        token_blob = r[3]
+        if token_blob:
+            try:
+                raw = token_blob.decode("utf-8") if isinstance(token_blob, bytes) else token_blob
+                token_root = json.loads(raw)
+                # Tokens are nested under "map" key
+                tokens = token_root.get("map", token_root)
+                now_ts = datetime.now().timestamp() - 978307200  # Apple epoch
+                for field in ("dueDate", "lastModifiedDate", "completed", "completionDate"):
+                    if field in tokens:
+                        tokens[field]["counter"] = tokens[field].get("counter", 0) + 1
+                        tokens[field]["modificationTime"] = now_ts
+                # Write back with same structure
+                if "map" in token_root:
+                    token_root["map"] = tokens
+                else:
+                    token_root = tokens
+                updates.append("ZRESOLUTIONTOKENMAP_V3_JSONDATA = ?")
+                params.append(json.dumps(token_root).encode("utf-8"))
+            except (json.JSONDecodeError, TypeError, UnicodeDecodeError) as e:
+                sys.stderr.write(f"[sync_after_bridge_write] Token parse error: {e}\n")
+
+        # 4. Set CKDIRTYFLAGS to trigger iCloud re-push
+        updates.append("ZCKDIRTYFLAGS = 2")
+
+        if updates:
+            params.append(pk)
+            sql = f"UPDATE ZREMCDREMINDER SET {', '.join(updates)} WHERE Z_PK = ?"
+            conn.execute(sql, params)
             conn.commit()
+
         conn.close()
     except Exception as e:
-        sys.stderr.write(f"[sync_display_date] Warning: {e}\n")
+        sys.stderr.write(f"[sync_after_bridge_write] Warning: {e}\n")
 
 
 def bridge_call(action_data, original_pk=None):
@@ -470,11 +517,11 @@ def bridge_call(action_data, original_pk=None):
             )
             if result.returncode == 0 and result.stdout.strip():
                 parsed = json.loads(result.stdout)
-                # After successful bridge write, sync display date if due was changed
-                if pk and action_data.get("due") is not None:
+                # After successful bridge write, fix display date + resolution tokens
+                if pk:
                     import time
                     time.sleep(0.3)  # Let EventKit commit to CoreData
-                    sync_display_date(pk)
+                    sync_after_bridge_write(pk)
                 return parsed
             # Bridge failed, try remctl CLI fallback
         except (subprocess.TimeoutExpired, json.JSONDecodeError):
