@@ -471,8 +471,16 @@ def applescript_write(pk, action_data):
         if action == "update":
             if action_data.get("title"):
                 commands.append(f'set name of r to "{esc(action_data["title"])}"')
-            if action_data.get("notes"):
-                commands.append(f'set body of r to "{esc(action_data["notes"])}"')
+            # URL field is not writable via EventKit/AppleScript (private ReminderKit API).
+            # Append URL to notes as a tappable link fallback.
+            notes = action_data.get("notes", "")
+            url = action_data.get("url", "")
+            if url and notes:
+                notes = notes + "\\n\\n" + url
+            elif url:
+                notes = url
+            if notes:
+                commands.append(f'set body of r to "{esc(notes)}"')
             if action_data.get("due"):
                 due_str = action_data["due"]
                 for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
@@ -604,6 +612,8 @@ def remctl_cli_fallback(action_data):
                 args.extend(["-p", pri])
         if action_data.get("flagged"):
             args.append("-f")
+        if action_data.get("url"):
+            args.extend(["--url", action_data["url"]])
 
     elif action == "complete":
         args.extend(["done", str(action_data["id"])])
@@ -624,6 +634,8 @@ def remctl_cli_fallback(action_data):
             if isinstance(pri, int):
                 pri = PRI_NAME.get(pri, "none")
             args.extend(["-p", pri])
+        if action_data.get("url"):
+            args.extend(["--url", action_data["url"]])
 
     elif action == "delete":
         args.extend(["delete", str(action_data["id"]), "--force"])

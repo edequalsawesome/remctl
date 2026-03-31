@@ -216,8 +216,20 @@ func applyFields(_ reminder: EKReminder, _ cmd: Command, store: EKEventStore) {
     // we handle clearing via the raw JSON check below.
 
     if let p = cmd.priority { reminder.priority = p }
+
+    // Apply notes first, then URL.
+    // EKReminder.url (EventKit) does NOT map to the ZICSURL field that Reminders.app
+    // displays — that's a private ReminderKit property. We can read ZICSURL from CoreData
+    // but cannot write it via public EventKit APIs. As a fallback, append the URL to the
+    // notes field so it appears as a tappable link in the reminder detail view.
     if let n = cmd.notes { reminder.notes = n }
-    if let u = cmd.url, let url = URL(string: u) { reminder.url = url }
+    if let u = cmd.url {
+        if let existing = reminder.notes, !existing.isEmpty {
+            reminder.notes = existing + "\n\n" + u
+        } else {
+            reminder.notes = u
+        }
+    }
     // EventKit has no public flagged API; use priority 1 as a proxy (shows flag in Reminders.app)
     if let f = cmd.flagged {
         if f && reminder.priority == 0 { reminder.priority = 1 }
