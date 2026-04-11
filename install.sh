@@ -4,6 +4,56 @@
 
 set -euo pipefail
 
+BOOTSTRAP=0
+WITH_SERVICE=0
+RUN_DOCTOR=0
+COMPLETION_SHELL="auto"
+
+usage() {
+    cat <<'EOF'
+Usage: ./install.sh [options]
+
+Options:
+  --bootstrap                 Install completions and run doctor
+  --with-service              Install and start the launch agent after copying binaries
+  --doctor                    Run `remctl doctor` after installation
+  --shell-completions SHELL   Install completions for auto, zsh, bash, fish, or none (default: auto)
+  -h, --help                  Show this help text
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --bootstrap)
+            BOOTSTRAP=1
+            RUN_DOCTOR=1
+            shift
+            ;;
+        --with-service)
+            WITH_SERVICE=1
+            shift
+            ;;
+        --doctor)
+            RUN_DOCTOR=1
+            shift
+            ;;
+        --shell-completions)
+            [[ $# -ge 2 ]] || { echo "Missing value for --shell-completions" >&2; exit 1; }
+            COMPLETION_SHELL="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="${PREFIX:-$HOME}"
 BIN_DIR="${REMCTL_BIN_DIR:-$PREFIX/bin}"
@@ -66,14 +116,6 @@ cp "$SCRIPT_DIR/remctl-server" "$BIN_DIR/remctl-server"
 chmod +x "$BIN_DIR/remctl-server"
 echo -e "  ${GREEN}✓${RESET} remctl-server → $BIN_DIR/remctl-server"
 
-# 4. Install zsh completions
-if [[ -d "/usr/local/share/zsh/site-functions" ]] || [[ -d "$HOME/.zsh/completions" ]]; then
-    COMP_DIR="${HOME}/.zsh/completions"
-    mkdir -p "$COMP_DIR"
-    cp "$SCRIPT_DIR/completions/_remctl" "$COMP_DIR/_remctl" 2>/dev/null || true
-    echo -e "  ${GREEN}✓${RESET} zsh completions → $COMP_DIR/_remctl"
-fi
-
 # 5. Generate API token if missing
 if [[ ! -f "$CONFIG_DIR/api-token" ]]; then
     TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
@@ -89,7 +131,32 @@ if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     echo -e "  ${DIM}echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.zshrc${RESET}"
 fi
 
+SETUP_SHELL="$COMPLETION_SHELL"
+if [[ "$SETUP_SHELL" == "none" ]]; then
+    SETUP_SHELL="skip"
+fi
+
+if [[ "$SETUP_SHELL" != "skip" || "$WITH_SERVICE" -eq 1 ]]; then
+    echo -e "${BLUE}→${RESET} Running remctl setup..."
+    SETUP_ARGS=("$BIN_DIR/remctl" "setup" "--shell" "$SETUP_SHELL")
+    if [[ "$WITH_SERVICE" -eq 1 ]]; then
+        SETUP_ARGS+=("--service" "install")
+    else
+        SETUP_ARGS+=("--service" "skip")
+    fi
+    "${SETUP_ARGS[@]}"
+fi
+
+if [[ "$RUN_DOCTOR" -eq 1 || "$BOOTSTRAP" -eq 1 ]]; then
+    echo -e "${BLUE}→${RESET} Running remctl doctor..."
+    "$BIN_DIR/remctl" doctor
+fi
+
 echo ""
 echo -e "${GREEN}${BOLD}Done!${RESET} RemCTL v3.0.0 installed."
-echo -e "${DIM}Run 'remctl' to get started.${RESET}"
+if [[ "$BOOTSTRAP" -eq 1 ]]; then
+    echo -e "${DIM}Run 'remctl today' to verify the CLI against your reminders.${RESET}"
+else
+    echo -e "${DIM}Run 'remctl setup --doctor' to finish setup and check your environment.${RESET}"
+fi
 echo ""

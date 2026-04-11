@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import plistlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -83,6 +84,109 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(len(created_args), 1)
         self.assertEqual(created_args[0].due, "2026-05-01T12:00:00")
+
+    def test_launch_agent_program_args_include_requested_flags(self):
+        args = self.remctl.launch_agent_program_args(
+            Path("/tmp/remctl-server"),
+            host="0.0.0.0",
+            port=8123,
+            allow_origin="https://example.com",
+            enable_opengraph=True,
+            allow_unsafe_sqlite_writes=True,
+        )
+        self.assertEqual(
+            args,
+            [
+                "/tmp/remctl-server",
+                "--port",
+                "8123",
+                "--host",
+                "0.0.0.0",
+                "--allow-origin",
+                "https://example.com",
+                "--enable-opengraph",
+                "--allow-unsafe-sqlite-writes",
+            ],
+        )
+
+    def test_parse_launch_agent_settings_supports_legacy_shell_wrapper(self):
+        plist = {
+            "ProgramArguments": [
+                "/bin/zsh",
+                "-l",
+                "-c",
+                "exec /Users/test/bin/remctl-server --port 19876 --host 0.0.0.0",
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plist_path = Path(tmpdir) / "com.remctl.server.plist"
+            with plist_path.open("wb") as fh:
+                plistlib.dump(plist, fh)
+            with mock.patch.object(self.remctl, "launch_agent_path", return_value=plist_path):
+                settings = self.remctl.parse_launch_agent_settings()
+
+        self.assertEqual(settings["server_path"], "/Users/test/bin/remctl-server")
+        self.assertEqual(settings["host"], "0.0.0.0")
+        self.assertEqual(settings["port"], 19876)
+
+    def test_parse_launch_agent_settings_supports_python_wrapper(self):
+        plist = {
+            "ProgramArguments": [
+                "/usr/bin/python3",
+                "/Users/test/bin/remctl-server",
+                "--port",
+                "19876",
+                "--host",
+                "0.0.0.0",
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plist_path = Path(tmpdir) / "com.remctl.server.plist"
+            with plist_path.open("wb") as fh:
+                plistlib.dump(plist, fh)
+            with mock.patch.object(self.remctl, "launch_agent_path", return_value=plist_path):
+                settings = self.remctl.parse_launch_agent_settings()
+
+        self.assertEqual(settings["python_path"], "/usr/bin/python3")
+        self.assertEqual(settings["server_path"], "/Users/test/bin/remctl-server")
+        self.assertEqual(settings["host"], "0.0.0.0")
+        self.assertEqual(settings["port"], 19876)
+
+    def test_assess_local_api_probe_flags_degraded_database_as_failure(self):
+        result = self.remctl.assess_local_api_probe(
+            "127.0.0.1",
+            19876,
+            {
+                "health": {
+                    "ok": True,
+                    "data": {"status": "degraded", "database": "not found"},
+                },
+                "stats": None,
+                "error": None,
+            },
+        )
+        self.assertEqual(result["status"], "fail")
+        self.assertIn("database: not found", result["detail"])
+
+    def test_stop_service_treats_no_such_process_as_already_stopped(self):
+        proc = SimpleNamespace(
+            returncode=3,
+            stdout="",
+            stderr="Boot-out failed: 3: No such process",
+        )
+        with (
+            mock.patch.object(self.remctl.sys, "platform", "darwin"),
+            mock.patch.object(self.remctl, "launchctl_run", return_value=proc),
+        ):
+            result = self.remctl.stop_service()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["details"], "Service was not loaded")
+
+    def test_resolve_setup_shell_auto_skips_unsupported_shells(self):
+        with mock.patch.dict("os.environ", {"SHELL": "/bin/tcsh"}, clear=False):
+            self.assertEqual(self.remctl.resolve_setup_shell("auto"), "skip")
+        with mock.patch.dict("os.environ", {"SHELL": "/bin/zsh"}, clear=False):
+            self.assertEqual(self.remctl.resolve_setup_shell("auto"), "zsh")
 
 
 if __name__ == "__main__":

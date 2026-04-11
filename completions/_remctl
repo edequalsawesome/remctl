@@ -35,8 +35,10 @@ _remctl() {
         'list-create:Create a new reminder list'
         'list-rename:Rename a reminder list'
         'list-delete:Delete a reminder list'
+        'doctor:Diagnose setup and runtime issues'
+        'setup:Install completions and optional service'
+        'service:Manage the remctl launch agent'
         'completion:Generate shell completions'
-        'server:Start the REST API server'
     )
 
     _arguments -C \
@@ -118,8 +120,32 @@ _remctl() {
                 completion)
                     _arguments '1:shell:(bash zsh fish)'
                     ;;
-                server)
-                    _arguments '--port[Port]:port:' '--token[API token]:token:'
+                doctor)
+                    _arguments '--json[JSON output]'
+                    ;;
+                setup)
+                    _arguments \
+                        '--shell[Shell completion]:shell:(auto bash zsh fish skip)' \
+                        '--service[Service setup]:service:(skip install)' \
+                        '--host[Host]:host:' \
+                        '--port[Port]:port:' \
+                        '--allow-origin[CORS origin]:origin:' \
+                        '--enable-opengraph[Enable OpenGraph endpoint]' \
+                        '--allow-unsafe-sqlite-writes[Allow unsafe SQLite fallback]' \
+                        '--doctor[Run doctor after setup]' \
+                        '--json[JSON output]'
+                    ;;
+                service)
+                    _arguments \
+                        '1:action:(install start stop restart status uninstall)' \
+                        '--host[Host]:host:' \
+                        '--port[Port]:port:' \
+                        '--allow-origin[CORS origin]:origin:' \
+                        '--enable-opengraph[Enable OpenGraph endpoint]' \
+                        '--allow-unsafe-sqlite-writes[Allow unsafe SQLite fallback]' \
+                        '--no-start[Do not start after install]' \
+                        '--keep-file[Keep plist when uninstalling]' \
+                        '--json[JSON output]'
                     ;;
             esac
             ;;

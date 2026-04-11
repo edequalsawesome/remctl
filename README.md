@@ -1,6 +1,6 @@
 # RemCTL
 
-Power-user CLI for Apple Reminders on macOS. Reads directly from the iCloud Reminders CoreData database for blazing-fast reads, writes via a Swift EventKit bridge for sub-100ms writes. Zero pip dependencies. Single file.
+Power-user CLI for Apple Reminders on macOS. Reads directly from the iCloud Reminders CoreData database for blazing-fast reads, writes via a Swift EventKit bridge for sub-100ms writes. Zero pip dependencies. Small Python footprint.
 
 ```
 ██████  ███████ ███    ███  ██████ ████████ ██
@@ -33,19 +33,40 @@ Power-user CLI for Apple Reminders on macOS. Reads directly from the iCloud Remi
 
 ## Installation
 
-### Quick Install
+### Recommended Install
 
 ```bash
 git clone https://github.com/viticci/remctl.git
 cd remctl
-./install.sh
+./install.sh --bootstrap
 ```
 
-This installs:
+`--bootstrap` does the full first-run setup:
+- installs `remctl`, `remctl-server`, and the shared helper modules
+- compiles `remctl-bridge` when `swiftc` is available
+- creates an API token
+- installs shell completion for your current shell when supported
+- runs `remctl doctor` so you can see any missing prerequisites immediately
+
+If you also want the background API server:
+
+```bash
+./install.sh --bootstrap --with-service
+```
+
+If you only want the binaries first:
+
+```bash
+./install.sh
+./install.sh --doctor
+```
+
+The installer places:
 - `~/bin/remctl` — Main CLI (Python)
 - `~/bin/remctl-bridge` — Write helper (compiled Swift/EventKit)
 - `~/bin/remctl-server` — REST API server (Python)
 - `~/bin/remctl_runtime.py` — Shared runtime/config helpers
+- `~/bin/remctl_serialization.py` — Shared reminder serialization helpers
 
 ### Manual Install
 
@@ -55,6 +76,7 @@ cp remctl ~/bin/remctl && chmod +x ~/bin/remctl
 
 # 1b. Copy shared runtime helpers
 cp remctl_runtime.py ~/bin/remctl_runtime.py
+cp remctl_serialization.py ~/bin/remctl_serialization.py
 
 # 2. Compile and install bridge (requires Xcode CLT)
 swiftc -O -framework EventKit -framework Foundation -o ~/bin/remctl-bridge remctl-bridge.swift
@@ -83,6 +105,14 @@ REMCTL_STORE_DIR="/custom/reminders-store" ./install.sh
 
 ### Shell Completions
 
+The recommended path is:
+
+```bash
+remctl setup --shell auto
+```
+
+You can also install a specific completion manually:
+
 ```bash
 # zsh (add to ~/.zshrc)
 eval "$(remctl completion zsh)"
@@ -93,6 +123,16 @@ eval "$(remctl completion bash)"
 # fish
 remctl completion fish | source
 ```
+
+### First-Run Checks
+
+```bash
+remctl doctor
+remctl setup --doctor
+remctl service status
+```
+
+`remctl doctor` is the first troubleshooting step. It checks the macOS prerequisites, Reminders database, CLI and bridge install, API token, shell completion, launch agent, and local API health.
 
 ## Usage
 
@@ -277,6 +317,11 @@ remctl-server                       # Default: 127.0.0.1:19876
 remctl-server --host 0.0.0.0        # Expose on all interfaces intentionally
 remctl-server --port 8080           # Custom port
 remctl-server --generate-token      # Generate new auth token
+
+# Recommended persistent setup
+./install.sh --with-service
+remctl service install
+remctl service status
 ```
 
 Server hardening defaults:
@@ -353,44 +398,59 @@ Response:
 
 ### Running as a Service
 
-To run the API server persistently via launchd:
+Use the built-in service manager instead of creating a plist manually:
 
 ```bash
-# Create a launchd plist (example)
-cat > ~/Library/LaunchAgents/com.remctl.server.plist << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.remctl.server</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/Users/YOU/bin/remctl-server</string>
-        <string>--port</string>
-        <string>19876</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-</dict>
-</plist>
-EOF
-
-launchctl load ~/Library/LaunchAgents/com.remctl.server.plist
+remctl service install
+remctl service status
+remctl service restart
+remctl service uninstall
 ```
+
+Useful service options:
+
+```bash
+remctl service install --port 8080
+remctl service install --host 0.0.0.0
+remctl service install --allow-origin "https://example.com"
+remctl service install --enable-opengraph
+```
+
+The launch agent lives at `~/Library/LaunchAgents/com.remctl.server.plist`. Logs go to `~/Library/Logs/remctl-server.log`.
+
+RemCTL writes the launch agent with the same `python3` interpreter that ran `remctl setup` or `remctl service install`, which avoids relying on launchd's limited default `PATH`.
+
+If `remctl doctor` reports `local_api` as degraded with `database: not found` while the CLI itself still works, the background server likely lacks Reminders database access. Grant Full Disk Access to the Python interpreter used by `remctl-server`, then run:
+
+```bash
+remctl service restart
+remctl doctor
+```
+
+### Public-Friendly Setup Flow
+
+For someone setting this up on a new Mac, the shortest reliable path is:
+
+```bash
+./install.sh --bootstrap
+remctl doctor
+remctl today
+```
+
+If `doctor` reports failures, it will also print the specific fix for each failed check.
 
 ## Files
 
 | File | Description | Size |
 |------|-------------|------|
-| `remctl` | Main CLI (Python 3, stdlib only) | ~1,800 lines |
+| `remctl` | Main CLI (Python 3, stdlib only) | ~2,500 lines |
 | `remctl-bridge.swift` | Swift EventKit write helper (source) | ~370 lines |
 | `remctl-bridge` | Compiled Swift binary | ~130 KB |
-| `remctl-server` | REST API server (Python 3, stdlib only) | ~1,240 lines |
+| `remctl-server` | REST API server (Python 3, stdlib only) | ~1,650 lines |
+| `remctl_runtime.py` | Shared path/config/runtime helpers | ~150 lines |
+| `remctl_serialization.py` | Shared reminder serialization helpers | ~150 lines |
 | `completions/_remctl` | zsh completion | ~100 lines |
-| `install.sh` | Installer script | ~60 lines |
+| `install.sh` | Installer/bootstrap script | ~140 lines |
 
 ## License
 
