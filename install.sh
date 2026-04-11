@@ -1,12 +1,14 @@
 #!/bin/bash
 # RemCTL Installer
-# Installs remctl, remctl-bridge, and remctl-server to ~/bin
+# Installs remctl, remctl-bridge, remctl-server, and shared runtime helpers.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BIN_DIR="$HOME/bin"
-CONFIG_DIR="$HOME/.config/remctl"
+PREFIX="${PREFIX:-$HOME}"
+BIN_DIR="${REMCTL_BIN_DIR:-$PREFIX/bin}"
+CONFIG_BASE="${XDG_CONFIG_HOME:-$HOME/.config}"
+CONFIG_DIR="${REMCTL_CONFIG_DIR:-$CONFIG_BASE/remctl}"
 
 # Colors
 RED='\033[38;2;224;47;55m'
@@ -31,6 +33,16 @@ echo -e "${BLUE}→${RESET} Installing remctl..."
 cp "$SCRIPT_DIR/remctl" "$BIN_DIR/remctl"
 chmod +x "$BIN_DIR/remctl"
 echo -e "  ${GREEN}✓${RESET} remctl → $BIN_DIR/remctl"
+
+echo -e "${BLUE}→${RESET} Installing shared runtime helpers..."
+cp "$SCRIPT_DIR/remctl_runtime.py" "$BIN_DIR/remctl_runtime.py"
+chmod 644 "$BIN_DIR/remctl_runtime.py"
+echo -e "  ${GREEN}✓${RESET} remctl_runtime.py → $BIN_DIR/remctl_runtime.py"
+
+echo -e "${BLUE}→${RESET} Installing shared serialization helpers..."
+cp "$SCRIPT_DIR/remctl_serialization.py" "$BIN_DIR/remctl_serialization.py"
+chmod 644 "$BIN_DIR/remctl_serialization.py"
+echo -e "  ${GREEN}✓${RESET} remctl_serialization.py → $BIN_DIR/remctl_serialization.py"
 
 # 2. Compile and install Swift bridge
 echo -e "${BLUE}→${RESET} Compiling remctl-bridge (Swift/EventKit)..."
@@ -74,7 +86,7 @@ fi
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     echo ""
     echo -e "${YELLOW}⚠${RESET}  $BIN_DIR is not in your PATH. Add it:"
-    echo -e "  ${DIM}echo 'export PATH=\"\$HOME/bin:\$PATH\"' >> ~/.zshrc${RESET}"
+    echo -e "  ${DIM}echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.zshrc${RESET}"
 fi
 
 echo ""

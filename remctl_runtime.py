@@ -1,0 +1,105 @@
+"""Shared runtime helpers for RemCTL scripts."""
+
+from __future__ import annotations
+
+import ipaddress
+import os
+import shutil
+import socket
+from pathlib import Path
+from urllib.parse import urlparse
+
+DEFAULT_STORE_SUBPATH = Path(
+    "Library/Group Containers/group.com.apple.reminders/Container_v1/Stores"
+)
+TRUTHY = {"1", "true", "yes", "on"}
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in TRUTHY
+
+
+def resolve_store_dir() -> Path:
+    override = os.environ.get("REMCTL_STORE_DIR")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / DEFAULT_STORE_SUBPATH
+
+
+def resolve_config_dir(app_name: str = "remctl") -> Path:
+    override = os.environ.get("REMCTL_CONFIG_DIR")
+    if override:
+        return Path(override).expanduser()
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg).expanduser() if xdg else (Path.home() / ".config")
+    return base / app_name
+
+
+def resolve_binary_path(script_path: str, binary_name: str, env_var: str) -> Path:
+    override = os.environ.get(env_var)
+    if override:
+        return Path(override).expanduser()
+
+    script_dir = Path(script_path).resolve().parent
+    candidates = [
+        script_dir / binary_name,
+        script_dir / "bin" / binary_name,
+        Path.home() / "bin" / binary_name,
+        Path.home() / ".local" / "bin" / binary_name,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    discovered = shutil.which(binary_name)
+    if discovered:
+        return Path(discovered)
+
+    return script_dir / binary_name
+
+
+def mask_secret(secret: str, visible_chars: int = 4) -> str:
+    if len(secret) <= visible_chars * 2:
+        return "*" * len(secret)
+    return f"{secret[:visible_chars]}...{secret[-visible_chars:]}"
+
+
+def is_safe_remote_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if parsed.username or parsed.password:
+        return False
+
+    hostname = parsed.hostname
+    if not hostname or hostname.endswith(".local"):
+        return False
+
+    try:
+        addrinfo = socket.getaddrinfo(
+            hostname,
+            parsed.port or (443 if parsed.scheme == "https" else 80),
+            type=socket.SOCK_STREAM,
+        )
+    except socket.gaierror:
+        return False
+
+    for _, _, _, _, sockaddr in addrinfo:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            return False
+    return True

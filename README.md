@@ -45,6 +45,7 @@ This installs:
 - `~/bin/remctl` — Main CLI (Python)
 - `~/bin/remctl-bridge` — Write helper (compiled Swift/EventKit)
 - `~/bin/remctl-server` — REST API server (Python)
+- `~/bin/remctl_runtime.py` — Shared runtime/config helpers
 
 ### Manual Install
 
@@ -52,11 +53,25 @@ This installs:
 # 1. Copy CLI
 cp remctl ~/bin/remctl && chmod +x ~/bin/remctl
 
+# 1b. Copy shared runtime helpers
+cp remctl_runtime.py ~/bin/remctl_runtime.py
+
 # 2. Compile and install bridge (requires Xcode CLT)
 swiftc -O -framework EventKit -framework Foundation -o ~/bin/remctl-bridge remctl-bridge.swift
 
 # 3. Copy API server
 cp remctl-server ~/bin/remctl-server && chmod +x ~/bin/remctl-server
+```
+
+### Installer Overrides
+
+The installer no longer assumes a fixed `~/bin` or `~/.config` setup. Override as needed:
+
+```bash
+PREFIX="$HOME/.local" ./install.sh
+REMCTL_BIN_DIR="$HOME/.local/bin" ./install.sh
+REMCTL_CONFIG_DIR="$HOME/.config/remctl" ./install.sh
+REMCTL_STORE_DIR="/custom/reminders-store" ./install.sh
 ```
 
 ### Requirements
@@ -245,6 +260,12 @@ RemCTL uses a hybrid write path:
 
 The bridge is detected automatically at `~/bin/remctl-bridge`.
 
+For custom layouts, RemCTL also honors:
+- `REMCTL_BRIDGE_PATH`
+- `REMCTL_PATH`
+- `REMCTL_STORE_DIR`
+- `REMCTL_CONFIG_DIR`
+
 ## REST API Server
 
 RemCTL includes a built-in REST API server for remote access and future Android sync.
@@ -252,10 +273,17 @@ RemCTL includes a built-in REST API server for remote access and future Android 
 ### Starting the Server
 
 ```bash
-remctl-server                       # Default port 19876
+remctl-server                       # Default: 127.0.0.1:19876
+remctl-server --host 0.0.0.0        # Expose on all interfaces intentionally
 remctl-server --port 8080           # Custom port
 remctl-server --generate-token      # Generate new auth token
 ```
+
+Server hardening defaults:
+- Binds to `127.0.0.1` by default instead of `0.0.0.0`
+- CORS is disabled unless `--allow-origin` is set
+- `/api/v1/og` is disabled unless `--enable-opengraph` is set
+- Direct SQLite reminder creation fallback is disabled unless `--allow-unsafe-sqlite-writes` is set
 
 ### Authentication
 

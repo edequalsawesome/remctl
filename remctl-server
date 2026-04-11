@@ -23,25 +23,40 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from pathlib import Path
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
-from urllib.request import urlopen, Request
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+from remctl_runtime import (
+    env_bool,
+    is_safe_remote_url,
+    mask_secret,
+    resolve_binary_path,
+    resolve_config_dir,
+    resolve_store_dir,
+)
+from remctl_serialization import (
+    preload_extras as shared_preload_extras,
+    serialize_reminder,
+    serialize_reminders,
+)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
 VERSION = "1.0.0"
+DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 19876
+MAX_REQUEST_BODY_BYTES = 1024 * 1024
 APPLE_EPOCH = 978307200
-HOME = Path.home()
-STORE_DIR = HOME / "Library/Group Containers/group.com.apple.reminders/Container_v1/Stores"
-BRIDGE_PATH = HOME / "bin" / "remctl-bridge"
-REMCTL_PATH = HOME / "bin" / "remctl"
-TOKEN_DIR = HOME / ".config" / "remctl"
+STORE_DIR = resolve_store_dir()
+BRIDGE_PATH = resolve_binary_path(__file__, "remctl-bridge", "REMCTL_BRIDGE_PATH")
+REMCTL_PATH = resolve_binary_path(__file__, "remctl", "REMCTL_PATH")
+TOKEN_DIR = resolve_config_dir("remctl")
 TOKEN_FILE = TOKEN_DIR / "api-token"
 
 PRI_NAME = {0: "none", 1: "high", 5: "medium", 9: "low"}
 PRI_FROM_NAME = {"none": 0, "high": 1, "medium": 5, "low": 9}
+ALLOW_UNSAFE_SQLITE_WRITES = env_bool("REMCTL_ALLOW_UNSAFE_SQLITE_WRITES", False)
 
 _REM_COLS = """r.Z_PK, r.ZTITLE, r.ZNOTES, r.ZCOMPLETED, r.ZFLAGGED, r.ZPRIORITY,
     r.ZDUEDATE, r.ZALLDAY, r.ZCOMPLETIONDATE, r.ZCREATIONDATE,
@@ -328,27 +343,7 @@ def q_stats(db):
 
 
 def preload_extras(db, pks):
-    """Batch-load subtask counts and hashtags to avoid N+1 queries."""
-    if not pks:
-        return {}, {}
-    ph = ",".join("?" * len(pks))
-    sc_rows = db.execute(
-        f"SELECT ZPARENTREMINDER, COUNT(*) FROM ZREMCDREMINDER "
-        f"WHERE ZPARENTREMINDER IN ({ph}) AND ZMARKEDFORDELETION = 0 "
-        f"AND ZCOMPLETED = 0 GROUP BY ZPARENTREMINDER",
-        pks,
-    ).fetchall()
-    sc = {r[0]: r[1] for r in sc_rows}
-    ht_rows = db.execute(
-        f"SELECT o.ZREMINDER3, h.ZNAME FROM ZREMCDOBJECT o "
-        f"JOIN ZREMCDHASHTAGLABEL h ON o.ZHASHTAGLABEL = h.Z_PK "
-        f"WHERE o.ZREMINDER3 IN ({ph})",
-        pks,
-    ).fetchall()
-    ht = {}
-    for r in ht_rows:
-        ht.setdefault(r[0], []).append(r[1])
-    return sc, ht
+    return shared_preload_extras(db, pks)
 
 
 # ── Serialization ────────────────────────────────────────────────────────────
@@ -368,62 +363,34 @@ def q_rich_link(db, pk):
 
 
 def reminder_to_dict(r, db=None, section=None, _sc=None, _ht=None):
-    """Convert a reminder row to JSON-serializable dict."""
-    sc = (_sc or {}).get(r["Z_PK"], q_subtask_count(db, r["Z_PK"]) if db else 0)
-    tags = (_ht or {}).get(
-        r["Z_PK"],
-        [t["ZNAME"] for t in q_hashtags(db, r["Z_PK"])] if db else [],
+    return serialize_reminder(
+        r,
+        ts=ts,
+        priority_names=PRI_NAME,
+        db=db,
+        section=section,
+        subtask_counts=_sc,
+        hashtags=_ht,
+        rich_link_resolver=q_rich_link,
+        fallback_subtask_count=q_subtask_count,
+        fallback_hashtags=lambda inner_db, pk: [t["ZNAME"] for t in q_hashtags(inner_db, pk)],
     )
-    d = {
-        "id": r["Z_PK"],
-        "title": r["ZTITLE"],
-        "list": r["list_name"],
-        "completed": bool(r["ZCOMPLETED"]),
-        "flagged": bool(r["ZFLAGGED"]),
-        "priority": PRI_NAME.get(r["ZPRIORITY"] or 0, "none"),
-        "subtaskCount": sc,
-        "isSubtask": bool(r["ZPARENTREMINDER"]),
-    }
-    if section:
-        d["section"] = section
-    if r["ZNOTES"]:
-        d["notes"] = r["ZNOTES"]
-    # Check ZICSURL first, then look up rich link from ZREMCDOBJECT
-    url = r["ZICSURL"]
-    if not url and db:
-        url = q_rich_link(db, r["Z_PK"])
-    if url:
-        d["url"] = url
-    if r["ZDUEDATE"]:
-        d["dueDate"] = ts(r["ZDUEDATE"]).isoformat()
-    if r["ZCREATIONDATE"]:
-        d["createdDate"] = ts(r["ZCREATIONDATE"]).isoformat()
-    if r["ZCOMPLETIONDATE"]:
-        d["completionDate"] = ts(r["ZCOMPLETIONDATE"]).isoformat()
-    if r["ZPARENTREMINDER"]:
-        d["parentID"] = r["ZPARENTREMINDER"]
-    if tags:
-        d["tags"] = tags
-    if r["ZCKIDENTIFIER"]:
-        d["deepLink"] = f"x-apple-reminderkit://REMCDReminder/{r['ZCKIDENTIFIER']}"
-    return d
 
 
 def reminders_to_list(db, rows, with_sections_for_list_pk=None):
-    """Convert multiple reminder rows, optionally resolving section membership."""
-    pks = [r["Z_PK"] for r in rows]
-    sc, ht = preload_extras(db, pks)
     memberships = {}
     if with_sections_for_list_pk is not None:
         memberships = q_section_memberships(db, with_sections_for_list_pk)
-    return [
-        reminder_to_dict(
-            r, db,
-            section=memberships.get(r["ZCKIDENTIFIER"]),
-            _sc=sc, _ht=ht,
-        )
-        for r in rows
-    ]
+    return serialize_reminders(
+        rows,
+        ts=ts,
+        priority_names=PRI_NAME,
+        db=db,
+        memberships=memberships,
+        rich_link_resolver=q_rich_link,
+        fallback_subtask_count=q_subtask_count,
+        fallback_hashtags=lambda inner_db, pk: [t["ZNAME"] for t in q_hashtags(inner_db, pk)],
+    )
 
 
 # ── Write Operations ─────────────────────────────────────────────────────────
@@ -730,12 +697,14 @@ def bridge_call(action_data, original_pk=None):
         except (subprocess.TimeoutExpired, json.JSONDecodeError):
             sys.stderr.write("[bridge_call] Bridge timed out or bad JSON, trying fallbacks\n")
 
-    # Direct SQLite write for creates (bypasses broken bridge/AppleScript)
-    if action == "create":
+    # Direct SQLite writes are dangerous and disabled by default.
+    if action == "create" and ALLOW_UNSAFE_SQLITE_WRITES:
         result = sqlite_create_reminder(action_data)
         if isinstance(result, dict) and result.get("ok"):
             return result
         sys.stderr.write(f"[bridge_call] SQLite create failed: {result}\n")
+    elif action == "create":
+        sys.stderr.write("[bridge_call] Unsafe SQLite fallback disabled; skipping direct DB writes\n")
 
     # Last resort: remctl CLI fallback
     return remctl_cli_fallback(action_data)
@@ -830,6 +799,11 @@ def remctl_cli_fallback(action_data):
 _og_cache = {}          # url -> (data_dict, expiry_time)
 _OG_CACHE_TTL = 3600    # 1 hour
 
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def fetch_og_metadata(url):
     """Fetch OpenGraph metadata from a URL. Returns dict or None."""
     now = time.monotonic()
@@ -839,12 +813,18 @@ def fetch_og_metadata(url):
     if cached and cached[1] > now:
         return cached[0]
 
+    if not is_safe_remote_url(url):
+        return None
+
     try:
         req = Request(url, headers={
             "User-Agent": "RemCTL/1.0 (OpenGraph Preview)",
             "Accept": "text/html,application/xhtml+xml",
         })
-        with urlopen(req, timeout=5) as resp:
+        opener = build_opener(_NoRedirectHandler)
+        with opener.open(req, timeout=5) as resp:
+            if not is_safe_remote_url(resp.geturl()):
+                return None
             content_type = resp.headers.get("Content-Type", "")
             if "html" not in content_type.lower() and "xml" not in content_type.lower():
                 return None
@@ -927,7 +907,9 @@ class RemctlHandler(BaseHTTPRequestHandler):
     # ── Response helpers ─────────────────────────────────────────────────
 
     def _cors_headers(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
+        if not self.server.allow_origin:
+            return
+        self.send_header("Access-Control-Allow-Origin", self.server.allow_origin)
         self.send_header(
             "Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS"
         )
@@ -950,15 +932,30 @@ class RemctlHandler(BaseHTTPRequestHandler):
     def _error(self, message, status=400):
         self._send_json({"ok": False, "error": message}, status)
 
+    def _internal_error(self, exc, method, path, t0):
+        sys.stderr.write(
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"{method} {path} 500 internal error: {exc}\n"
+        )
+        self._error("Internal server error", 500)
+        self._log_timing(method, path, 500, t0)
+
     def _read_body(self):
-        length = int(self.headers.get("Content-Length", 0))
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            return None, 400, "Invalid Content-Length header"
+        if length < 0:
+            return None, 400, "Invalid Content-Length header"
+        if length > MAX_REQUEST_BODY_BYTES:
+            return None, 413, f"Request body too large (max {MAX_REQUEST_BODY_BYTES} bytes)"
         if length == 0:
-            return {}
+            return {}, None, None
         raw = self.rfile.read(length)
         try:
-            return json.loads(raw)
+            return json.loads(raw), None, None
         except json.JSONDecodeError:
-            return None
+            return None, 400, "Invalid JSON body"
 
     # ── Auth ─────────────────────────────────────────────────────────────
 
@@ -969,7 +966,7 @@ class RemctlHandler(BaseHTTPRequestHandler):
             self._error("Missing Authorization: Bearer <token> header", 401)
             return False
         token = auth[7:].strip()
-        if token != self.server.api_token:
+        if not secrets.compare_digest(token, self.server.api_token):
             self._error("Invalid token", 401)
             return False
         return True
@@ -1036,8 +1033,7 @@ class RemctlHandler(BaseHTTPRequestHandler):
             self._error(str(e), 503)
             self._log_timing("GET", path, 503, t0)
         except Exception as e:
-            self._error(f"Internal error: {e}", 500)
-            self._log_timing("GET", path, 500, t0)
+            self._internal_error(e, "GET", path, t0)
 
     def do_POST(self):
         t0 = time.monotonic()
@@ -1047,10 +1043,10 @@ class RemctlHandler(BaseHTTPRequestHandler):
             self._log_timing("POST", path, 401, t0)
             return
 
-        body = self._read_body()
-        if body is None:
-            self._error("Invalid JSON body", 400)
-            self._log_timing("POST", path, 400, t0)
+        body, error_status, error_message = self._read_body()
+        if error_status is not None:
+            self._error(error_message, error_status)
+            self._log_timing("POST", path, error_status, t0)
             return
 
         try:
@@ -1059,8 +1055,7 @@ class RemctlHandler(BaseHTTPRequestHandler):
             self._error(str(e), 503)
             self._log_timing("POST", path, 503, t0)
         except Exception as e:
-            self._error(f"Internal error: {e}", 500)
-            self._log_timing("POST", path, 500, t0)
+            self._internal_error(e, "POST", path, t0)
 
     def do_PATCH(self):
         t0 = time.monotonic()
@@ -1070,10 +1065,10 @@ class RemctlHandler(BaseHTTPRequestHandler):
             self._log_timing("PATCH", path, 401, t0)
             return
 
-        body = self._read_body()
-        if body is None:
-            self._error("Invalid JSON body", 400)
-            self._log_timing("PATCH", path, 400, t0)
+        body, error_status, error_message = self._read_body()
+        if error_status is not None:
+            self._error(error_message, error_status)
+            self._log_timing("PATCH", path, error_status, t0)
             return
 
         try:
@@ -1082,8 +1077,7 @@ class RemctlHandler(BaseHTTPRequestHandler):
             self._error(str(e), 503)
             self._log_timing("PATCH", path, 503, t0)
         except Exception as e:
-            self._error(f"Internal error: {e}", 500)
-            self._log_timing("PATCH", path, 500, t0)
+            self._internal_error(e, "PATCH", path, t0)
 
     def do_DELETE(self):
         t0 = time.monotonic()
@@ -1099,8 +1093,7 @@ class RemctlHandler(BaseHTTPRequestHandler):
             self._error(str(e), 503)
             self._log_timing("DELETE", path, 503, t0)
         except Exception as e:
-            self._error(f"Internal error: {e}", 500)
-            self._log_timing("DELETE", path, 500, t0)
+            self._internal_error(e, "DELETE", path, t0)
 
     def _log_timing(self, method, path, status, t0):
         ms = (time.monotonic() - t0) * 1000
@@ -1115,19 +1108,30 @@ class RemctlHandler(BaseHTTPRequestHandler):
         # GET /api/v1/lists
         if path == "/api/v1/lists":
             rows = q_lists(db)
+            counts = {
+                row["ZLIST"]: row["active_count"]
+                for row in db.execute(
+                    "SELECT ZLIST, COUNT(*) AS active_count "
+                    "FROM ZREMCDREMINDER "
+                    "WHERE ZMARKEDFORDELETION = 0 AND ZCOMPLETED = 0 AND ZACCOUNT IS NOT NULL "
+                    "GROUP BY ZLIST"
+                ).fetchall()
+            }
+            section_counts = {
+                row["ZLIST"]: row["section_count"]
+                for row in db.execute(
+                    "SELECT ZLIST, COUNT(*) AS section_count "
+                    "FROM ZREMCDBASESECTION "
+                    "WHERE ZMARKEDFORDELETION = 0 GROUP BY ZLIST"
+                ).fetchall()
+            }
             data = []
             for r in rows:
-                secs = q_sections(db, r["Z_PK"])
-                count = db.execute(
-                    "SELECT COUNT(*) FROM ZREMCDREMINDER "
-                    "WHERE ZLIST = ? AND ZMARKEDFORDELETION = 0 AND ZCOMPLETED = 0",
-                    (r["Z_PK"],),
-                ).fetchone()[0]
                 entry = {
                     "id": r["Z_PK"],
                     "name": r["ZNAME"],
-                    "activeCount": count,
-                    "sectionCount": len(secs),
+                    "activeCount": counts.get(r["Z_PK"], 0),
+                    "sectionCount": section_counts.get(r["Z_PK"], 0),
                 }
                 # Parse emoji icon from ZBADGEEMBLEM JSON
                 emblem = r["ZBADGEEMBLEM"]
@@ -1250,7 +1254,13 @@ class RemctlHandler(BaseHTTPRequestHandler):
 
         # GET /api/v1/upcoming
         if path == "/api/v1/upcoming":
-            days = int(qs.get("days", ["7"])[0])
+            try:
+                days = int(qs.get("days", ["7"])[0])
+            except ValueError:
+                self._error("Invalid 'days' query parameter", 400)
+                self._log_timing("GET", path, 400, t0)
+                db.close()
+                return
             days = max(1, min(days, 90))
             items = q_upcoming(db, days=days)
             data = reminders_to_list(db, items)
@@ -1328,9 +1338,17 @@ class RemctlHandler(BaseHTTPRequestHandler):
 
         # GET /api/v1/og?url=... — OpenGraph metadata (no DB needed)
         if path == "/api/v1/og":
+            if not self.server.enable_opengraph:
+                self._error("OpenGraph endpoint disabled", 403)
+                self._log_timing("GET", path, 403, t0)
+                return
             target_url = qs.get("url", [""])[0]
             if not target_url:
                 self._error("Missing 'url' query parameter", 400)
+                self._log_timing("GET", path, 400, t0)
+                return
+            if not is_safe_remote_url(target_url):
+                self._error("Refusing to fetch non-public or unsupported URL", 400)
                 self._log_timing("GET", path, 400, t0)
                 return
             data = fetch_og_metadata(target_url)
@@ -1582,29 +1600,36 @@ class RemctlHandler(BaseHTTPRequestHandler):
 
 # ── Server ───────────────────────────────────────────────────────────────────
 
-class RemctlServer(HTTPServer):
-    """HTTPServer subclass that holds the API token."""
+class RemctlServer(ThreadingHTTPServer):
+    """Threading HTTP server that holds runtime configuration."""
 
-    def __init__(self, addr, handler, api_token):
+    daemon_threads = True
+
+    def __init__(self, addr, handler, api_token, allow_origin=None, enable_opengraph=False):
         self.api_token = api_token
+        self.allow_origin = allow_origin
+        self.enable_opengraph = enable_opengraph
         super().__init__(addr, handler)
 
 
-def run_server(port, token, token_source):
+def run_server(host, port, token, token_source, allow_origin=None, enable_opengraph=False):
     """Start the HTTP server with graceful shutdown."""
-    server = RemctlServer(("0.0.0.0", port), RemctlHandler, token)
-
-    # Mask middle of token for display
-    if len(token) > 8:
-        masked = token[:4] + "..." + token[-4:]
-    else:
-        masked = "****"
+    server = RemctlServer(
+        (host, port),
+        RemctlHandler,
+        token,
+        allow_origin=allow_origin,
+        enable_opengraph=enable_opengraph,
+    )
 
     print(f"""
 RemCTL API Server v{VERSION}
-Listening on http://0.0.0.0:{port}
+Listening on http://{host}:{port}
 Auth: Bearer token required
-Token: {masked}  (from {token_source})
+Token: {mask_secret(token)}  (from {token_source})
+CORS: {'disabled' if not allow_origin else allow_origin}
+OpenGraph: {'enabled' if enable_opengraph else 'disabled'}
+Unsafe SQLite writes: {'enabled' if ALLOW_UNSAFE_SQLITE_WRITES else 'disabled'}
 
 Database: {find_main_db() or 'NOT FOUND'}
 Bridge:   {BRIDGE_PATH} ({'available' if BRIDGE_PATH.exists() else 'not found, using remctl CLI fallback'})
@@ -1631,9 +1656,15 @@ Bridge:   {BRIDGE_PATH} ({'available' if BRIDGE_PATH.exists() else 'not found, u
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def main():
+    global ALLOW_UNSAFE_SQLITE_WRITES
     parser = argparse.ArgumentParser(
         prog="remctl-server",
         description="REST API server for iCloud Reminders (via remctl)",
+    )
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("REMCTL_HOST", DEFAULT_HOST),
+        help=f"Bind host (default: {DEFAULT_HOST})",
     )
     parser.add_argument(
         "--port", type=int, default=DEFAULT_PORT,
@@ -1647,8 +1678,26 @@ def main():
         "--generate-token", action="store_true",
         help="Generate a new token, save it, and start server",
     )
+    parser.add_argument(
+        "--allow-origin",
+        default=os.environ.get("REMCTL_ALLOW_ORIGIN"),
+        help="Set Access-Control-Allow-Origin. Disabled by default.",
+    )
+    parser.add_argument(
+        "--enable-opengraph",
+        action="store_true",
+        default=env_bool("REMCTL_ENABLE_OPENGRAPH", False),
+        help="Enable the /api/v1/og endpoint. Disabled by default for safety.",
+    )
+    parser.add_argument(
+        "--allow-unsafe-sqlite-writes",
+        action="store_true",
+        default=ALLOW_UNSAFE_SQLITE_WRITES,
+        help="Allow direct SQLite reminder creation fallback. Unsafe and disabled by default.",
+    )
 
     args = parser.parse_args()
+    ALLOW_UNSAFE_SQLITE_WRITES = args.allow_unsafe_sqlite_writes
 
     if args.generate_token:
         token = secrets.token_urlsafe(32)
@@ -1661,7 +1710,14 @@ def main():
     else:
         token, token_source = load_or_create_token(args.token)
 
-    run_server(args.port, token, token_source)
+    run_server(
+        args.host,
+        args.port,
+        token,
+        token_source,
+        allow_origin=args.allow_origin,
+        enable_opengraph=args.enable_opengraph,
+    )
 
 
 if __name__ == "__main__":

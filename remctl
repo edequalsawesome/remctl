@@ -6,9 +6,16 @@ attachments, completion status, list colors). Writes via remctl-bridge (EventKit
 with AppleScript fallback. Single file, zero dependencies, no build step.
 """
 
-import argparse, csv, io, json, os, plistlib, re, shutil, sqlite3, subprocess, sys
+import argparse, csv, io, json, os, plistlib, re, sqlite3, subprocess, sys
 from datetime import datetime, timedelta
 from pathlib import Path
+
+from remctl_runtime import resolve_binary_path, resolve_store_dir
+from remctl_serialization import (
+    preload_extras as shared_preload_extras,
+    serialize_reminder,
+    serialize_reminders,
+)
 
 try:
     import parsedatetime as _pdt
@@ -19,9 +26,8 @@ except ImportError:
 VERSION = "3.0.0"
 
 APPLE_EPOCH = 978307200
-HOME = Path.home()
-STORE_DIR = HOME / "Library/Group Containers/group.com.apple.reminders/Container_v1/Stores"
-BRIDGE_PATH = HOME / "bin" / "remctl-bridge"
+STORE_DIR = resolve_store_dir()
+BRIDGE_PATH = resolve_binary_path(__file__, "remctl-bridge", "REMCTL_BRIDGE_PATH")
 
 # ── Color System ─────────────────────────────────────────────────────────────
 
@@ -343,23 +349,7 @@ def fmt_due(v, colored=True):
     return f" ({dt.strftime('%Y-%m-%d')})"
 
 def preload_extras(db, pks):
-    """Batch-load subtask counts and hashtags to avoid N+1 queries."""
-    if not pks: return {}, {}
-    ph = ",".join("?" * len(pks))
-    sc_rows = db.execute(
-        f"SELECT ZPARENTREMINDER, COUNT(*) FROM ZREMCDREMINDER "
-        f"WHERE ZPARENTREMINDER IN ({ph}) AND ZMARKEDFORDELETION = 0 AND ZCOMPLETED = 0 "
-        f"GROUP BY ZPARENTREMINDER", pks
-    ).fetchall()
-    sc = {r[0]: r[1] for r in sc_rows}
-    ht_rows = db.execute(
-        f"SELECT o.ZREMINDER3, h.ZNAME FROM ZREMCDOBJECT o JOIN ZREMCDHASHTAGLABEL h "
-        f"ON o.ZHASHTAGLABEL = h.Z_PK WHERE o.ZREMINDER3 IN ({ph})", pks
-    ).fetchall()
-    ht = {}
-    for r in ht_rows:
-        ht.setdefault(r[0], []).append(r[1])
-    return sc, ht
+    return shared_preload_extras(db, pks)
 
 def _color_priority(pri_val):
     """Color a priority marker based on level."""
@@ -402,25 +392,28 @@ def fmt(r, db=None, verbose=False, indent="", _sc=None, _ht=None):
     return "\n".join(parts)
 
 def to_dict(r, db=None, section=None, _sc=None, _ht=None):
-    sc = (_sc or {}).get(r["Z_PK"], q_subtask_count(db, r["Z_PK"]) if db else 0)
-    tags = (_ht or {}).get(r["Z_PK"], [t["ZNAME"] for t in q_hashtags(db, r["Z_PK"])] if db else [])
-    d = {
-        "id": r["Z_PK"], "title": r["ZTITLE"], "list": r["list_name"],
-        "completed": bool(r["ZCOMPLETED"]), "flagged": bool(r["ZFLAGGED"]),
-        "priority": PRI_NAME.get(r["ZPRIORITY"] or 0, "none"),
-        "subtaskCount": sc, "isSubtask": bool(r["ZPARENTREMINDER"])
-    }
-    if section: d["section"] = section
-    if r["ZNOTES"]: d["notes"] = r["ZNOTES"]
-    if r["ZICSURL"]: d["url"] = r["ZICSURL"]
-    if r["ZDUEDATE"]: d["dueDate"] = ts(r["ZDUEDATE"]).isoformat()
-    if r["ZCREATIONDATE"]: d["createdDate"] = ts(r["ZCREATIONDATE"]).isoformat()
-    if r["ZCOMPLETIONDATE"]: d["completionDate"] = ts(r["ZCOMPLETIONDATE"]).isoformat()
-    if r["ZPARENTREMINDER"]: d["parentID"] = r["ZPARENTREMINDER"]
-    if tags: d["tags"] = tags
-    if r["ZCKIDENTIFIER"]:
-        d["deepLink"] = f"x-apple-reminderkit://REMCDReminder/{r['ZCKIDENTIFIER']}"
-    return d
+    return serialize_reminder(
+        r,
+        ts=ts,
+        priority_names=PRI_NAME,
+        db=db,
+        section=section,
+        subtask_counts=_sc,
+        hashtags=_ht,
+        fallback_subtask_count=q_subtask_count,
+        fallback_hashtags=lambda inner_db, pk: [t["ZNAME"] for t in q_hashtags(inner_db, pk)],
+    )
+
+def reminders_to_dicts(items, db=None, memberships=None):
+    return serialize_reminders(
+        items,
+        ts=ts,
+        priority_names=PRI_NAME,
+        db=db,
+        memberships=memberships,
+        fallback_subtask_count=q_subtask_count,
+        fallback_hashtags=lambda inner_db, pk: [t["ZNAME"] for t in q_hashtags(inner_db, pk)],
+    )
 
 # ── Table Format ─────────────────────────────────────────────────────────────
 
@@ -678,20 +671,24 @@ def parse_recurrence(spec):
     return result
 
 def parse_alarm(spec):
-    """Parse alarm spec like '15m', '1h', '1d', or ISO datetime."""
+    """Normalize alarm spec for the Swift bridge.
+
+    Relative alarms are converted to the bridge format (`-15m`, `-1h`, `-1d`).
+    Absolute alarms are returned as ISO-like strings the bridge already accepts.
+    """
     if not spec: return None
     sl = spec.lower().strip()
     m = re.match(r'^(\d+)(m|min|h|hr|d)$', sl)
     if m:
         n, unit = int(m.group(1)), m.group(2)
-        if unit in ("m", "min"): return {"minutes_before": n}
-        if unit in ("h", "hr"): return {"minutes_before": n * 60}
-        if unit == "d": return {"minutes_before": n * 1440}
+        if unit in ("m", "min"): return f"-{n}m"
+        if unit in ("h", "hr"): return f"-{n}h"
+        if unit == "d": return f"-{n}d"
     # Try ISO datetime
     for f in ("%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S"):
         try:
             dt = datetime.strptime(spec.strip(), f)
-            return {"absolute": dt.isoformat()}
+            return dt.isoformat()
         except ValueError:
             pass
     return None
@@ -1014,8 +1011,10 @@ def cmd_edit(a):
 def cmd_search(a):
     db = open_db()
     items = q_search(db, a.query, completed=a.completed)
+    pks = [i["Z_PK"] for i in items]
+    sc, ht = preload_extras(db, pks)
     if a.json:
-        print(json.dumps([to_dict(i, db) for i in items], indent=2))
+        print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht) for i in items], indent=2))
         return
     if getattr(a, 'format', None) == 'table':
         print(fmt_table(reminders_to_table_data(items, db)))
@@ -1025,14 +1024,16 @@ def cmd_search(a):
         return
     print(f"Search: {C.bold(a.query)}")
     for i in items:
-        print(fmt(i, db, verbose=a.verbose))
+        print(fmt(i, db, verbose=a.verbose, _sc=sc, _ht=ht))
     print(f"\n{len(items)} result{'s' if len(items) != 1 else ''}")
 
 def cmd_today(a):
     db = open_db()
     items = q_due_today(db, include_overdue=not a.no_overdue)
+    pks = [i["Z_PK"] for i in items]
+    sc, ht = preload_extras(db, pks)
     if a.json:
-        print(json.dumps([to_dict(i, db) for i in items], indent=2))
+        print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht) for i in items], indent=2))
         return
     if getattr(a, 'format', None) == 'table':
         print(fmt_table(reminders_to_table_data(items, db)))
@@ -1047,19 +1048,21 @@ def cmd_today(a):
     if overdue:
         print(C.red(f"Overdue ({len(overdue)}):"))
         for i in overdue:
-            print(fmt(i, db, indent="  "))
+            print(fmt(i, db, indent="  ", _sc=sc, _ht=ht))
         print()
     if due:
         print(C.bold(f"Due Today ({len(due)}):"))
         for i in due:
-            print(fmt(i, db, indent="  "))
+            print(fmt(i, db, indent="  ", _sc=sc, _ht=ht))
     print(f"\n{len(items)} total")
 
 def cmd_flagged(a):
     db = open_db()
     items = q_flagged(db)
+    pks = [i["Z_PK"] for i in items]
+    sc, ht = preload_extras(db, pks)
     if a.json:
-        print(json.dumps([to_dict(i, db) for i in items], indent=2))
+        print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht) for i in items], indent=2))
         return
     if getattr(a, 'format', None) == 'table':
         print(fmt_table(reminders_to_table_data(items, db)))
@@ -1069,7 +1072,7 @@ def cmd_flagged(a):
         return
     print(C.bold("Flagged:"))
     for i in items:
-        print(fmt(i, db, verbose=a.verbose, indent="  "))
+        print(fmt(i, db, verbose=a.verbose, indent="  ", _sc=sc, _ht=ht))
     print(f"\n{len(items)} flagged")
 
 def cmd_tags(a):
@@ -1095,9 +1098,11 @@ def cmd_subtasks(a):
         print(f"Error: #{a.id} not found", file=sys.stderr)
         sys.exit(1)
     subs = q_reminders(db, parent_pk=a.id, completed=True)
+    sub_pks = [s["Z_PK"] for s in subs]
+    sc, ht = preload_extras(db, sub_pks)
     if a.json:
         d = to_dict(parent, db)
-        d["subtasks"] = [to_dict(s, db) for s in subs]
+        d["subtasks"] = [to_dict(s, db, _sc=sc, _ht=ht) for s in subs]
         print(json.dumps(d, indent=2))
         return
     print(f"Parent: {parent['ZTITLE']}")
@@ -1105,7 +1110,7 @@ def cmd_subtasks(a):
         print("  No subtasks")
     else:
         for s in subs:
-            print(fmt(s, db, indent="  "))
+            print(fmt(s, db, indent="  ", _sc=sc, _ht=ht))
         print(f"\n{len(subs)} subtask{'s' if len(subs) != 1 else ''}")
 
 def cmd_info(a):
@@ -1123,7 +1128,8 @@ def cmd_info(a):
         sec = memberships.get(r["ZCKIDENTIFIER"])
     if a.json:
         d = to_dict(r, db, section=sec)
-        if subs: d["subtasks"] = [to_dict(s, db) for s in subs]
+        if subs:
+            d["subtasks"] = reminders_to_dicts(subs, db)
         if atts: d["attachments"] = [{"filename": a2["ZFILENAME"], "type": a2["ZATTACHMENTTYPERAWVALUE"]} for a2 in atts]
         print(json.dumps(d, indent=2))
         return
@@ -1158,8 +1164,10 @@ def cmd_info(a):
         print(f"  Parent:    #{pp}" + (f" ({p['ZTITLE']})" if p else ""))
     if subs:
         print(f"  Subtasks ({len(subs)}):")
+        sub_pks = [s["Z_PK"] for s in subs]
+        sc, ht = preload_extras(db, sub_pks)
         for s in subs:
-            print(fmt(s, db, indent="    "))
+            print(fmt(s, db, indent="    ", _sc=sc, _ht=ht))
     if atts:
         print(f"  Attachments ({len(atts)}):")
         for a2 in atts:
@@ -1342,8 +1350,10 @@ def cmd_upcoming(a):
     db = open_db()
     days = a.days if hasattr(a, 'days') and a.days else 7
     items = q_upcoming(db, days=days)
+    pks = [i["Z_PK"] for i in items]
+    sc, ht = preload_extras(db, pks)
     if a.json:
-        print(json.dumps([to_dict(i, db) for i in items], indent=2))
+        print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht) for i in items], indent=2))
         return
     if getattr(a, 'format', None) == 'table':
         print(fmt_table(reminders_to_table_data(items, db)))
@@ -1367,14 +1377,16 @@ def cmd_upcoming(a):
     for (day_key, day_label), day_items in sorted(groups.items()):
         print(f"\n  {C.bold(day_label)}:")
         for i in day_items:
-            print(fmt(i, db, indent="    "))
+            print(fmt(i, db, indent="    ", _sc=sc, _ht=ht))
     print(f"\n{len(items)} upcoming")
 
 def cmd_overdue(a):
     db = open_db()
     items = q_overdue(db)
+    pks = [i["Z_PK"] for i in items]
+    sc, ht = preload_extras(db, pks)
     if a.json:
-        print(json.dumps([to_dict(i, db) for i in items], indent=2))
+        print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht) for i in items], indent=2))
         return
     if getattr(a, 'format', None) == 'table':
         print(fmt_table(reminders_to_table_data(items, db)))
@@ -1384,14 +1396,14 @@ def cmd_overdue(a):
         return
     print(C.red(C.bold(f"Overdue ({len(items)}):")))
     for i in items:
-        print(fmt(i, db, verbose=getattr(a, 'verbose', False), indent="  "))
+        print(fmt(i, db, verbose=getattr(a, 'verbose', False), indent="  ", _sc=sc, _ht=ht))
     print(f"\n{len(items)} overdue")
 
 def cmd_list_create(a):
     if not bridge_available():
         print("Error: remctl-bridge required for list management", file=sys.stderr)
         sys.exit(1)
-    data = {"action": "create_list", "name": a.name}
+    data = {"action": "create_list", "title": a.name}
     if hasattr(a, 'color') and a.color:
         data["color"] = a.color
     result = bridge_call(data)
@@ -1401,14 +1413,15 @@ def cmd_list_create(a):
         else:
             print(f"Created list: {a.name}")
     else:
-        print(f"Error: Failed to create list '{a.name}'", file=sys.stderr)
+        message = result.get("message") if isinstance(result, dict) else None
+        print(f"Error: Failed to create list '{a.name}'" + (f": {message}" if message else ""), file=sys.stderr)
         sys.exit(1)
 
 def cmd_list_rename(a):
     if not bridge_available():
         print("Error: remctl-bridge required for list management", file=sys.stderr)
         sys.exit(1)
-    data = {"action": "rename_list", "name": a.name, "new_name": a.new_name}
+    data = {"action": "rename_list", "title": a.name, "newTitle": a.new_name}
     result = bridge_call(data)
     if result and result.get("status") == "renamed":
         if a.json:
@@ -1416,7 +1429,8 @@ def cmd_list_rename(a):
         else:
             print(f"Renamed: {a.name} -> {a.new_name}")
     else:
-        print(f"Error: Failed to rename list '{a.name}'", file=sys.stderr)
+        message = result.get("message") if isinstance(result, dict) else None
+        print(f"Error: Failed to rename list '{a.name}'" + (f": {message}" if message else ""), file=sys.stderr)
         sys.exit(1)
 
 def cmd_list_delete(a):
@@ -1428,7 +1442,7 @@ def cmd_list_delete(a):
         if not ans.lower().startswith("y"):
             print("Cancelled.")
             return
-    data = {"action": "delete_list", "name": a.name}
+    data = {"action": "delete_list", "title": a.name}
     result = bridge_call(data)
     if result and result.get("status") == "deleted":
         if a.json:
@@ -1436,7 +1450,8 @@ def cmd_list_delete(a):
         else:
             print(f"Deleted list: {a.name}")
     else:
-        print(f"Error: Failed to delete list '{a.name}'", file=sys.stderr)
+        message = result.get("message") if isinstance(result, dict) else None
+        print(f"Error: Failed to delete list '{a.name}'" + (f": {message}" if message else ""), file=sys.stderr)
         sys.exit(1)
 
 def cmd_export(a):
@@ -1453,11 +1468,13 @@ def cmd_export(a):
     export_format = a.export_format if hasattr(a, 'export_format') and a.export_format else "json"
 
     if export_format == "csv":
+        pks = [item["Z_PK"] for item in items]
+        sc, ht = preload_extras(db, pks)
         output = io.StringIO()
         writer = csv.writer(output)
         writer.writerow(["id", "title", "list", "completed", "flagged", "priority", "due_date", "notes", "url", "tags"])
         for item in items:
-            d = to_dict(item, db)
+            d = to_dict(item, db, _sc=sc, _ht=ht)
             writer.writerow([
                 d["id"], d["title"], d.get("list", ""),
                 d["completed"], d["flagged"], d["priority"],
@@ -1466,7 +1483,7 @@ def cmd_export(a):
             ])
         print(output.getvalue(), end="")
     else:
-        data = [to_dict(item, db) for item in items]
+        data = reminders_to_dicts(items, db)
         print(json.dumps(data, indent=2))
 
 def cmd_import(a):
@@ -1501,7 +1518,7 @@ def cmd_import(a):
         aa.title = title
         aa.list = item.get("list")
         aa.notes = item.get("notes")
-        aa.due = item.get("due")
+        aa.due = item.get("due") or item.get("dueDate")
         aa.priority = item.get("priority")
         aa.flag = item.get("flagged", False)
         aa.tags = None
