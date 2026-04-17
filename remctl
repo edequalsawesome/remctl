@@ -296,9 +296,15 @@ def q_hashtags(db, pk):
     ).fetchall()
 
 def q_search(db, query, completed=False):
-    c = ["r.ZMARKEDFORDELETION = 0", "r.ZACCOUNT IS NOT NULL", "l.Z_PK IS NOT NULL", "(r.ZTITLE LIKE ? OR r.ZNOTES LIKE ?)"]
+    # Escape LIKE metacharacters so `%` and `_` in the query match literally;
+    # previously `search "%"` dumped every reminder in the store.
+    safe = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    c = [
+        "r.ZMARKEDFORDELETION = 0", "r.ZACCOUNT IS NOT NULL", "l.Z_PK IS NOT NULL",
+        "(r.ZTITLE LIKE ? ESCAPE '\\' OR r.ZNOTES LIKE ? ESCAPE '\\')"
+    ]
     if not completed: c.append("r.ZCOMPLETED = 0")
-    pat = f"%{query}%"
+    pat = f"%{safe}%"
     return db.execute(
         f"SELECT {_REM_COLS} FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l "
         f"ON r.ZLIST = l.Z_PK WHERE {' AND '.join(c)} ORDER BY r.Z_PK DESC LIMIT 100",
@@ -611,8 +617,40 @@ def osa_by_id_try(list_name, rem_id, action, timeout=120):
         return False
 
 def esc(s):
-    return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ").replace("\r", "")
+    """Escape a string for AppleScript double-quoted literals.
+    Covers backslash, double-quote, and every kind of control/line-break
+    character that can terminate an AppleScript string (\n, \r, \t, U+0085,
+    U+2028, U+2029)."""
+    s = s.replace("\\", "\\\\").replace('"', '\\"')
+    for ch in ("\r", "\n", "\t", "\u0085", "\u2028", "\u2029"):
+        s = s.replace(ch, " ")
+    # Strip remaining ASCII control chars (0x00-0x1F except already-handled)
+    return "".join(c if ord(c) >= 0x20 else " " for c in s)
 
+def applescript_date_var(dt, varname="d"):
+    """Build a locale-neutral AppleScript snippet that defines `<varname>` as
+    the given local datetime via numeric field-assignment. This works on any
+    macOS locale; `date "..."` parsing breaks on non-English locales and
+    silently falls through to the bridge (which has its own sync gotchas).
+    All values are bounded ints — no user-input interpolation."""
+    return (
+        f'set {varname} to current date\n'
+        f'set year of {varname} to {dt.year}\n'
+        f'set month of {varname} to {dt.month}\n'
+        f'set day of {varname} to {dt.day}\n'
+        f'set hours of {varname} to {dt.hour}\n'
+        f'set minutes of {varname} to {dt.minute}\n'
+        f'set seconds of {varname} to {dt.second}'
+    )
+
+def as_date_assign(dt, target="due date of r"):
+    """Return an AppleScript snippet that assigns a locale-neutral date to
+    the given target (e.g., `due date of r`). Preferred over the old
+    `date "..."` string literal pattern, which was locale-dependent."""
+    return applescript_date_var(dt, "_rdt") + f"\nset {target} to _rdt"
+
+# Kept for backwards compatibility with a handful of callers that still
+# embed date literals. Prefer as_date_assign for new code.
 def as_date(dt):
     return dt.strftime("%A, %B %d, %Y at %I:%M:%S %p")
 
@@ -833,14 +871,26 @@ def cmd_add(a):
                 print(f"Created: {title}")
             return
 
-    # Fall back to AppleScript
+    # Fall back to AppleScript. Warn about fields AppleScript can't express,
+    # so users don't silently lose url/recurrence/alarm when the bridge is
+    # unavailable.
+    dropped = []
+    if hasattr(a, 'url') and a.url: dropped.append("url")
+    if hasattr(a, 'recurrence') and a.recurrence: dropped.append("recurrence")
+    if hasattr(a, 'alarm') and a.alarm: dropped.append("alarm")
+    if dropped:
+        print(
+            f"Warning: bridge unavailable; {', '.join(dropped)} "
+            "cannot be set via AppleScript and will be dropped.",
+            file=sys.stderr,
+        )
     lst = f'tell list "{esc(a.list)}"' if a.list else "tell default list"
     s = f'tell application "Reminders"\n{lst}\nset r to make new reminder with properties {{name:"{esc(title)}"}}\n'
     if a.notes: s += f'set body of r to "{esc(a.notes)}"\n'
     if a.priority and a.priority.lower() in pm:
         s += f"set priority of r to {pm[a.priority.lower()]}\n"
     if a.flag: s += "set flagged of r to true\n"
-    if dt: s += f'set due date of r to date "{as_date(dt)}"\n'
+    if dt: s += as_date_assign(dt) + "\n"
     s += "return id of r\nend tell\nend tell"
     rid = osa(s)
     if a.json:
@@ -997,11 +1047,39 @@ def cmd_edit(a):
 
     pm = {"high": 1, "medium": 5, "low": 9, "none": 0}
 
+    # Parse due date exactly once, up front. Warn loudly if an unparseable
+    # string was given so the user doesn't silently get a no-op write that
+    # falls through to the broken bridge path.
+    dt = None
+    if a.due and a.due != "clear":
+        dt = parse_due(a.due)
+        if dt is None:
+            print(
+                f"Error: could not parse due date {a.due!r}. Use ISO "
+                "(YYYY-MM-DD [HH:MM]) or shortcuts like today/tomorrow/eod/+3d.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    # Auto double-tap: if the CoreData ZDUEDATE already equals the requested
+    # target, AppleScript treats it as a no-op and pushes only lastModifiedDate —
+    # CloudKit then drops the dueDate field entirely and other devices stay
+    # stale. Force a real value change by setting an intermediate date first
+    # (bumped 1 hour), then the real target. This matches what fixed the 9
+    # stuck email reminders on 2026-04-17.
+    dt_nudge = None
+    if dt is not None and r["ZDUEDATE"] is not None:
+        current = ts(r["ZDUEDATE"])
+        if current and int(current.timestamp()) == int(dt.timestamp()):
+            dt_nudge = dt + timedelta(hours=1)
+
     # AppleScript-first for reliable iCloud sync.
-    # EKEventStore.save() from a short-lived CLI process updates CoreData locally
-    # but the dueDateComponents change does not propagate to CloudKit — verified
-    # 2026-04-17 with side-by-side AppleScript/bridge edits on the same zone.
-    # AppleScript goes through Reminders.app which correctly syncs via remindd.
+    # EKEventStore.save() from a short-lived CLI process updates CoreData
+    # locally but has historically dropped dueDateComponents from the CKRecord
+    # push (verified 2026-04-17). AppleScript via Reminders.app produces a full
+    # push that CloudKit accepts. The bridge was reworked the same day to mirror
+    # Reminders.app's save, but AppleScript-first remains the safer default
+    # until the bridge path has weeks of real-world confirmation behind it.
     has_bridge_only = (
         (hasattr(a, 'recurrence') and a.recurrence) or
         (hasattr(a, 'alarm') and a.alarm)
@@ -1025,10 +1103,14 @@ def cmd_edit(a):
             parts.append(f"set priority of r to {pm[a.priority.lower()]}")
         if a.due == "clear":
             parts.append("set due date of r to missing value")
-        elif a.due:
-            dt = parse_due(a.due)
-            if dt:
-                parts.append(f'set due date of r to date "{as_date(dt)}"')
+        elif dt is not None:
+            if dt_nudge is not None:
+                # Intermediate nudge forces Reminders.app to emit a real
+                # dueDateComponents change, then we set the real target.
+                parts.append(as_date_assign(dt_nudge))
+                parts.append(as_date_assign(dt))
+            else:
+                parts.append(as_date_assign(dt))
         if parts and osa_by_id_try(r["list_name"], _rem_id(r), chr(10).join(parts)):
             if a.json:
                 print(json.dumps({"status": "updated", "id": a.id}))
@@ -1036,23 +1118,29 @@ def cmd_edit(a):
                 print(f"Updated #{a.id}")
             return
 
-    # Bridge fallback — used when AppleScript failed OR when the edit touches a
-    # bridge-only field (recurrence, alarm). Bridge writes for these fields DO
-    # sync reliably; only dueDateComponents-only writes are the known-broken case.
+    # Bridge fallback — used when AppleScript failed OR when the edit touches
+    # a bridge-only field (recurrence, alarm). As of 2026-04-17 the bridge's
+    # dueDate push was fixed (set reminder.timeZone explicitly, drop
+    # .timeZone from the component set, stop nil-ing startDateComponents),
+    # but we keep the AppleScript-first default until soak-tested.
     if bridge_available() and r["ZCKIDENTIFIER"]:
         data = {"action": "update", "id": r["ZCKIDENTIFIER"]}
         has_changes = False
         if a.title: data["title"] = a.title; has_changes = True
-        if a.notes: data["notes"] = a.notes; has_changes = True
+        # Merge url into notes to keep URL-append semantics identical across
+        # AppleScript and bridge paths (previously inconsistent).
+        notes_body = a.notes
+        if hasattr(a, 'url') and a.url:
+            notes_body = (notes_body + "\n\n" + a.url) if notes_body else a.url
+        if notes_body is not None:
+            data["notes"] = notes_body
+            has_changes = True
         if a.priority and a.priority.lower() in pm:
             data["priority"] = pm[a.priority.lower()]; has_changes = True
         if a.due == "clear":
             data["due"] = None; has_changes = True
-        elif a.due:
-            dt = parse_due(a.due)
-            if dt: data["due"] = dt.isoformat(); has_changes = True
-        if hasattr(a, 'url') and a.url:
-            data["url"] = a.url; has_changes = True
+        elif dt is not None:
+            data["due"] = dt.isoformat(); has_changes = True
         if hasattr(a, 'recurrence') and a.recurrence:
             data["recurrence"] = parse_recurrence(a.recurrence); has_changes = True
         if hasattr(a, 'alarm') and a.alarm:
@@ -1066,7 +1154,14 @@ def cmd_edit(a):
                     print(f"Updated #{a.id}")
                 return
 
-    # Last resort: AppleScript by-name (used when ZCKIDENTIFIER is missing).
+    # Last resort: AppleScript by-name. Warn loudly — this matches on title
+    # and can hit the wrong reminder if duplicates exist.
+    print(
+        f"Warning: #{a.id} has no ZCKIDENTIFIER; falling back to "
+        "title-based AppleScript match. If multiple reminders share this "
+        "title, the wrong one may be edited.",
+        file=sys.stderr,
+    )
     parts = []
     if a.title: parts.append(f'set name of r to "{esc(a.title)}"')
     if a.notes: parts.append(f'set body of r to "{esc(a.notes)}"')
@@ -1074,9 +1169,8 @@ def cmd_edit(a):
         parts.append(f"set priority of r to {pm[a.priority.lower()]}")
     if a.due == "clear":
         parts.append("set due date of r to missing value")
-    elif a.due:
-        dt = parse_due(a.due)
-        if dt: parts.append(f'set due date of r to date "{as_date(dt)}"')
+    elif dt is not None:
+        parts.append(as_date_assign(dt))
     if not parts:
         print("Nothing to update.")
         return

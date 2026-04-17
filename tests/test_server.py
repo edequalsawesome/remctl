@@ -91,6 +91,41 @@ class ServerTests(unittest.TestCase):
         cli_fallback.assert_called_once_with(action_data)
         self.assertEqual(result, {"ok": False, "error": "remctl not found"})
 
+    def test_bridge_call_retires_sqlite_fallback_even_when_env_enables_it(self):
+        """ALLOW_UNSAFE_SQLITE_WRITES=True used to run sqlite_create_reminder,
+        which produced invisible/non-syncing rows. The path is now a no-op."""
+        action_data = {"action": "create", "title": "Test reminder"}
+        with (
+            mock.patch.object(self.server, "ALLOW_UNSAFE_SQLITE_WRITES", True),
+            mock.patch.object(self.server, "BRIDGE_PATH", Path("/definitely/not-there")),
+            mock.patch.object(self.server, "sqlite_create_reminder") as sqlite_create,
+            mock.patch.object(
+                self.server, "remctl_cli_fallback",
+                return_value={"ok": False, "error": "remctl not found"},
+            ),
+            mock.patch.object(self.server.sys, "stderr", io.StringIO()),
+        ):
+            self.server.bridge_call(action_data)
+        sqlite_create.assert_not_called()
+
+    def test_q_search_escapes_like_wildcards(self):
+        """A search for `%` should match a literal `%`, not every row."""
+        fake = mock.Mock()
+        fake.execute.return_value.fetchall.return_value = []
+        self.server.q_search(fake, "%")
+        sql, params = fake.execute.call_args.args
+        self.assertIn("ESCAPE '\\'", sql)
+        # pattern should contain the ESCAPED `%`, not a raw `%` → no wildcard match
+        self.assertEqual(params[0], "%\\%%")
+        self.assertEqual(params[1], "%\\%%")
+
+    def test_q_search_escapes_underscore(self):
+        fake = mock.Mock()
+        fake.execute.return_value.fetchall.return_value = []
+        self.server.q_search(fake, "a_b")
+        _, params = fake.execute.call_args.args
+        self.assertEqual(params[0], "%a\\_b%")
+
 
 if __name__ == "__main__":
     unittest.main()

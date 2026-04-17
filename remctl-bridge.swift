@@ -202,14 +202,19 @@ func applyFields(_ reminder: EKReminder, _ cmd: Command, store: EKEventStore) {
         reminder.calendar = findList(store, name: list)
     }
 
-    // due: present string → set date, JSON null → clear
+    // due: present string → set date, JSON null → clear.
+    // Set dueDateComponents WITHOUT .timeZone in the component set AND set
+    // reminder.timeZone explicitly — this mirrors Reminders.app's save path and
+    // produces a changedKeys set CloudKit accepts as a full dueDate update. The
+    // previous variant embedded .timeZone in the components + cleared
+    // startDateComponents; that produced a CKRecord push that remindd logged as
+    // successful but which the server silently ignored for the dueDate field
+    // (observed 2026-04-17, verified against AppleScript-authored pushes).
     if cmd.due != nil {
         if let dueStr = cmd.due, !dueStr.isEmpty, let date = parseISO(dueStr) {
             reminder.dueDateComponents = Calendar.current.dateComponents(
-                [.year, .month, .day, .hour, .minute, .second, .timeZone], from: date)
-            // Clear startDateComponents — EventKit auto-sets it, but Reminders.app
-            // doesn't use it for normal reminders and it can confuse iCloud sync
-            reminder.startDateComponents = nil
+                [.year, .month, .day, .hour, .minute, .second], from: date)
+            reminder.timeZone = TimeZone.current
         }
     }
     // If due was explicitly null in JSON, the Decodable will still decode it;
@@ -263,11 +268,12 @@ func requestAccess(_ store: EKEventStore) {
     if !granted { fail("Reminders access not granted") }
 }
 
-// Read stdin
-guard let inputData = FileHandle.standardInput.availableData as Data?,
-      !inputData.isEmpty else {
-    fail("No input on stdin")
-}
+// Read stdin. Use readDataToEndOfFile so chunked pipes aren't silently
+// truncated (availableData only returns what's buffered at call time).
+// Cap at 1 MiB — no legitimate command payload is anywhere near that.
+let inputData = FileHandle.standardInput.readDataToEndOfFile()
+if inputData.isEmpty { fail("No input on stdin") }
+if inputData.count > 1_048_576 { fail("Input too large: \(inputData.count) bytes (max 1 MiB)") }
 
 let cmd: Command
 do {

@@ -235,15 +235,19 @@ def q_hashtags(db, pk):
 
 
 def q_search(db, query, completed=False):
+    # Escape LIKE metacharacters so `%` and `_` in the query match literally
+    # instead of acting as wildcards (a search for `%` would otherwise dump
+    # the whole store).
+    safe = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     conds = [
         "r.ZMARKEDFORDELETION = 0",
         "r.ZACCOUNT IS NOT NULL",
         "l.Z_PK IS NOT NULL",
-        "(r.ZTITLE LIKE ? OR r.ZNOTES LIKE ?)",
+        "(r.ZTITLE LIKE ? ESCAPE '\\' OR r.ZNOTES LIKE ? ESCAPE '\\')",
     ]
     if not completed:
         conds.append("r.ZCOMPLETED = 0")
-    pat = f"%{query}%"
+    pat = f"%{safe}%"
     return db.execute(
         f"SELECT {_REM_COLS} FROM ZREMCDREMINDER r "
         f"LEFT JOIN ZREMCDBASELIST l ON r.ZLIST = l.Z_PK "
@@ -403,10 +407,13 @@ def resolve_ck_id(pk):
     """
     try:
         db = open_db()
+        # Skip orphan rows (ZACCOUNT IS NULL) that the 2026-04-11 phantom-items
+        # bug left in the store — they shouldn't be addressable for writes.
         r = db.execute(
             "SELECT r.ZCKIDENTIFIER, l.ZNAME as list_name FROM ZREMCDREMINDER r "
             "LEFT JOIN ZREMCDBASELIST l ON r.ZLIST = l.Z_PK "
-            "WHERE r.Z_PK = ?", (pk,)
+            "WHERE r.Z_PK = ? AND r.ZACCOUNT IS NOT NULL AND r.ZMARKEDFORDELETION = 0",
+            (pk,)
         ).fetchone()
         db.close()
         if r and r["ZCKIDENTIFIER"]:
@@ -441,7 +448,29 @@ def applescript_write(pk, action_data):
         title = r["ZTITLE"] or ""
 
         def esc(s):
-            return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+            # Harden against AppleScript injection. Apply to EVERY user-controlled
+            # string before it lands in a script literal. Covers backslash, quote,
+            # and every control/line-break character that can terminate an
+            # AppleScript string (CR, LF, tab, U+0085, U+2028, U+2029). Also
+            # strips remaining ASCII control bytes.
+            s = str(s).replace("\\", "\\\\").replace('"', '\\"')
+            for ch in ("\r", "\n", "\t", "\u0085", "\u2028", "\u2029"):
+                s = s.replace(ch, " ")
+            return "".join(c if ord(c) >= 0x20 else " " for c in s)
+
+        def as_date_assign(dt, varname="_rdt", target="due date of r"):
+            # Locale-neutral date assignment via numeric field-setting.
+            # Using `date "localized string"` breaks on non-English macOS.
+            return (
+                f"set {varname} to current date\n"
+                f"set year of {varname} to {dt.year}\n"
+                f"set month of {varname} to {dt.month}\n"
+                f"set day of {varname} to {dt.day}\n"
+                f"set hours of {varname} to {dt.hour}\n"
+                f"set minutes of {varname} to {dt.minute}\n"
+                f"set seconds of {varname} to {dt.second}\n"
+                f"set {target} to {varname}"
+            )
 
         action = action_data.get("action", "")
         commands = []
@@ -450,11 +479,14 @@ def applescript_write(pk, action_data):
             if action_data.get("title"):
                 commands.append(f'set name of r to "{esc(action_data["title"])}"')
             # URL field is not writable via EventKit/AppleScript (private ReminderKit API).
-            # Append URL to notes as a tappable link fallback.
-            notes = action_data.get("notes", "")
-            url = action_data.get("url", "")
+            # Append URL to notes as a tappable link fallback. Escape BOTH
+            # notes and URL before concatenation (previous code concatenated
+            # raw url into notes, then esc()-d only notes, letting a crafted
+            # URL break out of the AppleScript string literal).
+            notes = action_data.get("notes") or ""
+            url = action_data.get("url") or ""
             if url and notes:
-                notes = notes + "\\n\\n" + url
+                notes = notes + "\n\n" + url
             elif url:
                 notes = url
             if notes:
@@ -464,8 +496,7 @@ def applescript_write(pk, action_data):
                 for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
                     try:
                         dt = datetime.strptime(due_str, fmt)
-                        as_date = dt.strftime('%A, %B %d, %Y at %I:%M:%S %p')
-                        commands.append(f'set due date of r to date "{as_date}"')
+                        commands.append(as_date_assign(dt))
                         break
                     except ValueError:
                         continue
@@ -474,9 +505,15 @@ def applescript_write(pk, action_data):
                 pri = action_data["priority"]
                 if isinstance(pri, str):
                     pri = pm.get(pri, 0)
-                commands.append(f"set priority of r to {pri}")
+                try:
+                    pri = int(pri)
+                    if pri < 0 or pri > 9:
+                        pri = 0
+                    commands.append(f"set priority of r to {pri}")
+                except (TypeError, ValueError):
+                    pass  # silently ignore malformed priority
             if action_data.get("flagged") is not None:
-                val = "true" if action_data["flagged"] else "false"
+                val = "true" if bool(action_data["flagged"]) else "false"
                 commands.append(f"set flagged of r to {val}")
 
         elif action == "complete":
@@ -495,7 +532,7 @@ def applescript_write(pk, action_data):
         script = (
             f'tell application "Reminders"\n'
             f'tell list "{esc(list_name)}"\n'
-            f'set r to (first reminder whose id is "x-apple-reminder://{ck_id}")\n'
+            f'set r to (first reminder whose id is "x-apple-reminder://{esc(ck_id)}")\n'
             f'{cmd_str}\n'
             f'end tell\nend tell'
         )
@@ -697,14 +734,18 @@ def bridge_call(action_data, original_pk=None):
         except (subprocess.TimeoutExpired, json.JSONDecodeError):
             sys.stderr.write("[bridge_call] Bridge timed out or bad JSON, trying fallbacks\n")
 
-    # Direct SQLite writes are dangerous and disabled by default.
+    # Direct SQLite writes into the Reminders CoreData store are retired.
+    # The previous implementation omitted ZACCOUNT (produced invisible
+    # rows), did not set ZCKDIRTYFLAGS (rows never synced), hardcoded
+    # Z_OPT=1 (broke Core Data optimistic locking on future edits), and
+    # raced on Z_PK allocation under ThreadingHTTPServer. ALLOW_UNSAFE_
+    # SQLITE_WRITES is accepted for backwards compat but is now a no-op.
     if action == "create" and ALLOW_UNSAFE_SQLITE_WRITES:
-        result = sqlite_create_reminder(action_data)
-        if isinstance(result, dict) and result.get("ok"):
-            return result
-        sys.stderr.write(f"[bridge_call] SQLite create failed: {result}\n")
-    elif action == "create":
-        sys.stderr.write("[bridge_call] Unsafe SQLite fallback disabled; skipping direct DB writes\n")
+        sys.stderr.write(
+            "[bridge_call] Direct SQLite create was requested via "
+            "REMCTL_ALLOW_UNSAFE_SQLITE_WRITES but the path is retired "
+            "(risk of invisible rows + Core Data corruption). Skipping.\n"
+        )
 
     # Last resort: remctl CLI fallback
     return remctl_cli_fallback(action_data)
@@ -796,8 +837,11 @@ def remctl_cli_fallback(action_data):
 
 # ── OpenGraph Metadata ───────────────────────────────────────────────────────
 
+import threading as _threading
 _og_cache = {}          # url -> (data_dict, expiry_time)
+_og_cache_lock = _threading.Lock()
 _OG_CACHE_TTL = 3600    # 1 hour
+_OG_FETCH_SEM = _threading.BoundedSemaphore(3)  # bound concurrent fetches
 
 class _NoRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -808,29 +852,40 @@ def fetch_og_metadata(url):
     """Fetch OpenGraph metadata from a URL. Returns dict or None."""
     now = time.monotonic()
 
-    # Check cache
-    cached = _og_cache.get(url)
-    if cached and cached[1] > now:
-        return cached[0]
+    # Check cache (read under lock — ThreadingHTTPServer calls this from
+    # multiple threads; plain dict read-check-write is not atomic and the
+    # previous iterate-and-delete path would crash on concurrent mutation).
+    with _og_cache_lock:
+        cached = _og_cache.get(url)
+        if cached and cached[1] > now:
+            return cached[0]
 
     if not is_safe_remote_url(url):
         return None
 
-    try:
-        req = Request(url, headers={
-            "User-Agent": "RemCTL/1.0 (OpenGraph Preview)",
-            "Accept": "text/html,application/xhtml+xml",
-        })
-        opener = build_opener(_NoRedirectHandler)
-        with opener.open(req, timeout=5) as resp:
-            if not is_safe_remote_url(resp.geturl()):
-                return None
-            content_type = resp.headers.get("Content-Type", "")
-            if "html" not in content_type.lower() and "xml" not in content_type.lower():
-                return None
-            html = resp.read(65536).decode("utf-8", errors="ignore")
-    except Exception:
+    # Cap concurrent outbound fetches so a single authenticated client can't
+    # exhaust server sockets or memory.
+    acquired = _OG_FETCH_SEM.acquire(timeout=10)
+    if not acquired:
         return None
+    try:
+        try:
+            req = Request(url, headers={
+                "User-Agent": "RemCTL/1.0 (OpenGraph Preview)",
+                "Accept": "text/html,application/xhtml+xml",
+            })
+            opener = build_opener(_NoRedirectHandler)
+            with opener.open(req, timeout=5) as resp:
+                if not is_safe_remote_url(resp.geturl()):
+                    return None
+                content_type = resp.headers.get("Content-Type", "")
+                if "html" not in content_type.lower() and "xml" not in content_type.lower():
+                    return None
+                html = resp.read(65536).decode("utf-8", errors="ignore")
+        except Exception:
+            return None
+    finally:
+        _OG_FETCH_SEM.release()
 
     def og(prop):
         # Match both property="og:X" and name="og:X", content before or after
@@ -880,13 +935,20 @@ def fetch_og_metadata(url):
         "domain": domain,
     }
 
-    _og_cache[url] = (data, now + _OG_CACHE_TTL)
-
-    # Evict stale entries periodically (keep cache bounded)
-    if len(_og_cache) > 500:
-        stale = [k for k, (_, exp) in _og_cache.items() if exp <= now]
-        for k in stale:
-            del _og_cache[k]
+    # Cache write + eviction must be atomic — previous version's
+    # iterate-and-delete on a shared dict would crash under threaded load.
+    with _og_cache_lock:
+        _og_cache[url] = (data, now + _OG_CACHE_TTL)
+        if len(_og_cache) > 500:
+            stale = [k for k, (_, exp) in _og_cache.items() if exp <= now]
+            for k in stale:
+                _og_cache.pop(k, None)
+            # If still oversized (all fresh), drop the oldest by expiry so
+            # we don't grow unbounded on sustained unique-URL pressure.
+            if len(_og_cache) > 500:
+                oldest = sorted(_og_cache.items(), key=lambda kv: kv[1][1])[:len(_og_cache) - 500]
+                for k, _ in oldest:
+                    _og_cache.pop(k, None)
 
     return data
 

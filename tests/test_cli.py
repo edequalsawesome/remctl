@@ -198,6 +198,7 @@ class CliTests(unittest.TestCase):
         "ZCKIDENTIFIER": "DEAD-BEEF-0000-0000-0000-000000000000",
         "ZTITLE": "test",
         "list_name": "Emails",
+        "ZDUEDATE": None,
     }
 
     def _assert_applescript_first(self, cmd_name, args, script_contains):
@@ -253,14 +254,63 @@ class CliTests(unittest.TestCase):
         )
 
     def test_cmd_edit_due_date_tries_applescript_before_bridge(self):
+        # Uses as_date_assign which sets up _rdt from numeric fields and
+        # assigns it to due date of r — locale-neutral.
         self._assert_applescript_first(
             "cmd_edit",
             SimpleNamespace(
                 id=1, json=True, title=None, notes=None, priority=None,
                 due="2026-04-20 09:00", url=None, recurrence=None, alarm=None,
             ),
-            "set due date of r to date",
+            "set due date of r to _rdt",
         )
+
+    def test_cmd_edit_double_taps_when_due_equals_current(self):
+        """When CoreData already holds the target dueDate (ghost from prior
+        bridge write), AppleScript would emit a no-op and CloudKit would drop
+        the dueDate field. cmd_edit must nudge to an intermediate value first."""
+        from datetime import datetime, timedelta
+        target = datetime(2026, 4, 20, 9, 0, 0)
+        apple_epoch = 978307200
+        reminder = dict(self._FAKE_REMINDER)
+        # ZDUEDATE is seconds since the Apple reference date.
+        reminder["ZDUEDATE"] = target.timestamp() - apple_epoch
+        with (
+            mock.patch.object(self.remctl, "open_db", return_value=None),
+            mock.patch.object(self.remctl, "q_reminder", return_value=reminder),
+            mock.patch.object(self.remctl, "osa_by_id_try", return_value=True) as osa_try,
+            mock.patch.object(self.remctl, "bridge_available", return_value=True),
+            mock.patch.object(self.remctl, "bridge_call") as bridge_call,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.remctl.cmd_edit(SimpleNamespace(
+                id=1, json=True, title=None, notes=None, priority=None,
+                due="2026-04-20 09:00", url=None, recurrence=None, alarm=None,
+            ))
+        bridge_call.assert_not_called()
+        osa_try.assert_called_once()
+        action = osa_try.call_args.args[2]
+        # Script must contain TWO set-due blocks: the nudge and the target.
+        self.assertEqual(action.count("set due date of r to _rdt"), 2)
+
+    def test_cmd_edit_rejects_unparseable_due(self):
+        """An unparseable due-date string must exit non-zero rather than
+        silently dropping the field and falling through to the bridge."""
+        with (
+            mock.patch.object(self.remctl, "open_db", return_value=None),
+            mock.patch.object(self.remctl, "q_reminder", return_value=self._FAKE_REMINDER),
+            mock.patch.object(self.remctl, "osa_by_id_try", return_value=True),
+            mock.patch.object(self.remctl, "bridge_available", return_value=True),
+            mock.patch.object(self.remctl, "bridge_call") as bridge_call,
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            with self.assertRaises(SystemExit):
+                self.remctl.cmd_edit(SimpleNamespace(
+                    id=1, json=False, title=None, notes=None, priority=None,
+                    due="not a real date", url=None, recurrence=None, alarm=None,
+                ))
+        bridge_call.assert_not_called()
 
     def test_cmd_edit_with_bridge_only_field_skips_applescript(self):
         """alarm/recurrence can't be set via AppleScript — bridge must be used."""
