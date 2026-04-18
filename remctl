@@ -3561,12 +3561,15 @@ def main():
         help="Diagnose setup and runtime issues",
         description=(
             "Run environment and runtime checks for the CLI and optional local API service.\n"
-            "This is the first troubleshooting step after install."
+            "This is the first troubleshooting step after install or onboarding."
         ),
         epilog=(
             "Examples:\n"
             "  remctl doctor\n"
             "  remctl doctor --json\n"
+            "\n"
+            "If this is your first run on a new Mac, use `remctl onboard` first so macOS can\n"
+            "show the Reminders and Automation permission prompts.\n"
             "\n"
             "If `local_api` reports `degraded (database: not found)` while the CLI itself works,\n"
             "grant Full Disk Access to the Python interpreter used by `remctl-server`, then run\n"
@@ -3587,6 +3590,10 @@ def main():
             "  remctl setup --shell auto --doctor\n"
             "  remctl setup --service install\n"
             "  remctl setup --service install --port 8080\n"
+            "\n"
+            "`setup` creates config files, installs completions, and optionally installs the\n"
+            "background service. It does not trigger the native macOS Reminders permission prompts.\n"
+            "Run `remctl onboard` after setup on a new Mac.\n"
             "\n"
             "The service is optional. Use it only if you need the local REST API or Android sync,\n"
             "and expect to grant Full Disk Access to the Python interpreter if doctor reports a\n"

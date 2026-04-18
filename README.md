@@ -33,7 +33,18 @@ Power-user CLI for Apple Reminders on macOS. Reads directly from the iCloud Remi
 
 ## Installation
 
-### Recommended Install
+### Requirements
+
+- macOS 14+ (Sonoma or later)
+- Python 3.10+
+- iCloud Reminders enabled
+- Xcode Command Line Tools if you want the fast Swift write bridge
+
+`remctl` is a copy-based install, not a Python package. The installer copies binaries into a directory such as `~/bin` or `~/.local/bin`.
+
+### Choose An Install Location
+
+If you already use `~/bin`, the default installer behavior is fine:
 
 ```bash
 git clone https://github.com/viticci/remctl.git
@@ -41,58 +52,133 @@ cd remctl
 ./install.sh --bootstrap
 ```
 
-`--bootstrap` does the full first-run setup:
-- installs `remctl`, `remctl-server`, and the shared helper modules
-- compiles `remctl-bridge` when `swiftc` is available
-- creates an API token
-- installs shell completion for your current shell when supported
-- runs `remctl doctor` so you can see any missing prerequisites immediately
-- leaves the first native permission prompts to `remctl` / `remctl onboard` on first interactive use
+If you prefer `~/.local/bin`, install with the same prefix explicitly:
 
-If you also want the background API server:
+```bash
+git clone https://github.com/viticci/remctl.git
+cd remctl
+PREFIX="$HOME/.local" ./install.sh --bootstrap
+```
+
+`--bootstrap` does the first-run setup:
+- copies `remctl`, `remctl-server`, and the shared helper modules into your install directory
+- compiles `remctl-bridge` when `swiftc` is available
+- creates `~/.config/remctl/api-token`
+- installs shell completion for your current shell when supported
+- runs `remctl doctor`
+- leaves the native macOS permission prompts to `remctl onboard` or the first interactive `remctl` run
+
+If you also want the background local API service:
 
 ```bash
 ./install.sh --bootstrap --with-service
+PREFIX="$HOME/.local" ./install.sh --bootstrap --with-service
 ```
 
-That service is optional. It is only needed for the local REST API and Android sync.
+The service is optional. Most people only need it if they want the local REST API or a fallback when direct SQLite reads are blocked.
 
-If you only want the binaries first:
+### What The Installer Copies
+
+By default, the installer writes to `~/bin`. With `PREFIX="$HOME/.local"`, it writes to `~/.local/bin`.
+
+Installed files:
+- `remctl` — main CLI
+- `remctl-bridge` — Swift/EventKit write helper
+- `remctl-server` — optional REST API server
+- `remctl_runtime.py` — shared runtime/config helpers
+- `remctl_serialization.py` — shared reminder serialization helpers
+
+Config files:
+- `~/.config/remctl/api-token` — local API token
+- `~/.config/remctl/onboard-state.json` — first-run onboarding state
+
+### First-Time Setup On A New Mac
+
+Use this exact flow for a brand-new Mac:
 
 ```bash
+git clone https://github.com/viticci/remctl.git
+cd remctl
+./install.sh --bootstrap
+remctl onboard
+remctl today
+```
+
+If you installed to `~/.local/bin`, either make sure that directory is already in your `PATH` or run:
+
+```bash
+PREFIX="$HOME/.local" ./install.sh --bootstrap
+~/.local/bin/remctl onboard
+~/.local/bin/remctl today
+```
+
+What `remctl onboard` does:
+1. Opens Reminders.app.
+2. Triggers the native Reminders permission prompt through EventKit.
+3. Triggers the AppleScript Automation prompt used by fallback writes and real flagged-state writes.
+4. Verifies whether direct database reads are available.
+5. Tells you exactly what is still missing.
+
+Important: macOS does not provide a native Full Disk Access prompt. If onboarding reports that direct SQLite reads are blocked, grant Full Disk Access to the Python interpreter shown by `remctl doctor`, then rerun:
+
+```bash
+remctl doctor
+```
+
+### Verify What You Are Actually Running
+
+This matters after upgrades and on systems with multiple bin directories:
+
+```bash
+which remctl
+remctl --help | grep onboard
+remctl doctor
+```
+
+If `which remctl` points at `~/.local/bin/remctl`, but you only ran `./install.sh` without `PREFIX="$HOME/.local"`, you updated the repo checkout but not the installed CLI in your `PATH`.
+
+### Upgrading After `git pull`
+
+`git pull` updates the repository checkout only. It does **not** update the installed `remctl` binary in your `PATH`.
+
+After pulling new commits, rerun the installer with the same destination you used originally:
+
+```bash
+git pull
 ./install.sh
-./install.sh --doctor
 ```
 
-After pulling new commits, rerun `./install.sh` to refresh the installed binaries in `~/bin`, `~/.local/bin`, or your custom `REMCTL_BIN_DIR`. `git pull` updates the repo checkout, not the copied CLI in your PATH.
-
-The installer places:
-- `~/bin/remctl` — Main CLI (Python)
-- `~/bin/remctl-bridge` — Write helper (compiled Swift/EventKit)
-- `~/bin/remctl-server` — REST API server (Python)
-- `~/bin/remctl_runtime.py` — Shared runtime/config helpers
-- `~/bin/remctl_serialization.py` — Shared reminder serialization helpers
-
-### Manual Install
+Or, if you installed to `~/.local/bin`:
 
 ```bash
-# 1. Copy CLI
-cp remctl ~/bin/remctl && chmod +x ~/bin/remctl
+git pull
+PREFIX="$HOME/.local" ./install.sh
+hash -r
+```
 
-# 1b. Copy shared runtime helpers
-cp remctl_runtime.py ~/bin/remctl_runtime.py
-cp remctl_serialization.py ~/bin/remctl_serialization.py
+`hash -r` refreshes your shell's command cache so `zsh` or `bash` stops using the old binary path metadata.
 
-# 2. Compile and install bridge (requires Xcode CLT)
-swiftc -O -framework EventKit -framework Foundation -o ~/bin/remctl-bridge remctl-bridge.swift
+### PATH Setup
 
-# 3. Copy API server
-cp remctl-server ~/bin/remctl-server && chmod +x ~/bin/remctl-server
+If the installer warns that your bin directory is not in `PATH`, add it to your shell config.
+
+For `~/bin` in zsh:
+
+```bash
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+For `~/.local/bin` in zsh:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
 ```
 
 ### Installer Overrides
 
-The installer no longer assumes a fixed `~/bin` or `~/.config` setup. Override as needed:
+The installer does not require a fixed `~/bin` or `~/.config` layout:
 
 ```bash
 PREFIX="$HOME/.local" ./install.sh
@@ -101,16 +187,24 @@ REMCTL_CONFIG_DIR="$HOME/.config/remctl" ./install.sh
 REMCTL_STORE_DIR="/custom/reminders-store" ./install.sh
 ```
 
-### Requirements
+### Manual Install
 
-- macOS 14+ (Sonoma or later)
-- Python 3.10+
-- Xcode Command Line Tools (for compiling the Swift bridge)
-- iCloud Reminders enabled
+Manual install is only for advanced setups. The installer is the recommended path.
 
-### Shell Completions
+```bash
+mkdir -p ~/bin
+cp remctl ~/bin/remctl && chmod +x ~/bin/remctl
+cp remctl_runtime.py ~/bin/remctl_runtime.py
+cp remctl_serialization.py ~/bin/remctl_serialization.py
+swiftc -O -framework EventKit -framework Foundation -o ~/bin/remctl-bridge remctl-bridge.swift
+cp remctl-server ~/bin/remctl-server && chmod +x ~/bin/remctl-server
+~/bin/remctl setup --shell auto
+~/bin/remctl onboard
+```
 
-The recommended path is:
+### Shell Completion
+
+The recommended path is still:
 
 ```bash
 remctl setup --shell auto
@@ -119,30 +213,10 @@ remctl setup --shell auto
 You can also install a specific completion manually:
 
 ```bash
-# zsh (add to ~/.zshrc)
 eval "$(remctl completion zsh)"
-
-# bash
 eval "$(remctl completion bash)"
-
-# fish
 remctl completion fish | source
 ```
-
-### First-Run Checks
-
-```bash
-remctl onboard
-remctl doctor
-remctl setup --doctor
-remctl service status
-```
-
-`remctl onboard` is the first-run permission flow. It opens Reminders.app, triggers the native EventKit and AppleScript prompts, and then verifies whether direct database reads are ready.
-
-`remctl doctor` is the first troubleshooting step after onboarding. It checks the macOS prerequisites, Reminders database, CLI and bridge install, API token, shell completion, launch agent, and local API health.
-
-macOS does not provide a native Full Disk Access prompt. If onboarding or doctor reports that direct SQLite reads are blocked, grant Full Disk Access to the Python interpreter shown by `remctl doctor`.
 
 ### Help And Discovery
 
@@ -153,9 +227,10 @@ remctl setup --help
 remctl doctor --help
 remctl service --help
 remctl completion --help
+./install.sh --help
 ```
 
-The top-level help lists every command. The onboarding and service subcommands include more detailed examples in their own `--help` output.
+The top-level help lists every command. The onboarding, setup, doctor, and service subcommands include more detailed examples in their own `--help` output.
 
 ## Usage
 
@@ -300,8 +375,8 @@ NO_COLOR=1 remctl today         # Environment variable
 ┌──────────────────────────────────────────┐
 │         remctl-server (Python)           │
 │  REST API over HTTP + Bearer auth        │
-│  Tailscale-only access                   │
-│  For future Android sync                 │
+│  Localhost by default                    │
+│  Optional remote access if exposed       │
 └──────────────────────────────────────────┘
 ```
 
@@ -321,9 +396,9 @@ RemCTL uses a hybrid write path:
 1. **remctl-bridge** (preferred): A pre-compiled Swift binary that writes via EventKit. ~70ms per operation. Supports recurrence, alarms, URLs (appended to notes — the Reminders URL field is a private ReminderKit property, not writable via EventKit), and list management.
 2. **AppleScript fallback**: If the bridge isn't available, remctl falls back to AppleScript. Slower (~8.7s) and more limited, but works without compilation.
 
-The bridge is detected automatically at `~/bin/remctl-bridge`.
+The bridge is detected automatically next to the installed CLI binary. For custom layouts, override it with `REMCTL_BRIDGE_PATH`.
 
-For custom layouts, RemCTL also honors:
+RemCTL also honors:
 - `REMCTL_BRIDGE_PATH`
 - `REMCTL_PATH`
 - `REMCTL_STORE_DIR`
@@ -456,24 +531,25 @@ For someone setting this up on a new Mac, the shortest reliable path is:
 
 ```bash
 ./install.sh --bootstrap
+remctl onboard
 remctl doctor
 remctl today
 ```
 
-If `doctor` reports failures, it will also print the specific fix for each failed check.
+If `onboard` or `doctor` reports failures, each check includes the specific fix.
 
 ## Files
 
 | File | Description | Size |
 |------|-------------|------|
-| `remctl` | Main CLI (Python 3, stdlib only) | ~2,500 lines |
-| `remctl-bridge.swift` | Swift EventKit write helper (source) | ~370 lines |
+| `remctl` | Main CLI (Python 3, stdlib only) | ~3,700 lines |
+| `remctl-bridge.swift` | Swift EventKit write helper (source) | ~440 lines |
 | `remctl-bridge` | Compiled Swift binary | ~130 KB |
 | `remctl-server` | REST API server (Python 3, stdlib only) | ~1,650 lines |
-| `remctl_runtime.py` | Shared path/config/runtime helpers | ~150 lines |
-| `remctl_serialization.py` | Shared reminder serialization helpers | ~150 lines |
-| `completions/_remctl` | zsh completion | ~100 lines |
-| `install.sh` | Installer/bootstrap script | ~140 lines |
+| `remctl_runtime.py` | Shared path/config/runtime helpers | ~120 lines |
+| `remctl_serialization.py` | Shared reminder serialization helpers | ~125 lines |
+| `completions/_remctl` | zsh completion | ~160 lines |
+| `install.sh` | Installer/bootstrap script | ~170 lines |
 
 ## License
 

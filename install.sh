@@ -19,6 +19,11 @@ Options:
   --doctor                    Run `remctl doctor` after installation
   --shell-completions SHELL   Install completions for auto, zsh, bash, fish, or none (default: auto)
   -h, --help                  Show this help text
+
+Notes:
+  The installer copies binaries into ~/bin by default.
+  Use PREFIX="$HOME/.local" if you want ~/.local/bin instead.
+  Run `remctl onboard` after install to trigger native macOS permission prompts.
 EOF
 }
 
