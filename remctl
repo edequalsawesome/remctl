@@ -424,48 +424,68 @@ def _color_priority(pri_val):
     return p
 
 
+def _item_has(item, key):
+    if isinstance(item, dict):
+        return key in item
+    keys = getattr(item, "keys", None)
+    if callable(keys):
+        try:
+            return key in keys()
+        except Exception:
+            return False
+    return False
+
+
+def _item_get(item, key, default=None):
+    if isinstance(item, dict):
+        return item.get(key, default)
+    if _item_has(item, key):
+        return item[key]
+    return default
+
+
 def _priority_value_from_item(item):
-    if "ZPRIORITY" in item:
+    if _item_has(item, "ZPRIORITY"):
         return item["ZPRIORITY"] or 0
-    return {"high": 1, "medium": 5, "low": 9}.get((item.get("priority") or "none").lower(), 0)
+    return {"high": 1, "medium": 5, "low": 9}.get((_item_get(item, "priority") or "none").lower(), 0)
 
 
 def _list_name_from_item(item):
-    return item["list_name"] if "list_name" in item else item.get("list")
+    return _item_get(item, "list_name", _item_get(item, "list"))
 
 
 def _url_from_item(item):
-    return item["ZICSURL"] if "ZICSURL" in item else item.get("url")
+    return _item_get(item, "ZICSURL", _item_get(item, "url"))
 
 
 def _subtask_count_from_item(item, db=None, _sc=None):
-    if "Z_PK" in item:
+    if _item_has(item, "Z_PK"):
         return (_sc or {}).get(item["Z_PK"], q_subtask_count(db, item["Z_PK"]) if db else 0)
-    return item.get("subtaskCount", 0) or 0
+    return _item_get(item, "subtaskCount", 0) or 0
 
 
 def _tags_from_item(item, db=None, _ht=None):
-    if "Z_PK" in item:
+    if _item_has(item, "Z_PK"):
         return (_ht or {}).get(item["Z_PK"], [t["ZNAME"] for t in q_hashtags(db, item["Z_PK"])] if db else [])
-    return item.get("tags", []) or []
+    return _item_get(item, "tags", []) or []
 
 def fmt(r, db=None, verbose=False, indent="", _sc=None, _ht=None):
-    completed = r["ZCOMPLETED"] if "ZCOMPLETED" in r else bool(r.get("completed"))
+    completed = r["ZCOMPLETED"] if _item_has(r, "ZCOMPLETED") else bool(_item_get(r, "completed"))
     if completed:
         status = C.green("[x]")
     else:
         status = C.dim("[ ]")
-    flag = C.yellow(" *") if (r["ZFLAGGED"] if "ZFLAGGED" in r else bool(r.get("flagged"))) else ""
+    flag = C.yellow(" *") if (r["ZFLAGGED"] if _item_has(r, "ZFLAGGED") else bool(_item_get(r, "flagged"))) else ""
     pri_val = _priority_value_from_item(r)
     sc = _subtask_count_from_item(r, db=db, _sc=_sc)
     tags = _tags_from_item(r, db=db, _ht=_ht)
     tag_str = " " + " ".join(f"#{t}" for t in tags) if tags else ""
     sub_str = f" [{sc} subtask{'s' if sc != 1 else ''}]" if sc > 0 else ""
     pri_str = f" {_color_priority(pri_val)}" if PRI.get(pri_val, "") else ""
-    rid = r["Z_PK"] if "Z_PK" in r else r.get("id", "?")
+    rid = r["Z_PK"] if _item_has(r, "Z_PK") else _item_get(r, "id", "?")
     id_str = C.dim(f"#{rid}")
-    title = (r["ZTITLE"] if "ZTITLE" in r else r.get("title")) or "(untitled)"
-    due_str = fmt_due(r["ZDUEDATE"] if "ZDUEDATE" in r else r.get("dueDate"))
+    title = (r["ZTITLE"] if _item_has(r, "ZTITLE") else _item_get(r, "title")) or "(untitled)"
+    due_str = fmt_due(r["ZDUEDATE"] if _item_has(r, "ZDUEDATE") else _item_get(r, "dueDate"))
     if completed:
         title = C.dim(C.strikethrough(title))
         due_str = C.dim(due_str)
@@ -476,7 +496,7 @@ def fmt(r, db=None, verbose=False, indent="", _sc=None, _ht=None):
         list_name = _list_name_from_item(r)
         if list_name:
             parts.append(f"{indent}    List: {color_list_name(list_name, db)}")
-        notes = r["ZNOTES"] if "ZNOTES" in r else r.get("notes")
+        notes = r["ZNOTES"] if _item_has(r, "ZNOTES") else _item_get(r, "notes")
         if notes:
             parts.append(f"{indent}    Notes: {C.dim(str(notes)[:200])}")
         url = _url_from_item(r)
@@ -592,7 +612,7 @@ def reminders_to_table_data(items, db=None):
     sod = now.replace(hour=0, minute=0, second=0, microsecond=0)
     for r in items:
         due_str = ""
-        due_value = r["ZDUEDATE"] if "ZDUEDATE" in r else r.get("dueDate")
+        due_value = r["ZDUEDATE"] if _item_has(r, "ZDUEDATE") else _item_get(r, "dueDate")
         if due_value:
             if isinstance(due_value, str):
                 try:
@@ -616,15 +636,15 @@ def reminders_to_table_data(items, db=None):
                 due_str = dt.strftime("%Y-%m-%d")
         pri_val = _priority_value_from_item(r)
         pri_str = _color_priority(pri_val) if PRI.get(pri_val, "") else ""
-        title = (r["ZTITLE"] if "ZTITLE" in r else r.get("title")) or "(untitled)"
-        flagged = r["ZFLAGGED"] if "ZFLAGGED" in r else bool(r.get("flagged"))
+        title = (r["ZTITLE"] if _item_has(r, "ZTITLE") else _item_get(r, "title")) or "(untitled)"
+        flagged = r["ZFLAGGED"] if _item_has(r, "ZFLAGGED") else bool(_item_get(r, "flagged"))
         if flagged:
             title = C.yellow("* ") + title
         list_name = _list_name_from_item(r) or ""
         if db and C.enabled:
             list_name = color_list_name(list_name, db)
         data.append({
-            "id": r["Z_PK"] if "Z_PK" in r else r.get("id", ""),
+            "id": r["Z_PK"] if _item_has(r, "Z_PK") else _item_get(r, "id", ""),
             "title": title,
             "list": list_name,
             "due": due_str,

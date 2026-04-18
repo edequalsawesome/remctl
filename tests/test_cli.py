@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import plistlib
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -563,6 +564,21 @@ class CliTests(unittest.TestCase):
         database = next(check for check in checks if check["name"] == "database")
         self.assertEqual(database["status"], "warn")
         self.assertIn("Local remctl service fallback is healthy", database["detail"])
+
+    def test_fmt_supports_sqlite_row_without_dict_get(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT 42 AS Z_PK, 'Test reminder' AS ZTITLE, 0 AS ZCOMPLETED, "
+            "0 AS ZFLAGGED, 5 AS ZPRIORITY, NULL AS ZDUEDATE, "
+            "'Reminders' AS list_name, NULL AS ZNOTES, NULL AS ZICSURL"
+        ).fetchone()
+        formatted = self.remctl.fmt(row, db=None, verbose=False)
+        table = self.remctl.reminders_to_table_data([row], db=None)
+        conn.close()
+        self.assertIn("Test reminder", formatted)
+        self.assertEqual(table[0]["id"], 42)
+        self.assertEqual(table[0]["title"], "Test reminder")
 
 
 if __name__ == "__main__":
