@@ -47,6 +47,7 @@ cd remctl
 - creates an API token
 - installs shell completion for your current shell when supported
 - runs `remctl doctor` so you can see any missing prerequisites immediately
+- leaves the first native permission prompts to `remctl` / `remctl onboard` on first interactive use
 
 If you also want the background API server:
 
@@ -62,6 +63,8 @@ If you only want the binaries first:
 ./install.sh
 ./install.sh --doctor
 ```
+
+After pulling new commits, rerun `./install.sh` to refresh the installed binaries in `~/bin`, `~/.local/bin`, or your custom `REMCTL_BIN_DIR`. `git pull` updates the repo checkout, not the copied CLI in your PATH.
 
 The installer places:
 - `~/bin/remctl` — Main CLI (Python)
@@ -129,17 +132,23 @@ remctl completion fish | source
 ### First-Run Checks
 
 ```bash
+remctl onboard
 remctl doctor
 remctl setup --doctor
 remctl service status
 ```
 
-`remctl doctor` is the first troubleshooting step. It checks the macOS prerequisites, Reminders database, CLI and bridge install, API token, shell completion, launch agent, and local API health.
+`remctl onboard` is the first-run permission flow. It opens Reminders.app, triggers the native EventKit and AppleScript prompts, and then verifies whether direct database reads are ready.
+
+`remctl doctor` is the first troubleshooting step after onboarding. It checks the macOS prerequisites, Reminders database, CLI and bridge install, API token, shell completion, launch agent, and local API health.
+
+macOS does not provide a native Full Disk Access prompt. If onboarding or doctor reports that direct SQLite reads are blocked, grant Full Disk Access to the Python interpreter shown by `remctl doctor`.
 
 ### Help And Discovery
 
 ```bash
 remctl --help
+remctl onboard --help
 remctl setup --help
 remctl doctor --help
 remctl service --help

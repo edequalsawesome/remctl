@@ -198,6 +198,76 @@ class CliTests(unittest.TestCase):
         with mock.patch.dict("os.environ", {"SHELL": "/bin/zsh"}, clear=False):
             self.assertEqual(self.remctl.resolve_setup_shell("auto"), "zsh")
 
+    def test_bridge_access_check_for_onboarding_reports_authorized_bridge(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_path = Path(tmpdir) / "remctl-bridge"
+            fake_path.write_text("#!/bin/sh\n")
+            fake_path.chmod(0o755)
+            with (
+                mock.patch.object(self.remctl, "current_bridge_path", return_value=fake_path),
+                mock.patch.object(self.remctl.os, "access", return_value=True),
+                mock.patch.object(
+                    self.remctl,
+                    "bridge_call_result",
+                    return_value={
+                        "returncode": 0,
+                        "stdout": '{"status":"authorized"}',
+                        "stderr": "",
+                        "payload": {
+                            "status": "authorized",
+                            "calendarCount": 3,
+                            "defaultList": "Reminders",
+                        },
+                    },
+                ),
+            ):
+                check = self.remctl.bridge_access_check_for_onboarding()
+
+        self.assertEqual(check["status"], "ok")
+        self.assertIn("Reminders access granted", check["detail"])
+        self.assertIn("default: Reminders", check["detail"])
+
+    def test_database_access_check_for_onboarding_downgrades_when_local_api_is_healthy(self):
+        with (
+            mock.patch.object(self.remctl, "reminders_store_access_error", return_value="db blocked"),
+            mock.patch.object(self.remctl, "find_main_db_path", return_value=None),
+        ):
+            check = self.remctl.database_access_check_for_onboarding(
+                api_check={"status": "ok", "detail": "healthy", "fix": None}
+            )
+        self.assertEqual(check["status"], "warn")
+        self.assertIn("Local remctl service fallback is healthy", check["detail"])
+
+    def test_maybe_run_first_launch_onboarding_runs_once_for_interactive_commands(self):
+        args = SimpleNamespace(cmd="today", json=False, format="plain")
+        with (
+            mock.patch.object(self.remctl, "should_auto_onboard", return_value=True),
+            mock.patch.object(
+                self.remctl,
+                "run_onboarding",
+                return_value={"ok": True, "warnings": 0, "failures": 0, "checks": []},
+            ) as run_onboarding,
+            mock.patch.object(self.remctl, "print_check_report") as print_report,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            result = self.remctl.maybe_run_first_launch_onboarding(args)
+
+        self.assertTrue(result["ok"])
+        run_onboarding.assert_called_once_with(auto=True)
+        print_report.assert_called_once_with("RemCTL onboard", [])
+
+    def test_should_auto_onboard_skips_admin_commands(self):
+        args = SimpleNamespace(cmd="setup", json=False, format="plain")
+        with (
+            mock.patch.object(self.remctl, "load_onboard_state", return_value=None),
+            mock.patch.object(self.remctl.sys, "platform", "darwin"),
+            mock.patch.dict("os.environ", {}, clear=False),
+            mock.patch.object(self.remctl.sys, "stdout", SimpleNamespace(isatty=lambda: True)),
+        ):
+            result = self.remctl.should_auto_onboard(args)
+
+        self.assertFalse(result)
+
     # --- Regression: mutating-op routing (bridge vs AppleScript) ---
     # 2026-04-17: we discovered EKEventStore.save() from a short-lived CLI
     # process was dropping dueDateComponents from the CKRecord push because

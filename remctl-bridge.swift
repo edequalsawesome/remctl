@@ -268,6 +268,14 @@ func requestAccess(_ store: EKEventStore) {
     if !granted { fail("Reminders access not granted") }
 }
 
+func authorizationSummary(_ store: EKEventStore) -> [String: Any] {
+    [
+        "status": "authorized",
+        "calendarCount": store.calendars(for: .reminder).count,
+        "defaultList": store.defaultCalendarForNewReminders()?.title ?? "",
+    ]
+}
+
 // Read stdin. Use readDataToEndOfFile so chunked pipes aren't silently
 // truncated (availableData only returns what's buffered at call time).
 // Cap at 1 MiB — no legitimate command payload is anywhere near that.
@@ -289,6 +297,13 @@ let dueExplicitlyNull: Bool = {
 }()
 
 let store = EKEventStore()
+
+if cmd.action == "authorize" {
+    requestAccess(store)
+    output(authorizationSummary(store))
+    exit(0)
+}
+
 requestAccess(store)
 
 switch cmd.action {

@@ -14,7 +14,7 @@ usage() {
 Usage: ./install.sh [options]
 
 Options:
-  --bootstrap                 Install completions and run doctor
+  --bootstrap                 Install completions, run doctor, and prepare first-run onboarding
   --with-service              Install and start the launch agent after copying binaries
   --doctor                    Run `remctl doctor` after installation
   --shell-completions SHELL   Install completions for auto, zsh, bash, fish, or none (default: auto)
@@ -161,8 +161,8 @@ fi
 echo ""
 echo -e "${GREEN}${BOLD}Done!${RESET} RemCTL v3.0.0 installed."
 if [[ "$BOOTSTRAP" -eq 1 ]]; then
-    echo -e "${DIM}Run 'remctl today' to verify the CLI against your reminders.${RESET}"
+    echo -e "${DIM}Run 'remctl' or 'remctl onboard' to trigger macOS permission prompts on first launch.${RESET}"
 else
-    echo -e "${DIM}Run 'remctl setup --doctor' to finish setup and check your environment.${RESET}"
+    echo -e "${DIM}Run 'remctl onboard' after setup to trigger macOS permission prompts.${RESET}"
 fi
 echo ""
