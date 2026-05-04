@@ -50,7 +50,10 @@ LAUNCH_AGENT_LABEL = "com.remctl.server"
 ONBOARD_STATE_FILE = CONFIG_DIR / "onboard-state.json"
 AUTO_ONBOARD_SKIP_ENV = "REMCTL_SKIP_ONBOARD"
 AUTO_ONBOARD_SKIP_COMMANDS = {"completion", "doctor", "onboard", "service", "setup"}
-FULL_DISK_ACCESS_SETTINGS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+FULL_DISK_ACCESS_SETTINGS_URLS = [
+    "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles",
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
+]
 KNOWN_TERMINAL_APPS = {
     "alacritty": "Alacritty.app",
     "apple_terminal": "Terminal.app",
@@ -847,16 +850,19 @@ def service_full_disk_access_fix_text(settings=None, *, rerun_command="remctl do
 
 
 def open_full_disk_access_settings():
-    try:
-        proc = subprocess.run(
-            ["open", FULL_DISK_ACCESS_SETTINGS_URL],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return proc.returncode == 0
+    for settings_url in FULL_DISK_ACCESS_SETTINGS_URLS:
+        try:
+            proc = subprocess.run(
+                ["open", settings_url],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if proc.returncode == 0:
+            return True
+    return False
 
 
 def print_full_disk_access_guidance(*, api_healthy=False, settings_opened=False, rerun_command="remctl doctor"):
@@ -872,6 +878,20 @@ def print_full_disk_access_guidance(*, api_healthy=False, settings_opened=False,
     print(C.dim(f"  Then relaunch the terminal and rerun `{rerun_command}`."))
     if api_healthy:
         print(C.dim("  Direct SQLite reads are optional here because the local remctl service fallback is already healthy."))
+
+
+def print_service_full_disk_access_guidance(*, settings_opened=False, rerun_command="remctl doctor"):
+    settings = parse_launch_agent_settings() or {}
+    print()
+    print(C.bold("Full Disk Access for the local API service"))
+    if settings_opened:
+        print(C.dim("  Opened System Settings > Privacy & Security > Full Disk Access."))
+    else:
+        print(C.dim("  Open System Settings > Privacy & Security > Full Disk Access."))
+    print(C.dim("  The service runs under launchd, so it needs its own access target."))
+    print(C.dim(f"  Add: {service_full_disk_access_target(settings)}"))
+    print(C.dim("  Then run `remctl service restart`."))
+    print(C.dim(f"  Finally rerun `{rerun_command}`."))
 
 
 def needs_full_disk_access_guidance(check):
@@ -1085,7 +1105,7 @@ def gather_onboarding_checks():
     api_check = local_api_check_for_onboarding() if service["installed"] else None
     db_check = database_access_check_for_onboarding(api_check=api_check)
     checks.append(db_check)
-    if api_check and (db_check["status"] != "ok" or api_check["status"] == "ok"):
+    if api_check and (db_check["status"] != "ok" or api_check["status"] in {"ok", "fail"}):
         checks.append(api_check)
     return checks
 
@@ -3555,6 +3575,11 @@ def cmd_onboard(a):
         if needs_full_disk_access_guidance(database_check):
             print_full_disk_access_guidance(
                 api_healthy=bool(api_check and api_check["status"] == "ok"),
+                settings_opened=open_full_disk_access_settings(),
+                rerun_command="remctl doctor",
+            )
+        elif needs_full_disk_access_guidance(api_check):
+            print_service_full_disk_access_guidance(
                 settings_opened=open_full_disk_access_settings(),
                 rerun_command="remctl doctor",
             )

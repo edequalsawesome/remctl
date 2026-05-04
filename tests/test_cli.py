@@ -307,6 +307,18 @@ class CliTests(unittest.TestCase):
         self.assertIn("remctl onboard", text)
         self.assertIn("ignore this warning", text)
 
+    def test_open_full_disk_access_settings_tries_modern_url_before_legacy(self):
+        calls = []
+
+        def fake_run(cmd, capture_output, text, timeout):
+            calls.append(cmd)
+            return SimpleNamespace(returncode=1 if len(calls) == 1 else 0)
+
+        with mock.patch.object(self.remctl.subprocess, "run", side_effect=fake_run):
+            self.assertTrue(self.remctl.open_full_disk_access_settings())
+        self.assertIn("com.apple.settings.PrivacySecurity.extension", calls[0][1])
+        self.assertIn("com.apple.preference.security", calls[1][1])
+
     def test_print_check_report_indents_multiline_fixes(self):
         checks = [
             {
@@ -350,6 +362,78 @@ class CliTests(unittest.TestCase):
             settings_opened=True,
             rerun_command="remctl doctor",
         )
+
+    def test_cmd_onboard_opens_full_disk_access_settings_when_service_not_ready(self):
+        result = {
+            "ok": False,
+            "warnings": 0,
+            "failures": 1,
+            "checks": [
+                {"name": "database", "status": "ok", "detail": "/tmp/db.sqlite", "fix": None},
+                {
+                    "name": "local_api",
+                    "status": "fail",
+                    "detail": "degraded",
+                    "fix": "The service needs Full Disk Access.",
+                },
+            ],
+        }
+        with (
+            mock.patch.object(self.remctl, "run_onboarding", return_value=result),
+            mock.patch.object(self.remctl, "print_check_report"),
+            mock.patch.object(self.remctl, "open_full_disk_access_settings", return_value=True) as open_settings,
+            mock.patch.object(self.remctl, "print_service_full_disk_access_guidance") as guidance,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaises(SystemExit):
+                self.remctl.cmd_onboard(SimpleNamespace(json=False))
+        open_settings.assert_called_once_with()
+        guidance.assert_called_once_with(
+            settings_opened=True,
+            rerun_command="remctl doctor",
+        )
+
+    def test_gather_onboarding_checks_includes_failing_installed_service_when_database_is_ready(self):
+        with (
+            mock.patch.object(
+                self.remctl,
+                "open_reminders_app_for_onboarding",
+                return_value={"name": "open_reminders", "status": "ok", "detail": "opened", "fix": None},
+            ),
+            mock.patch.object(
+                self.remctl,
+                "bridge_access_check_for_onboarding",
+                return_value={"name": "eventkit", "status": "ok", "detail": "authorized", "fix": None},
+            ),
+            mock.patch.object(
+                self.remctl,
+                "applescript_access_check_for_onboarding",
+                return_value={"name": "automation", "status": "ok", "detail": "authorized", "fix": None},
+            ),
+            mock.patch.object(
+                self.remctl,
+                "launch_agent_status",
+                return_value={"installed": True, "running": True, "path": "/tmp/com.remctl.server.plist"},
+            ),
+            mock.patch.object(
+                self.remctl,
+                "local_api_check_for_onboarding",
+                return_value={
+                    "name": "local_api",
+                    "status": "fail",
+                    "detail": "degraded",
+                    "fix": "Full Disk Access required",
+                },
+            ),
+            mock.patch.object(
+                self.remctl,
+                "database_access_check_for_onboarding",
+                return_value={"name": "database", "status": "ok", "detail": "/tmp/db.sqlite", "fix": None},
+            ),
+        ):
+            checks = self.remctl.gather_onboarding_checks()
+
+        self.assertEqual([check["name"] for check in checks], ["open_reminders", "eventkit", "automation", "database", "local_api"])
 
     def test_needs_full_disk_access_guidance_false_for_missing_database(self):
         check = {

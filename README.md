@@ -569,6 +569,8 @@ remctl today
 
 If `onboard` or `doctor` reports failures, each check includes the specific fix.
 
+For the planned drag-to-System-Settings permission helper, see [`docs/permission-onboarding.md`](docs/permission-onboarding.md).
+
 ## Files
 
 | File | Description | Size |
