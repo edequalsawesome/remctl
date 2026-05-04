@@ -45,11 +45,11 @@ Full setup details live in [docs/installation.md](docs/installation.md).
 | Task | Commands |
 | --- | --- |
 | See what is due | `today`, `upcoming`, `overdue` |
-| Browse reminders | `lists`, `show`, `search`, `flagged`, `info`, `subtasks` |
+| Browse reminders | `lists`, `show`, `search`, `flagged`, `urgent`, `info`, `subtasks` |
 | Create and edit | `add`, `edit`, `done`, `undone`, `delete`, `flag`, `unflag` |
 | Organize | `list-create`, `list-rename`, `list-delete`, `sections`, `tags` |
 | Share data | `export`, `import`, `link`, `open`, `--json`, `--format table` |
-| Set up the Mac | `onboard`, `doctor`, `setup`, `service`, `completion` |
+| Set up the Mac | `onboard`, `permissions`, `doctor`, `setup`, `service`, `completion` |
 
 Common examples:
 
@@ -70,6 +70,8 @@ RemCTL output is designed for both humans and agents:
 
 - reminder IDs are shown as `#ID`
 - `#ID` is colored with the reminder list color when RemCTL can read list colors
+- flagged reminders show `⚑`
+- macOS 26 urgent reminders show `⏰`
 - recurring reminders show a repeat badge such as `↻ weekly Mon, Wed`
 - table output keeps a dedicated `Repeat` column when any row is recurring
 - every read command supports JSON output
@@ -108,7 +110,13 @@ remctl onboard
 remctl doctor
 ```
 
-If Full Disk Access is missing, RemCTL prints the exact target path and copies it to the clipboard. In the System Settings file picker, press `Command-Shift-G`, paste the path, press Return, then click Open.
+If Full Disk Access is missing, RemCTL opens a guided helper:
+
+```bash
+remctl permissions full-disk-access
+```
+
+The helper opens System Settings, copies the first target path, and shows draggable targets for the CLI and optional service. In the System Settings file picker, drag a target row in, or press `Command-Shift-G`, paste the copied path, press Return, then click Open.
 
 The background API service is a separate launchd process, so it can need its own Full Disk Access grant. `remctl service status` prints the exact service target.
 
@@ -140,7 +148,6 @@ remctl doctor
 - [Command guide](docs/commands.md)
 - [Architecture](docs/architecture.md)
 - [REST API](docs/rest-api.md)
-- [Permission onboarding design notes](docs/permission-onboarding.md)
 
 ## Project Layout
 
@@ -148,6 +155,7 @@ remctl doctor
 | --- | --- |
 | `remctl` | Main Python CLI |
 | `remctl-bridge.swift` | Swift/EventKit write helper source |
+| `remctl-permissions.swift` | Swift/AppKit guided Full Disk Access helper source |
 | `remctl-server` | Optional localhost REST API |
 | `remctl_runtime.py` | Shared paths, config, date windows, safety helpers |
 | `remctl_serialization.py` | Shared reminder JSON serialization |

@@ -10,6 +10,7 @@ remctl upcoming
 remctl upcoming 14
 remctl overdue
 remctl flagged
+remctl urgent
 remctl lists
 remctl show Shopping
 remctl show Work --completed
@@ -98,6 +99,8 @@ Human-readable output shows:
 
 - `#ID` for each reminder
 - the `#ID` colored with its list color when available
+- `⚑` for flagged reminders
+- `⏰` for macOS 26 urgent reminders
 - repeat badges such as `↻ monthly` for recurring reminders
 - section and subtask context where the command supports it
 
@@ -108,6 +111,8 @@ JSON output preserves machine-readable fields:
   "id": 23880,
   "title": "Standup",
   "list": "Work",
+  "flagged": false,
+  "urgent": false,
   "dueDate": "2026-05-05T09:00:00",
   "recurrence": {
     "frequency": "weekly",
@@ -139,6 +144,8 @@ Natural-language parsing uses `parsedatetime` when it is installed. The core CLI
 
 ```bash
 remctl onboard
+remctl permissions full-disk-access
+remctl permissions full-disk-access --scope service
 remctl doctor
 remctl setup --shell auto --doctor
 remctl service install

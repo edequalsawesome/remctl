@@ -31,7 +31,7 @@ Install to `~/.local/bin`:
 PREFIX="$HOME/.local" ./install.sh --bootstrap
 ```
 
-`--bootstrap` copies files, compiles `remctl-bridge` when `swiftc` is available, creates `~/.config/remctl/api-token`, installs shell completion when supported, and prints a doctor report.
+`--bootstrap` copies files, compiles `remctl-bridge` and `remctl-permissions` when `swiftc` is available, creates `~/.config/remctl/api-token`, installs shell completion when supported, and prints a doctor report.
 
 It does not grant macOS permissions. Apple requires those grants to happen interactively.
 
@@ -49,7 +49,7 @@ remctl today
 2. Triggers the native Reminders permission prompt.
 3. Triggers the Automation prompt used by AppleScript fallback operations.
 4. Checks direct database access.
-5. Opens Full Disk Access settings when needed.
+5. Opens the guided Full Disk Access helper when needed.
 
 ## Full Disk Access
 
@@ -57,20 +57,24 @@ macOS does not provide a native Full Disk Access prompt for command-line tools.
 
 If `remctl onboard` or `remctl doctor` says Full Disk Access is missing:
 
-1. Open System Settings -> Privacy & Security -> Full Disk Access.
-2. Click `+`.
-3. Press `Command-Shift-G` in the file picker.
-4. Paste the path RemCTL printed and copied to the clipboard.
-5. Press Return, then click Open.
-6. Run `remctl doctor` again.
+```bash
+remctl permissions full-disk-access
+```
+
+The helper opens System Settings, copies the first target path, and shows draggable targets. In the System Settings file picker:
+
+1. Click `+`.
+2. Drag a target row from the RemCTL helper into the picker.
+3. If dragging is not accepted, press `Command-Shift-G`, paste the copied path, press Return, then click Open.
+4. Run `remctl doctor` again.
 
 The optional background service runs as a separate launchd process. If `local_api` is degraded with `database: not found`, run:
 
 ```bash
-remctl service status
+remctl permissions full-disk-access --scope service
 ```
 
-Grant Full Disk Access to the printed `Full Disk Access target`, then run:
+Then run:
 
 ```bash
 remctl service restart
@@ -159,6 +163,7 @@ cp remctl ~/bin/remctl && chmod +x ~/bin/remctl
 cp remctl_runtime.py ~/bin/remctl_runtime.py
 cp remctl_serialization.py ~/bin/remctl_serialization.py
 swiftc -O -framework EventKit -framework Foundation -o ~/bin/remctl-bridge remctl-bridge.swift
+swiftc -O -framework AppKit -framework Foundation -o ~/bin/remctl-permissions remctl-permissions.swift
 cp remctl-server ~/bin/remctl-server && chmod +x ~/bin/remctl-server
 ~/bin/remctl setup --shell auto
 ~/bin/remctl onboard

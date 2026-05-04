@@ -46,6 +46,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 | `GET` | `/api/v1/upcoming?days=7` | Upcoming reminders |
 | `GET` | `/api/v1/overdue` | Overdue reminders |
 | `GET` | `/api/v1/flagged` | Flagged reminders |
+| `GET` | `/api/v1/urgent` | macOS 26 urgent reminders |
 | `GET` | `/api/v1/search?q=query` | Search title and notes |
 | `GET` | `/api/v1/tags` | Tags |
 | `GET` | `/api/v1/sections` | Sections |

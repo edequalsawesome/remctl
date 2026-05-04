@@ -1,6 +1,6 @@
 #!/bin/bash
 # RemCTL Installer
-# Installs remctl, remctl-bridge, remctl-server, and shared runtime helpers.
+# Installs remctl, remctl-bridge, remctl-permissions, remctl-server, and shared runtime helpers.
 
 set -euo pipefail
 
@@ -24,6 +24,7 @@ Notes:
   The installer copies binaries into ~/bin by default.
   Use PREFIX="$HOME/.local" if you want ~/.local/bin instead.
   Run `remctl onboard` after install to trigger macOS permission prompts.
+  Run `remctl permissions full-disk-access` for the guided Full Disk Access helper.
   The optional service is a separate launchd process and may need its own Full Disk Access grant.
 EOF
 }
@@ -109,20 +110,37 @@ mv "$completion_tmp" "$BIN_DIR/completions/_remctl"
 chmod 644 "$BIN_DIR/completions/_remctl"
 echo -e "  ${GREEN}✓${RESET} _remctl → $BIN_DIR/completions/_remctl"
 
-# 2. Compile and install Swift bridge
-echo -e "${BLUE}→${RESET} Compiling remctl-bridge (Swift/EventKit)..."
+# 2. Compile and install Swift helpers
 if command -v swiftc &>/dev/null; then
-    swiftc -O \
+    echo -e "${BLUE}→${RESET} Compiling remctl-bridge (Swift/EventKit)..."
+    if swiftc -O \
         -framework EventKit \
         -framework Foundation \
         -o "$BIN_DIR/remctl-bridge" \
-        "$SCRIPT_DIR/remctl-bridge.swift" 2>/dev/null
-    chmod +x "$BIN_DIR/remctl-bridge"
-    echo -e "  ${GREEN}✓${RESET} remctl-bridge → $BIN_DIR/remctl-bridge"
+        "$SCRIPT_DIR/remctl-bridge.swift" 2>/dev/null; then
+        chmod +x "$BIN_DIR/remctl-bridge"
+        echo -e "  ${GREEN}✓${RESET} remctl-bridge → $BIN_DIR/remctl-bridge"
+    else
+        echo -e "  ${RED}✗${RESET} remctl-bridge failed to compile"
+        exit 1
+    fi
+
+    echo -e "${BLUE}→${RESET} Compiling remctl-permissions (Swift/AppKit)..."
+    if swiftc -O \
+        -framework AppKit \
+        -framework Foundation \
+        -o "$BIN_DIR/remctl-permissions" \
+        "$SCRIPT_DIR/remctl-permissions.swift" 2>/dev/null; then
+        chmod +x "$BIN_DIR/remctl-permissions"
+        echo -e "  ${GREEN}✓${RESET} remctl-permissions → $BIN_DIR/remctl-permissions"
+    else
+        echo -e "  ${YELLOW}⚠${RESET} remctl-permissions did not compile — guided permission UI unavailable"
+        echo -e "    ${DIM}remctl will still print manual Full Disk Access steps${RESET}"
+    fi
 else
     echo -e "  ${YELLOW}⚠${RESET} swiftc not found — install Xcode Command Line Tools"
     echo -e "    ${DIM}Run: xcode-select --install${RESET}"
-    echo -e "    ${DIM}remctl will fall back to AppleScript for writes${RESET}"
+    echo -e "    ${DIM}remctl will fall back to AppleScript for writes and manual Full Disk Access steps${RESET}"
 fi
 
 # 3. Install API server
@@ -179,15 +197,15 @@ if [[ "$RUN_DOCTOR" -eq 1 || "$BOOTSTRAP" -eq 1 ]]; then
     echo -e "${BLUE}→${RESET} Running remctl doctor..."
     if ! "$BIN_DIR/remctl" doctor; then
         echo -e "${YELLOW}⚠${RESET}  Doctor found setup issues. This is common before macOS permissions are granted."
-        echo -e "${DIM}Run '$BIN_DIR/remctl onboard', follow the printed Full Disk Access steps, then run '$BIN_DIR/remctl doctor'.${RESET}"
+        echo -e "${DIM}Run '$BIN_DIR/remctl onboard'. If Full Disk Access is missing, use '$BIN_DIR/remctl permissions full-disk-access'. Then run '$BIN_DIR/remctl doctor'.${RESET}"
     fi
 fi
 
 echo ""
 echo -e "${GREEN}${BOLD}Done!${RESET} RemCTL v1.0.0 installed."
 if [[ "$BOOTSTRAP" -eq 1 ]]; then
-    echo -e "${DIM}Next: run 'remctl onboard', then 'remctl doctor'.${RESET}"
+    echo -e "${DIM}Next: run 'remctl onboard', then 'remctl doctor'. Use 'remctl permissions full-disk-access' if Full Disk Access is missing.${RESET}"
 else
-    echo -e "${DIM}Next: run 'remctl onboard' on a new Mac or when 'remctl doctor' reports missing permissions.${RESET}"
+    echo -e "${DIM}Next: run 'remctl onboard' on a new Mac. Use 'remctl permissions full-disk-access' when 'remctl doctor' reports missing Full Disk Access.${RESET}"
 fi
 echo ""

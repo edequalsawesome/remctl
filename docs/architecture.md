@@ -13,6 +13,9 @@ remctl (Python)
 remctl-bridge (Swift)
   └─ writes through EventKit
 
+remctl-permissions (Swift/AppKit)
+  └─ guides Full Disk Access setup with draggable targets
+
 remctl-server (Python, optional)
   └─ exposes the same model over localhost HTTP
 ```
@@ -34,6 +37,7 @@ This exposes fields EventKit does not expose cleanly for fast list views:
 - deep links
 - list colors
 - recurrence rules
+- macOS 26 urgent state
 
 RemCTL opens the database read-only. It never writes to SQLite.
 
@@ -63,6 +67,12 @@ EventKit writes recurrence rules. Direct reads resolve those rules from `ZREMCDO
 ```
 
 Human output summarizes the same data with badges such as `↻ weekly Mon, Wed`.
+
+## Flags and Urgent Reminders
+
+Flags are read from `ZFLAGGED` and shown as `⚑`.
+
+macOS 26 urgent reminders are read from `ZISURGENTSTATEENABLEDFORCURRENTUSER` and shown as `⏰`. Apple describes urgent reminders as reminders that schedule an alarm when due; RemCTL treats this as read-only metadata and does not write the private urgent fields.
 
 ## Local API
 
@@ -94,10 +104,20 @@ remctl doctor
 remctl service status
 ```
 
+Open the guided setup flow with:
+
+```bash
+remctl permissions full-disk-access
+remctl permissions full-disk-access --scope service
+```
+
+The helper opens the Full Disk Access pane, copies the first path to the clipboard, and exposes each target as a draggable file row. It does not edit macOS TCC data directly.
+
 ## Environment Overrides
 
 ```bash
 REMCTL_BRIDGE_PATH=/path/to/remctl-bridge
+REMCTL_PERMISSIONS_PATH=/path/to/remctl-permissions
 REMCTL_SERVER_PATH=/path/to/remctl-server
 REMCTL_PATH=/path/to/remctl
 REMCTL_STORE_DIR=/path/to/reminders/store

@@ -147,6 +147,7 @@ def serialize_reminder(
         "list": row["list_name"],
         "completed": bool(row["ZCOMPLETED"]),
         "flagged": bool(row["ZFLAGGED"]),
+        "urgent": bool(_row_get(row, "ZISURGENTSTATEENABLEDFORCURRENTUSER", False)),
         "priority": priority_names.get(row["ZPRIORITY"] or 0, "none"),
         "subtaskCount": subtask_count,
         "isSubtask": bool(row["ZPARENTREMINDER"]),

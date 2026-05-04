@@ -1,5 +1,6 @@
 # Compiled Swift binary
 remctl-bridge
+remctl-permissions
 *.o
 *.dSYM/
 
