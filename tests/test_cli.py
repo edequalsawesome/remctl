@@ -883,8 +883,64 @@ class CliTests(unittest.TestCase):
         table = self.remctl.reminders_to_table_data([row], db=None)
         conn.close()
         self.assertIn("Test reminder", formatted)
-        self.assertEqual(table[0]["id"], 42)
+        self.assertEqual(self.remctl._strip_ansi(table[0]["id"]), "#42")
         self.assertEqual(table[0]["title"], "Test reminder")
+
+    def test_reminder_id_uses_list_color_when_database_colors_are_available(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT 42 AS Z_PK, 'Test reminder' AS ZTITLE, 0 AS ZCOMPLETED, "
+            "0 AS ZFLAGGED, 0 AS ZPRIORITY, NULL AS ZDUEDATE, "
+            "'Work' AS list_name, NULL AS ZNOTES, NULL AS ZICSURL"
+        ).fetchone()
+        fake_db = object()
+        with mock.patch.object(self.remctl, "get_list_colors", return_value={"Work": (1, 2, 3)}):
+            formatted = self.remctl.fmt(row, db=fake_db, verbose=False, _sc={42: 0}, _ht={42: []})
+            table = self.remctl.reminders_to_table_data([row], db=fake_db)
+        conn.close()
+        self.assertIn("\033[38;2;1;2;3m#42\033[0m", formatted)
+        self.assertEqual(table[0]["id"], "\033[38;2;1;2;3m#42\033[0m")
+
+    def test_recurring_reminders_show_badge_and_serialize_recurrence(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        days_blob = json.dumps([
+            {"weekNumber": 0, "dayOfTheWeek": 2},
+            {"weekNumber": 0, "dayOfTheWeek": 4},
+        ]).encode()
+        row = conn.execute(
+            "SELECT 42 AS Z_PK, 'Standup' AS ZTITLE, NULL AS ZNOTES, "
+            "0 AS ZCOMPLETED, 0 AS ZFLAGGED, 0 AS ZPRIORITY, "
+            "NULL AS ZDUEDATE, NULL AS ZALLDAY, NULL AS ZCOMPLETIONDATE, "
+            "NULL AS ZCREATIONDATE, NULL AS ZPARENTREMINDER, 1 AS ZLIST, "
+            "NULL AS ZICSURL, 'ABC' AS ZCKIDENTIFIER, 'Work' AS list_name, "
+            "1 AS recurrence_frequency, 1 AS recurrence_interval, "
+            "0 AS recurrence_count, NULL AS recurrence_end_date, "
+            "? AS recurrence_days_of_week, NULL AS recurrence_days_of_month, "
+            "NULL AS recurrence_months_of_year, NULL AS recurrence_days_of_year, "
+            "NULL AS recurrence_weeks_of_year, NULL AS recurrence_set_positions",
+            (days_blob,),
+        ).fetchone()
+        formatted = self.remctl.fmt(row, db=None, verbose=True)
+        table = self.remctl.reminders_to_table_data([row], db=None)
+        payload = self.remctl.to_dict(row, db=None)
+        conn.close()
+
+        self.assertIn("weekly Mon, Wed", self.remctl._strip_ansi(formatted))
+        self.assertEqual(self.remctl._strip_ansi(table[0]["repeat"]), "weekly Mon, Wed")
+        self.assertEqual(
+            payload["recurrence"],
+            {
+                "frequency": "weekly",
+                "interval": 1,
+                "daysOfWeekDetailed": [
+                    {"weekNumber": 0, "dayOfTheWeek": 2},
+                    {"weekNumber": 0, "dayOfTheWeek": 4},
+                ],
+                "daysOfWeek": [2, 4],
+            },
+        )
 
 
 if __name__ == "__main__":

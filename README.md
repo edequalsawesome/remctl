@@ -1,111 +1,25 @@
-# RemCTL
+# RemCTL 1.0
 
-Power-user CLI for Apple Reminders on macOS. Reads directly from the iCloud Reminders CoreData database for blazing-fast reads, writes via a Swift EventKit bridge for sub-100ms writes. Zero pip dependencies. Small Python footprint.
+Fast, scriptable Apple Reminders for macOS.
+
+RemCTL is a hybrid CLI: it reads the local iCloud Reminders database directly for speed and detail, then writes through Apple’s public EventKit APIs so your changes sync normally to iPhone, iPad, and Mac.
+
+## How It Works
 
 ```
-██████  ███████ ███    ███  ██████ ████████ ██
-██   ██ ██      ████  ████ ██        ██    ██
-██████  █████   ██ ████ ██ ██        ██    ██
-██   ██ ██      ██  ██  ██ ██        ██    ██
-██   ██ ███████ ██      ██  ██████   ██    ███████
-▀▀▀▀▀▀ ▀▀▀▀▀▀▀ ▀▀      ▀▀  ▀▀▀▀▀▀  ▀▀    ▀▀▀▀▀▀▀
+remctl
+  reads:  ~/Library/Group Containers/group.com.apple.reminders/.../Data-*.sqlite
+  writes: remctl-bridge -> EventKit
+  serves: optional remctl-server -> localhost REST API
 ```
 
-## Why RemCTL?
+Why this architecture exists:
 
-| Feature | RemCTL v3 | rem | remindctl |
-|---------|-----------|-----|-----------|
-| **Read speed** | ~42ms (SQLite) | ~160ms (EventKit) | ~160ms (EventKit) |
-| **Write speed** | ~70ms (EventKit bridge) | ~75ms (EventKit) | ~80ms (EventKit) |
-| **Sections** | Full read | None | None |
-| **Subtasks** | Full read | None | None |
-| **Tags/Hashtags** | Full read | None | None |
-| **Attachments** | Full read | None | None |
-| **Deep links** | Every reminder | None | None |
-| **Color output** | Apple-colored per list | Basic | Basic |
-| **Table format** | Unicode box-drawing | Limited | None |
-| **Recurrence** | Set via bridge | Set | Set |
-| **Alarms** | Set via bridge | Set | None |
-| **JSON output** | Every command | Limited | None |
-| **REST API** | Built-in server | None | None |
-| **Dependencies** | Python 3 stdlib only | Swift only | Swift only |
-| **Import/Export** | JSON + CSV | None | None |
+- **Direct SQLite reads** expose sections, subtasks, tags, attachments, deep links, list colors, and recurrence metadata in tens of milliseconds.
+- **EventKit writes** keep Reminders and iCloud in charge of mutations. RemCTL does not write directly to the database.
+- **The local API service is optional**. Use it only when you want HTTP access or a local fallback process.
 
-## Installation
-
-### Requirements
-
-- macOS 14+ (Sonoma or later)
-- Python 3.10+
-- iCloud Reminders enabled
-- Xcode Command Line Tools if you want the fast Swift write bridge
-
-`remctl` is a copy-based install, not a Python package. The installer copies binaries into a directory such as `~/bin` or `~/.local/bin`.
-
-### Choose An Install Location
-
-If you already use `~/bin`, the default installer behavior is fine:
-
-```bash
-git clone https://github.com/viticci/remctl.git
-cd remctl
-./install.sh --bootstrap
-```
-
-If you prefer `~/.local/bin`, install with the same prefix explicitly:
-
-```bash
-git clone https://github.com/viticci/remctl.git
-cd remctl
-PREFIX="$HOME/.local" ./install.sh --bootstrap
-```
-
-`--bootstrap` does the file-and-config setup:
-- copies `remctl`, `remctl-server`, and the shared helper modules into your install directory
-- compiles `remctl-bridge` when `swiftc` is available
-- creates `~/.config/remctl/api-token`
-- installs shell completion for your current shell when supported
-- prints a `remctl doctor` report
-
-It does not grant macOS permissions. Apple requires those to happen interactively, so run `remctl onboard` after installation.
-
-If you also want the background local API service:
-
-```bash
-./install.sh --bootstrap --with-service
-PREFIX="$HOME/.local" ./install.sh --bootstrap --with-service
-```
-
-The service is optional. Most people only need it if they want the local REST API or a fallback when direct SQLite reads are blocked.
-
-### Setup Flow In Plain English
-
-There are three separate steps:
-
-1. `./install.sh --bootstrap` copies files, creates config, installs completions, and reports what is missing.
-2. `remctl onboard` opens Reminders.app, triggers the native permission prompts, and opens the Full Disk Access settings pane when needed.
-3. `remctl doctor` verifies the CLI and, if installed, the optional background API service.
-
-The local API service is a separate launchd process. If you install it, it may need a separate Full Disk Access grant for the Python interpreter shown by `remctl service status`.
-
-### What The Installer Copies
-
-By default, the installer writes to `~/bin`. With `PREFIX="$HOME/.local"`, it writes to `~/.local/bin`.
-
-Installed files:
-- `remctl` — main CLI
-- `remctl-bridge` — Swift/EventKit write helper
-- `remctl-server` — optional REST API server
-- `remctl_runtime.py` — shared runtime/config helpers
-- `remctl_serialization.py` — shared reminder serialization helpers
-
-Config files:
-- `~/.config/remctl/api-token` — local API token
-- `~/.config/remctl/onboard-state.json` — first-run onboarding state
-
-### First-Time Setup On A New Mac
-
-Use this exact flow for a brand-new Mac:
+## Quick Start
 
 ```bash
 git clone https://github.com/viticci/remctl.git
@@ -116,478 +30,127 @@ remctl doctor
 remctl today
 ```
 
-If you installed to `~/.local/bin`, either make sure that directory is already in your `PATH` or run:
+If you install to `~/.local/bin`, use the same prefix every time:
 
 ```bash
 PREFIX="$HOME/.local" ./install.sh --bootstrap
-~/.local/bin/remctl onboard
-~/.local/bin/remctl doctor
-~/.local/bin/remctl today
 ```
 
-What `remctl onboard` does:
-1. Opens Reminders.app.
-2. Triggers the native Reminders permission prompt through EventKit.
-3. Triggers the AppleScript Automation prompt used by fallback writes and real flagged-state writes.
-4. Verifies whether direct database reads are available.
-5. If Full Disk Access is missing, opens the correct System Settings pane and tells you exactly what to add.
+Full setup details live in [docs/installation.md](docs/installation.md).
 
-Important: macOS does not provide a native Full Disk Access prompt and command-line tools cannot grant it automatically. If onboarding reports that direct CLI reads are blocked, add the terminal app running `remctl` or the Python interpreter shown by `remctl doctor`, then rerun:
+## Command Map
+
+| Task | Commands |
+| --- | --- |
+| See what is due | `today`, `upcoming`, `overdue` |
+| Browse reminders | `lists`, `show`, `search`, `flagged`, `info`, `subtasks` |
+| Create and edit | `add`, `edit`, `done`, `undone`, `delete`, `flag`, `unflag` |
+| Organize | `list-create`, `list-rename`, `list-delete`, `sections`, `tags` |
+| Share data | `export`, `import`, `link`, `open`, `--json`, `--format table` |
+| Set up the Mac | `onboard`, `doctor`, `setup`, `service`, `completion` |
+
+Common examples:
 
 ```bash
+remctl today
+remctl show Work --format table
+remctl add "Review PR" -l Work -d "tomorrow 10:00" -p high
+remctl add "Pay rent" -d "2026-06-01" --recurrence monthly
+remctl edit 23880 -d clear
+remctl info 23880 --json
+```
+
+The full command guide is in [docs/commands.md](docs/commands.md).
+
+## Output
+
+RemCTL output is designed for both humans and agents:
+
+- reminder IDs are shown as `#ID`
+- `#ID` is colored with the reminder list color when RemCTL can read list colors
+- recurring reminders show a repeat badge such as `↻ weekly Mon, Wed`
+- table output keeps a dedicated `Repeat` column when any row is recurring
+- every read command supports JSON output
+
+```bash
+remctl today --json
+remctl --format table upcoming 14
+NO_COLOR=1 remctl today
+```
+
+## Optional Local API
+
+The local REST API is served by `remctl-server` and defaults to `127.0.0.1:19876` with Bearer token auth.
+
+```bash
+remctl service install
+remctl service status
+curl -H "Authorization: Bearer $(cat ~/.config/remctl/api-token)" \
+  http://127.0.0.1:19876/api/v1/today
+```
+
+API details are in [docs/rest-api.md](docs/rest-api.md).
+
+## macOS Permissions
+
+RemCTL may need three different macOS grants:
+
+- Reminders access for EventKit writes
+- Automation access for AppleScript fallback operations
+- Full Disk Access for direct database reads
+
+Run:
+
+```bash
+remctl onboard
 remctl doctor
 ```
 
-If onboarding says the local `remctl` service fallback is already healthy, you can keep using `remctl` immediately and come back to direct CLI Full Disk Access later. The warning only affects direct SQLite reads in that shell.
+If Full Disk Access is missing, RemCTL prints the exact target path and copies it to the clipboard. In the System Settings file picker, press `Command-Shift-G`, paste the path, press Return, then click Open.
 
-### Verify What You Are Actually Running
+The background API service is a separate launchd process, so it can need its own Full Disk Access grant. `remctl service status` prints the exact service target.
 
-This matters after upgrades and on systems with multiple bin directories:
+## For Agents
+
+Use JSON when scripting:
 
 ```bash
-which remctl
-remctl --help | grep onboard
-remctl doctor
+remctl today --json
+remctl show Work --json
+remctl info 23880 --json
 ```
 
-If `which remctl` points at `~/.local/bin/remctl`, but you only ran `./install.sh` without `PREFIX="$HOME/.local"`, you updated the repo checkout but not the installed CLI in your `PATH`.
+Do not mutate the Reminders SQLite database. Use RemCTL commands, the local API, or EventKit.
 
-### Upgrading After `git pull`
-
-`git pull` updates the repository checkout only. It does **not** update the installed `remctl` binary in your `PATH`.
-
-After pulling new commits, rerun the installer with the same destination you used originally:
+After a repo update, reinstall the copied CLI before testing:
 
 ```bash
 git pull
 ./install.sh
-```
-
-Or, if you installed to `~/.local/bin`:
-
-```bash
-git pull
-PREFIX="$HOME/.local" ./install.sh
 hash -r
-```
-
-`hash -r` refreshes your shell's command cache so `zsh` or `bash` stops using the old binary path metadata.
-
-### PATH Setup
-
-If the installer warns that your bin directory is not in `PATH`, add it to your shell config.
-
-For `~/bin` in zsh:
-
-```bash
-echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
-```
-
-For `~/.local/bin` in zsh:
-
-```bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
-```
-
-### Installer Overrides
-
-The installer does not require a fixed `~/bin` or `~/.config` layout:
-
-```bash
-PREFIX="$HOME/.local" ./install.sh
-REMCTL_BIN_DIR="$HOME/.local/bin" ./install.sh
-REMCTL_CONFIG_DIR="$HOME/.config/remctl" ./install.sh
-REMCTL_STORE_DIR="/custom/reminders-store" ./install.sh
-```
-
-### Manual Install
-
-Manual install is only for advanced setups. The installer is the recommended path.
-
-```bash
-mkdir -p ~/bin
-cp remctl ~/bin/remctl && chmod +x ~/bin/remctl
-cp remctl_runtime.py ~/bin/remctl_runtime.py
-cp remctl_serialization.py ~/bin/remctl_serialization.py
-swiftc -O -framework EventKit -framework Foundation -o ~/bin/remctl-bridge remctl-bridge.swift
-cp remctl-server ~/bin/remctl-server && chmod +x ~/bin/remctl-server
-~/bin/remctl setup --shell auto
-~/bin/remctl onboard
-```
-
-### Shell Completion
-
-The recommended path is still:
-
-```bash
-remctl setup --shell auto
-```
-
-You can also install a specific completion manually:
-
-```bash
-eval "$(remctl completion zsh)"
-eval "$(remctl completion bash)"
-remctl completion fish | source
-```
-
-### Help And Discovery
-
-```bash
-remctl --help
-remctl onboard --help
-remctl setup --help
-remctl doctor --help
-remctl service --help
-remctl completion --help
-./install.sh --help
-```
-
-The top-level help lists every command. The onboarding, setup, doctor, and service subcommands include more detailed examples in their own `--help` output.
-
-## Usage
-
-### Quick Start
-
-```bash
-remctl                          # Splash screen + today's reminders
-remctl today                    # Due today + overdue
-remctl upcoming                 # Next 7 days, grouped by day
-remctl upcoming 14              # Next 14 days
-```
-
-### Viewing Reminders
-
-```bash
-remctl lists                    # All lists with section counts
-remctl show Shopping            # Reminders grouped by section
-remctl show Work --completed    # Include completed items
-remctl show Family -v           # Verbose (notes, URLs)
-remctl info 23880               # Full detail for a reminder
-remctl subtasks 23880           # View subtasks
-remctl flagged                  # All flagged reminders
-remctl overdue                  # All overdue reminders
-remctl search "milk"            # Search by title or notes
-remctl tags                     # All hashtag labels
-remctl sections                 # Sections across all lists
-remctl stats                    # Statistics overview
-```
-
-### Creating Reminders
-
-```bash
-remctl add "Buy milk"                               # Default list
-remctl add "Review PR" -l Work                      # Specific list
-remctl add "Call dentist" -d tomorrow                # Due tomorrow
-remctl add "Team meeting" -d "next monday at 3pm"   # Natural language
-remctl add "Deploy" -d +3d -p high                  # In 3 days, high priority
-remctl add "Pay rent" -d "2026-04-01" -f            # Flagged
-remctl add "Weekly report" --recurrence weekly       # Recurring
-remctl add "Standup" --recurrence "weekly mon,wed,fri" --alarm 15m
-remctl add "Check app" --url "https://example.com"  # URL (appended to notes)
-remctl add "Groceries #shopping #weekly" -t errands  # With tags
-```
-
-#### Due Date Formats
-
-| Format | Example | Result |
-|--------|---------|--------|
-| `today` | `-d today` | Today at midnight |
-| `tomorrow` | `-d tomorrow` | Tomorrow |
-| `+Nd` | `-d +3d` | 3 days from now |
-| `+Nw` | `-d +1w` | 1 week from now |
-| `eod` | `-d eod` | Today at 5:00 PM |
-| `eow` | `-d eow` | Next Friday |
-| `next <day>` | `-d "next friday"` | Next Friday |
-| `next <day> at <time>` | `-d "next monday at 3pm"` | Next Monday at 3 PM |
-| `in N days/weeks` | `-d "in 2 weeks"` | 2 weeks from now |
-| ISO 8601 | `-d 2026-04-15` | April 15, 2026 |
-| ISO + time | `-d "2026-04-15 14:00"` | April 15 at 2 PM |
-
-### Modifying Reminders
-
-```bash
-remctl done 23880               # Complete
-remctl undone 23880             # Uncomplete
-remctl edit 23880 --title "New title" -d "next friday" -p medium
-remctl edit 23880 -d clear      # Remove due date
-remctl flag 23880               # Flag
-remctl unflag 23880             # Unflag
-remctl delete 23880             # Delete (with confirmation)
-remctl delete 23880 --force     # Delete without confirmation
-```
-
-### List Management
-
-```bash
-remctl list-create "Project X" --color blue
-remctl list-rename "Project X" "Project Y"
-remctl list-delete "Project Y" --force
-```
-
-### Import/Export
-
-```bash
-# Export
-remctl export --list Shopping --format json > shopping.json
-remctl export --format csv > all-reminders.csv
-
-# Import
-remctl import shopping.json
-```
-
-### Deep Links
-
-```bash
-remctl link 23880               # Get deep link for a reminder
-remctl link -l Shopping         # Deep links for all in a list
-remctl open 23880               # Open in Reminders.app
-remctl open                     # Just open Reminders.app
-```
-
-### Output Formats
-
-```bash
-remctl today                    # Plain text (default)
-remctl --format table today     # Unicode table
-remctl today --json             # JSON output
-remctl --format json today      # Same as --json
-```
-
-Every command supports `--json` for machine-readable output.
-
-### Color Output
-
-RemCTL displays reminders color-coded by their list color in Reminders.app. Colors are automatically parsed from the iCloud database.
-
-Disable colors:
-```bash
-remctl --no-color today         # Flag
-NO_COLOR=1 remctl today         # Environment variable
-```
-
-## Architecture
-
-```
-┌──────────────────────────────────────────┐
-│              remctl (Python)             │
-│  ┌────────────┐    ┌──────────────────┐  │
-│  │   SQLite    │    │  remctl-bridge   │  │
-│  │   (reads)   │    │ (Swift/EventKit) │  │
-│  │   ~42ms    │    │   writes ~70ms   │  │
-│  └──────┬─────┘    └────────┬─────────┘  │
-│         │                   │            │
-│         ▼                   ▼            │
-│  ┌──────────────────────────────────┐    │
-│  │    iCloud Reminders Database     │    │
-│  │   (syncs to all Apple devices)   │    │
-│  └──────────────────────────────────┘    │
-└──────────────────────────────────────────┘
-         │
-         ▼
-┌──────────────────────────────────────────┐
-│         remctl-server (Python)           │
-│  REST API over HTTP + Bearer auth        │
-│  Localhost by default                    │
-│  Optional remote access if exposed       │
-└──────────────────────────────────────────┘
-```
-
-### How Reads Work
-
-RemCTL reads directly from the iCloud Reminders CoreData SQLite database at:
-```
-~/Library/Group Containers/group.com.apple.reminders/Container_v1/Stores/Data-*.sqlite
-```
-
-This gives access to **everything** — sections, subtasks, tags, attachments, completion dates, deep link identifiers — in ~42ms. EventKit-based tools can only access basic fields and take 4x longer.
-
-### How Writes Work
-
-RemCTL uses a hybrid write path:
-
-1. **remctl-bridge** (preferred): A pre-compiled Swift binary that writes via EventKit. ~70ms per operation. Supports recurrence, alarms, URLs (appended to notes — the Reminders URL field is a private ReminderKit property, not writable via EventKit), and list management.
-2. **AppleScript fallback**: If the bridge isn't available, remctl falls back to AppleScript. Slower (~8.7s) and more limited, but works without compilation.
-
-The bridge is detected automatically next to the installed CLI binary. For custom layouts, override it with `REMCTL_BRIDGE_PATH`.
-
-RemCTL also honors:
-- `REMCTL_BRIDGE_PATH`
-- `REMCTL_PATH`
-- `REMCTL_STORE_DIR`
-- `REMCTL_CONFIG_DIR`
-
-## REST API Server
-
-RemCTL includes a built-in REST API server for remote access and future Android sync.
-
-### Starting the Server
-
-```bash
-remctl-server                       # Default: 127.0.0.1:19876
-remctl-server --host 0.0.0.0        # Expose on all interfaces intentionally
-remctl-server --port 8080           # Custom port
-remctl-server --generate-token      # Generate new auth token
-
-# Recommended persistent setup
-./install.sh --with-service
-remctl service install
-remctl service status
-```
-
-Server hardening defaults:
-- Binds to `127.0.0.1` by default instead of `0.0.0.0`
-- CORS is disabled unless `--allow-origin` is set
-- `/api/v1/og` is disabled unless `--enable-opengraph` is set
-- Writes stay on the bridge/CLI paths; there is no direct SQLite write fallback
-
-### Authentication
-
-All endpoints (except `/health`) require a Bearer token:
-```bash
-curl -H "Authorization: Bearer YOUR_TOKEN" http://YOUR-HOSTNAME:19876/api/v1/today
-```
-
-The token is stored at `~/.config/remctl/api-token` and auto-generated on first run.
-
-### API Endpoints
-
-#### Read Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/v1/lists` | All reminder lists with counts |
-| `GET` | `/api/v1/lists/:name` | Reminders in a list |
-| `GET` | `/api/v1/lists/:name/sections` | Sections for a list |
-| `GET` | `/api/v1/reminders/:id` | Full reminder detail |
-| `GET` | `/api/v1/reminders/:id/subtasks` | Subtasks |
-| `GET` | `/api/v1/today` | Due today + overdue |
-| `GET` | `/api/v1/upcoming?days=7` | Upcoming reminders |
-| `GET` | `/api/v1/overdue` | Overdue reminders |
-| `GET` | `/api/v1/flagged` | Flagged reminders |
-| `GET` | `/api/v1/search?q=query` | Search reminders |
-| `GET` | `/api/v1/tags` | All tags |
-| `GET` | `/api/v1/sections` | All sections |
-| `GET` | `/api/v1/stats` | Statistics |
-| `GET` | `/health` | Health check (no auth) |
-
-#### Write Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/v1/reminders` | Create reminder |
-| `PATCH` | `/api/v1/reminders/:id` | Update reminder |
-| `DELETE` | `/api/v1/reminders/:id` | Delete reminder |
-| `POST` | `/api/v1/reminders/:id/complete` | Mark complete |
-| `POST` | `/api/v1/reminders/:id/uncomplete` | Mark incomplete |
-| `POST` | `/api/v1/reminders/:id/flag` | Flag |
-| `POST` | `/api/v1/reminders/:id/unflag` | Unflag |
-| `POST` | `/api/v1/lists` | Create list |
-| `PATCH` | `/api/v1/lists/:name` | Rename list |
-| `DELETE` | `/api/v1/lists/:name` | Delete list |
-
-#### Example: Create a Reminder
-
-```bash
-curl -X POST http://localhost:19876/api/v1/reminders \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"title":"Buy milk","list":"Shopping","dueDate":"2026-04-01T14:00:00","priority":"high"}'
-```
-
-Response:
-```json
-{
-  "ok": true,
-  "data": {
-    "status": "created",
-    "id": "A1B2C3D4-...",
-    "title": "Buy milk"
-  }
-}
-```
-
-### Running as a Service
-
-Use the built-in service manager instead of creating a plist manually:
-
-```bash
-remctl service install
-remctl service status
-remctl service restart
-remctl service uninstall
-```
-
-Useful service options:
-
-```bash
-remctl service install --port 8080
-remctl service install --host 0.0.0.0
-remctl service install --allow-origin "https://example.com"
-remctl service install --enable-opengraph
-```
-
-The launch agent lives at `~/Library/LaunchAgents/com.remctl.server.plist`. Logs go to `~/Library/Logs/remctl-server.log`.
-
-RemCTL writes the launch agent with the same `python3` interpreter that ran `remctl setup` or `remctl service install`, which avoids relying on launchd's limited default `PATH`.
-
-If `remctl doctor` reports `local_api` as degraded with `database: not found` while the CLI itself still works, the background server likely lacks Reminders database access. This is a separate permission from the terminal app that runs `remctl`.
-
-Use `remctl service status` to see the exact target:
-
-```bash
-remctl service status
-```
-
-Look for:
-
-```text
-Full Disk Access target: /path/to/python3
-```
-
-Then open **System Settings → Privacy & Security → Full Disk Access**, add that Python path, and run:
-
-```bash
-remctl service restart
+remctl --version
 remctl doctor
 ```
 
-`remctl onboard` can open the Full Disk Access settings pane and copy the relevant path to the clipboard. In the file picker, press `Command-Shift-G`, paste the path, press Return, then click Open. macOS still requires you to add the target manually.
+## Docs
 
-### Public-Friendly Setup Flow
+- [Installation and onboarding](docs/installation.md)
+- [Command guide](docs/commands.md)
+- [Architecture](docs/architecture.md)
+- [REST API](docs/rest-api.md)
+- [Permission onboarding design notes](docs/permission-onboarding.md)
 
-For someone setting this up on a new Mac, the shortest reliable path is:
+## Project Layout
 
-```bash
-./install.sh --bootstrap
-remctl onboard
-remctl doctor
-remctl today
-```
-
-If `onboard` or `doctor` reports failures, each check includes the specific fix.
-
-For the planned drag-to-System-Settings permission helper, see [`docs/permission-onboarding.md`](docs/permission-onboarding.md).
-
-## Files
-
-| File | Description | Size |
-|------|-------------|------|
-| `remctl` | Main CLI (Python 3, stdlib only) | ~3,900 lines |
-| `remctl-bridge.swift` | Swift EventKit write helper (source) | ~440 lines |
-| `remctl-bridge` | Compiled Swift binary | ~130 KB |
-| `remctl-server` | REST API server (Python 3, stdlib only) | ~1,650 lines |
-| `remctl_runtime.py` | Shared path/config/runtime helpers | ~120 lines |
-| `remctl_serialization.py` | Shared reminder serialization helpers | ~125 lines |
-| `completions/_remctl` | zsh completion | ~160 lines |
-| `install.sh` | Installer/bootstrap script | ~190 lines |
+| Path | Purpose |
+| --- | --- |
+| `remctl` | Main Python CLI |
+| `remctl-bridge.swift` | Swift/EventKit write helper source |
+| `remctl-server` | Optional localhost REST API |
+| `remctl_runtime.py` | Shared paths, config, date windows, safety helpers |
+| `remctl_serialization.py` | Shared reminder JSON serialization |
+| `install.sh` | Copy-based installer and bootstrap script |
 
 ## License
 
-MIT License. See [LICENSE](LICENSE).
-
-## Author
-
-Federico Viticci ([@viticci](https://github.com/viticci)) — [MacStories](https://www.macstories.net)
+MIT. See [LICENSE](LICENSE).

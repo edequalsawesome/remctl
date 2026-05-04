@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""remctl — Power-user Reminders CLI v3.0.0
+"""remctl — Power-user Reminders CLI v1.0.0
 
 Reads from the iCloud Reminders CoreData database (sections, subtasks, tags,
 attachments, completion status, list colors). Writes via remctl-bridge (EventKit)
@@ -26,6 +26,7 @@ from remctl_runtime import (
 )
 from remctl_serialization import (
     preload_extras as shared_preload_extras,
+    recurrence_from_row,
     serialize_reminder,
     serialize_reminders,
 )
@@ -36,7 +37,7 @@ try:
 except ImportError:
     _cal = None
 
-VERSION = "3.0.0"
+VERSION = "1.0.0"
 
 APPLE_EPOCH = 978307200
 STORE_DIR = resolve_store_dir()
@@ -267,6 +268,26 @@ def color_list_name(name, db=None):
             return C.rgb(r, g, b, name)
     return C.cyan(name)
 
+
+def color_for_list_name(name, db=None):
+    """Return RGB color tuple for a Reminders list when the database is available."""
+    if not name or not db:
+        return None
+    colors = get_list_colors(db)
+    return colors.get(name)
+
+
+def color_by_list(text, list_name=None, db=None):
+    """Color arbitrary text using the Reminders color for its list."""
+    text = str(text)
+    if not C.enabled:
+        return text
+    rgb = color_for_list_name(list_name, db)
+    if rgb:
+        r, g, b = rgb
+        return C.rgb(r, g, b, text)
+    return C.cyan(text) if list_name else C.dim(text)
+
 # ── Queries ──────────────────────────────────────────────────────────────────
 
 def q_lists(db):
@@ -282,9 +303,22 @@ def q_list_pk(db, name):
     ).fetchone()
     return r[0] if r else None
 
-_REM_COLS = """r.Z_PK, r.ZTITLE, r.ZNOTES, r.ZCOMPLETED, r.ZFLAGGED, r.ZPRIORITY,
+_RECURRENCE_COLS = """
+    (SELECT rr.ZFREQUENCY FROM ZREMCDOBJECT rr WHERE rr.ZREMINDER4 = r.Z_PK AND rr.ZMARKEDFORDELETION = 0 AND rr.Z_ENT = 34 ORDER BY rr.Z_PK LIMIT 1) AS recurrence_frequency,
+    (SELECT rr.ZINTERVAL FROM ZREMCDOBJECT rr WHERE rr.ZREMINDER4 = r.Z_PK AND rr.ZMARKEDFORDELETION = 0 AND rr.Z_ENT = 34 ORDER BY rr.Z_PK LIMIT 1) AS recurrence_interval,
+    (SELECT rr.ZOCCURRENCECOUNT FROM ZREMCDOBJECT rr WHERE rr.ZREMINDER4 = r.Z_PK AND rr.ZMARKEDFORDELETION = 0 AND rr.Z_ENT = 34 ORDER BY rr.Z_PK LIMIT 1) AS recurrence_count,
+    (SELECT rr.ZENDDATE FROM ZREMCDOBJECT rr WHERE rr.ZREMINDER4 = r.Z_PK AND rr.ZMARKEDFORDELETION = 0 AND rr.Z_ENT = 34 ORDER BY rr.Z_PK LIMIT 1) AS recurrence_end_date,
+    (SELECT rr.ZDAYSOFTHEWEEK FROM ZREMCDOBJECT rr WHERE rr.ZREMINDER4 = r.Z_PK AND rr.ZMARKEDFORDELETION = 0 AND rr.Z_ENT = 34 ORDER BY rr.Z_PK LIMIT 1) AS recurrence_days_of_week,
+    (SELECT rr.ZDAYSOFTHEMONTH FROM ZREMCDOBJECT rr WHERE rr.ZREMINDER4 = r.Z_PK AND rr.ZMARKEDFORDELETION = 0 AND rr.Z_ENT = 34 ORDER BY rr.Z_PK LIMIT 1) AS recurrence_days_of_month,
+    (SELECT rr.ZMONTHSOFTHEYEAR FROM ZREMCDOBJECT rr WHERE rr.ZREMINDER4 = r.Z_PK AND rr.ZMARKEDFORDELETION = 0 AND rr.Z_ENT = 34 ORDER BY rr.Z_PK LIMIT 1) AS recurrence_months_of_year,
+    (SELECT rr.ZDAYSOFTHEYEAR FROM ZREMCDOBJECT rr WHERE rr.ZREMINDER4 = r.Z_PK AND rr.ZMARKEDFORDELETION = 0 AND rr.Z_ENT = 34 ORDER BY rr.Z_PK LIMIT 1) AS recurrence_days_of_year,
+    (SELECT rr.ZWEEKSOFTHEYEAR FROM ZREMCDOBJECT rr WHERE rr.ZREMINDER4 = r.Z_PK AND rr.ZMARKEDFORDELETION = 0 AND rr.Z_ENT = 34 ORDER BY rr.Z_PK LIMIT 1) AS recurrence_weeks_of_year,
+    (SELECT rr.ZSETPOSITIONS FROM ZREMCDOBJECT rr WHERE rr.ZREMINDER4 = r.Z_PK AND rr.ZMARKEDFORDELETION = 0 AND rr.Z_ENT = 34 ORDER BY rr.Z_PK LIMIT 1) AS recurrence_set_positions"""
+
+_REM_COLS = f"""r.Z_PK, r.ZTITLE, r.ZNOTES, r.ZCOMPLETED, r.ZFLAGGED, r.ZPRIORITY,
     r.ZDUEDATE, r.ZALLDAY, r.ZCOMPLETIONDATE, r.ZCREATIONDATE,
-    r.ZPARENTREMINDER, r.ZLIST, r.ZICSURL, r.ZCKIDENTIFIER, l.ZNAME as list_name"""
+    r.ZPARENTREMINDER, r.ZLIST, r.ZICSURL, r.ZCKIDENTIFIER, l.ZNAME as list_name,
+    {_RECURRENCE_COLS}"""
 
 def q_reminders(db, list_pk=None, completed=False, parent_pk=None, top_level=False, limit=500):
     c, params = ["r.ZMARKEDFORDELETION = 0", "r.ZACCOUNT IS NOT NULL"], []
@@ -483,20 +517,95 @@ def _list_name_from_item(item):
     return _item_get(item, "list_name", _item_get(item, "list"))
 
 
+def reminder_id_text(reminder_id, list_name=None, db=None):
+    return color_by_list(f"#{reminder_id}", list_name, db)
+
+
+def reminder_id_from_item(item, db=None):
+    rid = item["Z_PK"] if _item_has(item, "Z_PK") else _item_get(item, "id", "?")
+    return reminder_id_text(rid, _list_name_from_item(item), db)
+
+
 def _url_from_item(item):
     return _item_get(item, "ZICSURL", _item_get(item, "url"))
 
 
 def _subtask_count_from_item(item, db=None, _sc=None):
     if _item_has(item, "Z_PK"):
-        return (_sc or {}).get(item["Z_PK"], q_subtask_count(db, item["Z_PK"]) if db else 0)
+        pk = item["Z_PK"]
+        if _sc is not None and pk in _sc:
+            return _sc[pk]
+        return q_subtask_count(db, pk) if db else 0
     return _item_get(item, "subtaskCount", 0) or 0
 
 
 def _tags_from_item(item, db=None, _ht=None):
     if _item_has(item, "Z_PK"):
-        return (_ht or {}).get(item["Z_PK"], [t["ZNAME"] for t in q_hashtags(db, item["Z_PK"])] if db else [])
+        pk = item["Z_PK"]
+        if _ht is not None and pk in _ht:
+            return _ht[pk]
+        return [t["ZNAME"] for t in q_hashtags(db, pk)] if db else []
     return _item_get(item, "tags", []) or []
+
+
+RECURRENCE_DAY_NAMES = {
+    1: "Sun",
+    2: "Mon",
+    3: "Tue",
+    4: "Wed",
+    5: "Thu",
+    6: "Fri",
+    7: "Sat",
+}
+
+
+def _recurrence_from_item(item):
+    if _item_has(item, "recurrence"):
+        return _item_get(item, "recurrence")
+    return recurrence_from_row(item, ts=ts)
+
+
+def recurrence_summary(recurrence):
+    if not recurrence:
+        return ""
+    frequency = recurrence.get("frequency")
+    interval = int(recurrence.get("interval") or 1)
+    units = {
+        "daily": ("day", "days"),
+        "weekly": ("week", "weeks"),
+        "monthly": ("month", "months"),
+        "yearly": ("year", "years"),
+    }
+    if frequency not in units:
+        return ""
+    singular, plural = units[frequency]
+    if interval == 1:
+        label = frequency
+    else:
+        label = f"every {interval} {plural}"
+
+    days = recurrence.get("daysOfWeek") or []
+    if frequency == "weekly" and days:
+        names = [RECURRENCE_DAY_NAMES.get(int(day), str(day)) for day in days]
+        label += " " + ", ".join(names)
+
+    days_of_month = recurrence.get("daysOfMonth") or []
+    if frequency == "monthly" and days_of_month:
+        label += " on " + ", ".join(str(day) for day in days_of_month)
+
+    count = recurrence.get("count")
+    if count:
+        label += f" x{count}"
+    elif recurrence.get("endDate"):
+        label += f" until {str(recurrence['endDate'])[:10]}"
+
+    return label
+
+
+def recurrence_badge(item):
+    summary = recurrence_summary(_recurrence_from_item(item))
+    return C.magenta(f"↻ {summary}") if summary else ""
+
 
 def fmt(r, db=None, verbose=False, indent="", _sc=None, _ht=None):
     completed = r["ZCOMPLETED"] if _item_has(r, "ZCOMPLETED") else bool(_item_get(r, "completed"))
@@ -511,16 +620,18 @@ def fmt(r, db=None, verbose=False, indent="", _sc=None, _ht=None):
     tag_str = " " + " ".join(f"#{t}" for t in tags) if tags else ""
     sub_str = f" [{sc} subtask{'s' if sc != 1 else ''}]" if sc > 0 else ""
     pri_str = f" {_color_priority(pri_val)}" if PRI.get(pri_val, "") else ""
-    rid = r["Z_PK"] if _item_has(r, "Z_PK") else _item_get(r, "id", "?")
-    id_str = C.dim(f"#{rid}")
+    id_str = reminder_id_from_item(r, db)
     title = (r["ZTITLE"] if _item_has(r, "ZTITLE") else _item_get(r, "title")) or "(untitled)"
     due_str = fmt_due(r["ZDUEDATE"] if _item_has(r, "ZDUEDATE") else _item_get(r, "dueDate"))
+    repeat_badge = recurrence_badge(r)
+    recur_str = f" {repeat_badge}" if repeat_badge else ""
     if completed:
         title = C.dim(C.strikethrough(title))
         due_str = C.dim(due_str)
+        recur_str = C.dim(recur_str)
         tag_str = C.dim(tag_str)
         sub_str = C.dim(sub_str)
-    parts = [f"{indent}{status} {id_str}{pri_str}{flag} {title}{due_str}{tag_str}{sub_str}"]
+    parts = [f"{indent}{status} {id_str}{pri_str}{flag} {title}{due_str}{recur_str}{tag_str}{sub_str}"]
     if verbose:
         list_name = _list_name_from_item(r)
         if list_name:
@@ -531,6 +642,9 @@ def fmt(r, db=None, verbose=False, indent="", _sc=None, _ht=None):
         url = _url_from_item(r)
         if url:
             parts.append(f"{indent}    URL: {C.dim(url)}")
+        recurrence = recurrence_summary(_recurrence_from_item(r))
+        if recurrence:
+            parts.append(f"{indent}    Repeats: {C.magenta(recurrence)}")
     return "\n".join(parts)
 
 def to_dict(r, db=None, section=None, _sc=None, _ht=None):
@@ -575,7 +689,7 @@ def _pad(s, width):
 def fmt_table(rows_data, max_width=None):
     """Format data as a Unicode box-drawing table.
 
-    rows_data: list of dicts with keys: id, title, list, due, pri
+    rows_data: list of dicts with keys: id, title, list, due, repeat, pri
     """
     if not rows_data:
         return ""
@@ -585,19 +699,23 @@ def fmt_table(rows_data, max_width=None):
         except (ValueError, OSError):
             max_width = 80
 
-    headers = ["ID", "Title", "List", "Due", "Pri"]
+    columns = [("id", "ID"), ("title", "Title"), ("list", "List"), ("due", "Due")]
+    if any(row.get("repeat") for row in rows_data):
+        columns.append(("repeat", "Repeat"))
+    columns.append(("pri", "Pri"))
+    headers = [label for _, label in columns]
     # Calculate column widths
     col_widths = [len(h) for h in headers]
     for row in rows_data:
-        vals = [str(row.get("id", "")), row.get("title", ""), row.get("list", ""),
-                row.get("due", ""), row.get("pri", "")]
+        vals = [row.get(key, "") for key, _ in columns]
         for i, v in enumerate(vals):
             col_widths[i] = max(col_widths[i], _visible_len(str(v)))
 
     # Cap title column so table fits terminal
-    fixed = col_widths[0] + col_widths[2] + col_widths[3] + col_widths[4] + 16  # borders + padding
+    title_index = next(i for i, (key, _) in enumerate(columns) if key == "title")
+    fixed = sum(width for i, width in enumerate(col_widths) if i != title_index) + 3 * len(columns) + 1
     max_title = max(10, max_width - fixed)
-    col_widths[1] = min(col_widths[1], max_title)
+    col_widths[title_index] = min(col_widths[title_index], max_title)
 
     def hline(left, mid, right, fill="─"):
         parts = [left]
@@ -623,13 +741,7 @@ def fmt_table(rows_data, max_width=None):
     lines.append(row_line([C.bold(h) for h in headers]))
     lines.append(hline("├", "┼", "┤"))
     for row in rows_data:
-        vals = [
-            C.dim(str(row.get("id", ""))),
-            row.get("title", ""),
-            row.get("list", ""),
-            row.get("due", ""),
-            row.get("pri", "")
-        ]
+        vals = [str(row.get(key, "")) for key, _ in columns]
         lines.append(row_line(vals))
     lines.append(hline("└", "┴", "┘"))
     return "\n".join(lines)
@@ -672,11 +784,13 @@ def reminders_to_table_data(items, db=None):
         list_name = _list_name_from_item(r) or ""
         if db and C.enabled:
             list_name = color_list_name(list_name, db)
+        repeat = recurrence_summary(_recurrence_from_item(r))
         data.append({
-            "id": r["Z_PK"] if _item_has(r, "Z_PK") else _item_get(r, "id", ""),
+            "id": reminder_id_from_item(r, db),
             "title": title,
             "list": list_name,
             "due": due_str,
+            "repeat": C.magenta(repeat) if repeat else "",
             "pri": pri_str,
         })
     return data
@@ -1909,7 +2023,7 @@ def cmd_info(a):
         if atts: d["attachments"] = [{"filename": a2["ZFILENAME"], "type": a2["ZATTACHMENTTYPERAWVALUE"]} for a2 in atts]
         print(json.dumps(d, indent=2))
         return
-    print(C.bold(f"Reminder #{r['Z_PK']}"))
+    print(f"{C.bold('Reminder')} {reminder_id_text(r['Z_PK'], r['list_name'], db)}")
     print(f"  Title:     {r['ZTITLE']}")
     print(f"  List:      {color_list_name(r['list_name'], db)}")
     if sec: print(f"  Section:   {C.bold(sec)}")
@@ -1925,6 +2039,9 @@ def cmd_info(a):
     print(f"  Flagged:   {flagged_str}")
     if r["ZDUEDATE"]:
         print(f"  Due:       {ts(r['ZDUEDATE']).strftime('%b %d, %Y at %I:%M %p')}")
+    recurrence = recurrence_summary(_recurrence_from_item(r))
+    if recurrence:
+        print(f"  Repeats:   {C.magenta(recurrence)}")
     if r["ZCREATIONDATE"]:
         print(f"  Created:   {ts(r['ZCREATIONDATE']).strftime('%b %d, %Y at %I:%M %p')}")
     if r["ZCOMPLETIONDATE"]:
@@ -2022,12 +2139,12 @@ def cmd_link(a):
             continue
         if r["ZCKIDENTIFIER"]:
             link = f"x-apple-reminderkit://REMCDReminder/{r['ZCKIDENTIFIER']}"
-            results.append({"id": rid, "title": r["ZTITLE"], "link": link})
+            results.append({"id": rid, "title": r["ZTITLE"], "link": link, "_list_name": r["list_name"]})
     if a.json:
-        print(json.dumps(results, indent=2))
+        print(json.dumps([{k: v for k, v in item.items() if not k.startswith("_")} for item in results], indent=2))
     else:
         for item in results:
-            print(f"#{item['id']} {item['title']}")
+            print(f"{reminder_id_text(item['id'], item.get('_list_name'), db)} {item['title']}")
             print(f"  {C.dim(item['link'])}")
 
 def cmd_open(a):
@@ -2973,7 +3090,7 @@ def _print_info_payload(item, args):
     if args.json:
         print(json.dumps(item, indent=2))
         return
-    print(C.bold(f"Reminder #{item['id']}"))
+    print(f"{C.bold('Reminder')} {reminder_id_text(item['id'], item.get('list'))}")
     print(f"  Title:     {item.get('title') or '(untitled)'}")
     print(f"  List:      {color_list_name(item.get('list'))}")
     if item.get("section"):
@@ -2993,6 +3110,9 @@ def _print_info_payload(item, args):
         due_dt = _item_due_datetime(item)
         if due_dt:
             print(f"  Due:       {due_dt.strftime('%b %d, %Y at %I:%M %p')}")
+    recurrence = recurrence_summary(_recurrence_from_item(item))
+    if recurrence:
+        print(f"  Repeats:   {C.magenta(recurrence)}")
     if item.get("createdDate"):
         print(f"  Created:   {datetime.fromisoformat(item['createdDate']).strftime('%b %d, %Y at %I:%M %p')}")
     if item.get("completionDate"):

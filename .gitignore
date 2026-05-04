@@ -7,6 +7,7 @@ remctl-bridge
 __pycache__/
 *.pyc
 *.pyo
+/tests/
 
 # macOS
 .DS_Store
@@ -21,3 +22,6 @@ __pycache__/
 *.swp
 *.swo
 *~
+
+# Generated shell completion output
+/completions/

@@ -182,7 +182,7 @@ if [[ "$RUN_DOCTOR" -eq 1 || "$BOOTSTRAP" -eq 1 ]]; then
 fi
 
 echo ""
-echo -e "${GREEN}${BOLD}Done!${RESET} RemCTL v3.0.0 installed."
+echo -e "${GREEN}${BOLD}Done!${RESET} RemCTL v1.0.0 installed."
 if [[ "$BOOTSTRAP" -eq 1 ]]; then
     echo -e "${DIM}Next: run 'remctl onboard', then 'remctl doctor'.${RESET}"
 else

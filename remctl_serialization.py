@@ -2,6 +2,89 @@
 
 from __future__ import annotations
 
+import json
+
+
+RECURRENCE_FREQUENCIES = {
+    0: "daily",
+    1: "weekly",
+    2: "monthly",
+    3: "yearly",
+}
+
+
+def _row_has(row, key):
+    keys = getattr(row, "keys", None)
+    if callable(keys):
+        try:
+            return key in keys()
+        except Exception:
+            return False
+    return isinstance(row, dict) and key in row
+
+
+def _row_get(row, key, default=None):
+    if isinstance(row, dict):
+        return row.get(key, default)
+    if _row_has(row, key):
+        return row[key]
+    return default
+
+
+def _json_blob(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "replace")
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def recurrence_from_row(row, *, ts=None):
+    """Extract a stable recurrence object from aliased ZREMCDOBJECT fields."""
+    frequency_raw = _row_get(row, "recurrence_frequency")
+    if frequency_raw is None:
+        return None
+    try:
+        frequency = RECURRENCE_FREQUENCIES[int(frequency_raw)]
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    interval = _row_get(row, "recurrence_interval") or 1
+    recurrence = {"frequency": frequency, "interval": int(interval)}
+
+    days_of_week = _json_blob(_row_get(row, "recurrence_days_of_week")) or []
+    if days_of_week:
+        recurrence["daysOfWeekDetailed"] = days_of_week
+        recurrence["daysOfWeek"] = [
+            int(item["dayOfTheWeek"])
+            for item in days_of_week
+            if isinstance(item, dict) and item.get("dayOfTheWeek")
+        ]
+
+    for alias, output_key in (
+        ("recurrence_days_of_month", "daysOfMonth"),
+        ("recurrence_months_of_year", "monthsOfYear"),
+        ("recurrence_days_of_year", "daysOfYear"),
+        ("recurrence_weeks_of_year", "weeksOfYear"),
+        ("recurrence_set_positions", "setPositions"),
+    ):
+        value = _json_blob(_row_get(row, alias))
+        if value:
+            recurrence[output_key] = value
+
+    count = _row_get(row, "recurrence_count") or 0
+    if count:
+        recurrence["count"] = int(count)
+
+    end_date = _row_get(row, "recurrence_end_date")
+    if end_date and ts is not None:
+        recurrence["endDate"] = ts(end_date).isoformat()
+
+    return recurrence
+
 
 def preload_extras(db, pks):
     """Batch-load subtask counts and hashtags to avoid N+1 queries."""
@@ -89,6 +172,9 @@ def serialize_reminder(
         reminder["parentID"] = row["ZPARENTREMINDER"]
     if tags:
         reminder["tags"] = tags
+    recurrence = recurrence_from_row(row, ts=ts)
+    if recurrence:
+        reminder["recurrence"] = recurrence
     if row["ZCKIDENTIFIER"]:
         reminder["deepLink"] = f"x-apple-reminderkit://REMCDReminder/{row['ZCKIDENTIFIER']}"
     return reminder
