@@ -186,6 +186,6 @@ echo -e "${GREEN}${BOLD}Done!${RESET} RemCTL v3.0.0 installed."
 if [[ "$BOOTSTRAP" -eq 1 ]]; then
     echo -e "${DIM}Next: run 'remctl onboard', then 'remctl doctor'.${RESET}"
 else
-    echo -e "${DIM}Next: run 'remctl onboard' to trigger macOS permission prompts.${RESET}"
+    echo -e "${DIM}Next: run 'remctl onboard' on a new Mac or when 'remctl doctor' reports missing permissions.${RESET}"
 fi
 echo ""
