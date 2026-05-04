@@ -82,6 +82,7 @@ echo ""
 # Ensure ~/bin exists
 mkdir -p "$BIN_DIR"
 mkdir -p "$CONFIG_DIR"
+chmod 700 "$CONFIG_DIR" 2>/dev/null || true
 
 # 1. Install main CLI
 echo -e "${BLUE}→${RESET} Installing remctl..."
@@ -128,10 +129,23 @@ chmod +x "$BIN_DIR/remctl-server"
 echo -e "  ${GREEN}✓${RESET} remctl-server → $BIN_DIR/remctl-server"
 
 # 5. Generate API token if missing
-if [[ ! -f "$CONFIG_DIR/api-token" ]]; then
-    TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
-    echo "$TOKEN" > "$CONFIG_DIR/api-token"
-    chmod 600 "$CONFIG_DIR/api-token"
+if [[ ! -e "$CONFIG_DIR/api-token" ]]; then
+    python3 - "$CONFIG_DIR/api-token" <<'PY'
+import os
+import secrets
+import sys
+
+path = sys.argv[1]
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+fd = os.open(path, flags, 0o600)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(secrets.token_urlsafe(32) + "\n")
+finally:
+    os.chmod(path, 0o600)
+PY
     echo -e "  ${GREEN}✓${RESET} API token generated → $CONFIG_DIR/api-token"
 fi
 

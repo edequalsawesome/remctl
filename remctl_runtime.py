@@ -39,6 +39,30 @@ def resolve_config_dir(app_name: str = "remctl") -> Path:
     return base / app_name
 
 
+def ensure_private_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+
+
+def write_private_text_file(path: Path, text: str) -> None:
+    ensure_private_dir(path.parent)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    finally:
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+
+
 def resolve_binary_path(script_path: str, binary_name: str, env_var: str) -> Path:
     override = os.environ.get(env_var)
     if override:

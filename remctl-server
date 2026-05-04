@@ -38,6 +38,7 @@ from remctl_runtime import (
     resolve_store_dir,
     start_of_day,
     upcoming_window,
+    write_private_text_file,
 )
 from remctl_serialization import (
     preload_extras as shared_preload_extras,
@@ -81,9 +82,7 @@ def load_or_create_token(cli_token=None):
 
     # Generate new token
     token = secrets.token_urlsafe(32)
-    TOKEN_DIR.mkdir(parents=True, exist_ok=True)
-    TOKEN_FILE.write_text(token + "\n")
-    TOKEN_FILE.chmod(0o600)
+    write_private_text_file(TOKEN_FILE, token + "\n")
     return token, f"{TOKEN_FILE} (generated)"
 
 
@@ -163,7 +162,7 @@ def q_reminder(db, pk):
     return db.execute(
         f"SELECT {_REM_COLS} FROM ZREMCDREMINDER r "
         f"LEFT JOIN ZREMCDBASELIST l ON r.ZLIST = l.Z_PK "
-        f"WHERE r.Z_PK = ?",
+        f"WHERE r.Z_PK = ? AND r.ZMARKEDFORDELETION = 0 AND r.ZACCOUNT IS NOT NULL",
         (pk,),
     ).fetchone()
 
@@ -1626,9 +1625,7 @@ def main():
 
     if args.generate_token:
         token = secrets.token_urlsafe(32)
-        TOKEN_DIR.mkdir(parents=True, exist_ok=True)
-        TOKEN_FILE.write_text(token + "\n")
-        TOKEN_FILE.chmod(0o600)
+        write_private_text_file(TOKEN_FILE, token + "\n")
         print(f"Generated token: {token}")
         print(f"Saved to: {TOKEN_FILE}")
         token_source = f"{TOKEN_FILE} (generated)"

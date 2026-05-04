@@ -187,6 +187,15 @@ class ServerTests(unittest.TestCase):
         _, params = fake.execute.call_args.args
         self.assertEqual(params[0], "%a\\_b%")
 
+    def test_q_reminder_filters_deleted_and_orphan_rows(self):
+        fake = mock.Mock()
+        fake.execute.return_value.fetchone.return_value = None
+        self.server.q_reminder(fake, 42)
+        sql, params = fake.execute.call_args.args
+        self.assertIn("r.ZMARKEDFORDELETION = 0", sql)
+        self.assertIn("r.ZACCOUNT IS NOT NULL", sql)
+        self.assertEqual(params, (42,))
+
     def test_route_get_list_supports_completed_query(self):
         handler = self._route_handler()
         fake_db = mock.Mock()

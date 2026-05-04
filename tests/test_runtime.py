@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 import tempfile
 import unittest
+import stat
 from pathlib import Path
 from unittest import mock
 
@@ -51,6 +52,14 @@ class RuntimeTests(unittest.TestCase):
     def test_mask_secret_hides_middle(self):
         self.assertEqual(remctl_runtime.mask_secret("abcdefgh12345678"), "abcd...5678")
         self.assertEqual(remctl_runtime.mask_secret("short"), "*****")
+
+    def test_write_private_text_file_uses_private_permissions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config" / "api-token"
+            remctl_runtime.write_private_text_file(path, "secret\n")
+            self.assertEqual(path.read_text(), "secret\n")
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
 
     def test_due_today_window_uses_start_of_day_bounds(self):
         now = datetime(2026, 4, 18, 14, 30, 0)

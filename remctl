@@ -16,11 +16,13 @@ from urllib.request import Request, urlopen
 
 from remctl_runtime import (
     due_today_window,
+    ensure_private_dir,
     resolve_binary_path,
     resolve_config_dir,
     resolve_store_dir,
     start_of_day,
     upcoming_window,
+    write_private_text_file,
 )
 from remctl_serialization import (
     preload_extras as shared_preload_extras,
@@ -296,7 +298,9 @@ def q_reminders(db, list_pk=None, completed=False, parent_pk=None, top_level=Fal
 def q_reminder(db, pk):
     return db.execute(
         f"SELECT {_REM_COLS} FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l "
-        f"ON r.ZLIST = l.Z_PK WHERE r.Z_PK = ?", (pk,)
+        f"ON r.ZLIST = l.Z_PK "
+        f"WHERE r.Z_PK = ? AND r.ZMARKEDFORDELETION = 0 AND r.ZACCOUNT IS NOT NULL",
+        (pk,)
     ).fetchone()
 
 def q_subtask_count(db, pk):
@@ -2480,14 +2484,14 @@ def write_launch_agent_plist(
 
 
 def ensure_api_token():
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(CONFIG_DIR)
     if TOKEN_FILE.exists():
         token = TOKEN_FILE.read_text().strip()
         if token:
+            TOKEN_FILE.chmod(0o600)
             return token, False
     token = secrets.token_urlsafe(32)
-    TOKEN_FILE.write_text(token + "\n")
-    TOKEN_FILE.chmod(0o600)
+    write_private_text_file(TOKEN_FILE, token + "\n")
     return token, True
 
 
