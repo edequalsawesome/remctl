@@ -103,7 +103,9 @@ echo -e "  ${GREEN}✓${RESET} remctl_serialization.py → $BIN_DIR/remctl_seria
 
 echo -e "${BLUE}→${RESET} Installing zsh completion source..."
 mkdir -p "$BIN_DIR/completions"
-cp "$SCRIPT_DIR/completions/_remctl" "$BIN_DIR/completions/_remctl"
+completion_tmp="$BIN_DIR/completions/_remctl.tmp"
+"$BIN_DIR/remctl" completion zsh > "$completion_tmp"
+mv "$completion_tmp" "$BIN_DIR/completions/_remctl"
 chmod 644 "$BIN_DIR/completions/_remctl"
 echo -e "  ${GREEN}✓${RESET} _remctl → $BIN_DIR/completions/_remctl"
 

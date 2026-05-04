@@ -2521,9 +2521,6 @@ complete -c remctl -n "__fish_use_subcommand" -a completion -d "Generate shell c
 
 def get_completion_script(shell):
     if shell == "zsh":
-        source_path = Path(__file__).resolve().parent / "completions" / "_remctl"
-        if source_path.exists():
-            return source_path.read_text()
         return ZSH_COMPLETION
     if shell == "bash":
         return BASH_COMPLETION
