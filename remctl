@@ -158,9 +158,9 @@ def show_splash():
 def reminders_store_access_error():
     if STORE_DIR.exists() and not os.access(STORE_DIR, os.R_OK):
         return (
-            f"Direct SQLite reads are blocked because the Reminders store at {STORE_DIR} "
-            f"is not readable from {sys.executable}. Grant Full Disk Access to the terminal "
-            "app or this Python interpreter, or use the local remctl service."
+            f"Direct CLI reads are blocked because the Reminders store at {STORE_DIR} "
+            f"is not readable from {sys.executable}. This usually means Full Disk Access "
+            "is missing for the terminal app or this Python interpreter."
         )
     return None
 
@@ -733,7 +733,8 @@ def print_check_report(title, checks):
     for check in checks:
         print(f"[{status_labels[check['status']]}] {check['name']}: {check['detail']}")
         if check.get("fix"):
-            print(f"      {C.dim(check['fix'])}")
+            for line in str(check["fix"]).splitlines():
+                print(f"      {C.dim(line)}")
     summary = (
         f"{len(checks)} checks, {warn_count} warning{'s' if warn_count != 1 else ''}, "
         f"{fail_count} failure{'s' if fail_count != 1 else ''}"
@@ -803,19 +804,46 @@ def full_disk_access_targets():
 
 def full_disk_access_fix_text(*, api_healthy=False, rerun_command="remctl doctor", mention_onboard=False):
     targets = full_disk_access_targets()
-    target_text = " or ".join(targets)
+    if mention_onboard:
+        intro = "`remctl onboard` can open System Settings, but macOS still requires you to add the access target manually."
+    else:
+        intro = "macOS cannot grant Full Disk Access from the command line."
     parts = [
-        "macOS does not provide a native Full Disk Access prompt.",
-        f"Open System Settings > Privacy & Security > Full Disk Access and add {target_text}.",
+        intro,
+        "Open System Settings > Privacy & Security > Full Disk Access and add:",
+        *[f"  {target}" for target in targets],
         f"Then relaunch the terminal and rerun `{rerun_command}`.",
     ]
-    if mention_onboard:
-        parts.insert(1, "`remctl onboard` will open the correct System Settings pane for you.")
     if api_healthy:
         parts.append(
-            "If you are happy using the healthy local remctl service fallback, you can ignore this warning."
+            "Direct CLI reads are optional because the local remctl service fallback is healthy; you can ignore this warning if that is enough for your workflow."
         )
-    return " ".join(parts)
+    return "\n".join(parts)
+
+
+def service_full_disk_access_target(settings=None):
+    settings = settings or parse_launch_agent_settings() or {}
+    python_path = settings.get("python_path")
+    if python_path:
+        return python_path
+    server_path = settings.get("server_path") or str(current_server_path())
+    return f"{server_path} (or the Python interpreter that runs it)"
+
+
+def service_full_disk_access_fix_text(settings=None, *, rerun_command="remctl doctor"):
+    target = service_full_disk_access_target(settings)
+    return "\n".join(
+        [
+            "The local API runs as a separate launchd process, so it needs its own Full Disk Access grant.",
+            "Open System Settings > Privacy & Security > Full Disk Access and add:",
+            f"  {target}",
+            "`remctl onboard` can open that settings pane, but macOS still requires you to add the target manually.",
+            "Then run:",
+            "  remctl service restart",
+            f"  {rerun_command}",
+            "`remctl service status` shows the current Server, Python, and Full Disk Access target.",
+        ]
+    )
 
 
 def open_full_disk_access_settings():
@@ -838,6 +866,7 @@ def print_full_disk_access_guidance(*, api_healthy=False, settings_opened=False,
         print(C.dim("  Opened System Settings > Privacy & Security > Full Disk Access."))
     else:
         print(C.dim("  Open System Settings > Privacy & Security > Full Disk Access."))
+    print(C.dim("  macOS requires you to add the access target manually."))
     for target in full_disk_access_targets():
         print(C.dim(f"  Add: {target}"))
     print(C.dim(f"  Then relaunch the terminal and rerun `{rerun_command}`."))
@@ -1004,7 +1033,7 @@ def local_api_check_for_onboarding():
     port = settings.get("port") or DEFAULT_SERVER_PORT
     token = TOKEN_FILE.read_text().strip() if TOKEN_FILE.exists() else None
     probe = local_api_probe(host, port, token=token or None)
-    assessed = assess_local_api_probe("127.0.0.1" if host in {"0.0.0.0", "::"} else host, port, probe)
+    assessed = assess_local_api_probe(host, port, probe, settings=settings)
     return check_result("local_api", assessed["status"], assessed["detail"], assessed["fix"])
 
 
@@ -2610,14 +2639,23 @@ def local_api_probe(host, port, token=None, timeout=2):
     return result
 
 
-def assess_local_api_probe(host, port, probe):
+def assess_local_api_probe(host, port, probe, settings=None):
+    host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
     base_url = f"http://{host}:{port}"
     health = probe.get("health")
     if not health:
         return {
             "status": "warn",
             "detail": probe.get("error") or f"{base_url} unavailable",
-            "fix": "Check remctl service status and server logs.",
+            "fix": "\n".join(
+                [
+                    "Check the launch agent state with:",
+                    "  remctl service status",
+                    "If it is stopped, run:",
+                    "  remctl service restart",
+                    f"Logs: {launch_agent_log_path()}",
+                ]
+            ),
         }
 
     health_data = health.get("data", {}) if isinstance(health, dict) else {}
@@ -2629,11 +2667,7 @@ def assess_local_api_probe(host, port, probe):
     return {
         "status": "fail",
         "detail": detail,
-        "fix": (
-            "If the CLI works but the service cannot see the Reminders database, "
-            "grant Full Disk Access to the Python interpreter used by remctl-server "
-            "and restart the service."
-        ),
+        "fix": service_full_disk_access_fix_text(settings, rerun_command="remctl doctor"),
     }
 
 
@@ -3306,13 +3340,36 @@ def cmd_service(a):
             print(f"Launch agent: {status['path']}")
             print(f"State: {state}")
             if settings:
-                print(f"Server: {settings.get('server_path')} --host {settings.get('host')} --port {settings.get('port')}")
+                host = settings.get("host") or DEFAULT_SERVER_HOST
+                port = settings.get("port") or DEFAULT_SERVER_PORT
+                display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+                print(f"Server: {settings.get('server_path')} --host {host} --port {port}")
+                print(f"URL: http://{display_host}:{port}")
                 if settings.get("python_path"):
                     print(f"Python: {settings['python_path']}")
+                print(f"Full Disk Access target: {service_full_disk_access_target(settings)}")
             if status["pid"]:
                 print(f"PID: {status['pid']}")
             if status["details"] and not status["loaded"]:
                 print(f"Details: {status['details']}")
+            if status["running"] and settings:
+                token = TOKEN_FILE.read_text().strip() if TOKEN_FILE.exists() else None
+                probe = local_api_probe(
+                    settings.get("host") or DEFAULT_SERVER_HOST,
+                    settings.get("port") or DEFAULT_SERVER_PORT,
+                    token=token or None,
+                )
+                api_check = assess_local_api_probe(
+                    settings.get("host") or DEFAULT_SERVER_HOST,
+                    settings.get("port") or DEFAULT_SERVER_PORT,
+                    probe,
+                    settings=settings,
+                )
+                print(f"Health: {api_check['detail']}")
+                if api_check["status"] != "ok" and api_check.get("fix"):
+                    print("Fix:")
+                    for line in str(api_check["fix"]).splitlines():
+                        print(f"  {line}")
         elif result["ok"]:
             print(f"Service {result['action']} completed.")
             if result.get("path"):
@@ -3444,7 +3501,7 @@ def gather_doctor_checks():
         host = settings["host"] if settings else DEFAULT_SERVER_HOST
         port = settings["port"] if settings else DEFAULT_SERVER_PORT
         probe = local_api_probe(host, port, token=token or None)
-        api_check = assess_local_api_probe(host, port, probe)
+        api_check = assess_local_api_probe(host, port, probe, settings=settings)
         add("local_api", api_check["status"], api_check["detail"], api_check["fix"])
         if api_check["status"] == "ok":
             for check in checks:
@@ -3551,15 +3608,24 @@ def cmd_setup(a):
     if getattr(a, "json", False):
         print(json.dumps(result, indent=2))
     else:
+        print(C.bold("RemCTL setup"))
         print(f"Config directory: {CONFIG_DIR}")
-        print(f"API token: {TOKEN_FILE}" + (" (created)" if token_created else ""))
+        print(f"API token: {TOKEN_FILE}" + (" (created)" if token_created else " (already exists)"))
         if completion_path:
             print(f"Shell completion: {completion_path}")
         else:
             print("Shell completion: skipped")
         if service_result:
+            settings = parse_launch_agent_settings() or {}
+            print("Local API service: installed")
             print(f"Launch agent: {launch_agent_path()}")
-        print("Next step: remctl onboard")
+            print(f"Full Disk Access target: {service_full_disk_access_target(settings)}")
+        else:
+            print("Local API service: not installed (optional; run `remctl service install` if you need the REST API)")
+        print()
+        print("Next:")
+        print("  1. remctl onboard   # grant macOS Reminders, Automation, and Full Disk Access permissions")
+        print("  2. remctl doctor    # verify the CLI and optional service")
         if getattr(a, "doctor", False):
             print()
             cmd_doctor(SimpleNamespace(json=False))
@@ -3572,6 +3638,11 @@ def main():
         description="Power-user Reminders CLI — reads sections/subtasks/tags/attachments/colors, "
                     "writes via remctl-bridge (EventKit) with AppleScript fallback.",
         epilog=(
+            "Normal setup flow:\n"
+            "  1. ./install.sh --bootstrap   # copy files, create config, install completions\n"
+            "  2. remctl onboard             # trigger macOS permissions and open Full Disk Access\n"
+            "  3. remctl doctor              # verify the CLI and optional service\n"
+            "\n"
             "Examples:\n"
             "  remctl onboard\n"
             "  remctl today\n"
@@ -3581,7 +3652,7 @@ def main():
             "  remctl service status\n"
             "\n"
             "Use `remctl onboard --help`, `remctl setup --help`, `remctl doctor --help`, and `remctl service --help`\n"
-            "for onboarding and service-management details."
+            "for onboarding and service-management details. The local API service is optional."
         ),
         formatter_class=HelpFormatter,
     )
@@ -3697,9 +3768,9 @@ def main():
             "  remctl onboard --json\n"
             "\n"
             "macOS will not show a native Full Disk Access prompt. If onboarding reports that\n"
-            "direct SQLite reads are blocked, grant Full Disk Access to the Python interpreter\n"
-            "or terminal app shown in `remctl doctor`. If the local API fallback is already\n"
-            "healthy, you can keep using remctl and ignore the warning."
+            "direct CLI reads are blocked, add the terminal app or Python interpreter shown\n"
+            "by `remctl doctor`. If the local API fallback is already healthy, you can keep\n"
+            "using remctl and come back to direct CLI Full Disk Access later."
         ),
         formatter_class=HelpFormatter,
     ); js(c)
@@ -3720,8 +3791,8 @@ def main():
             "show the Reminders and Automation permission prompts.\n"
             "\n"
             "If `local_api` reports `degraded (database: not found)` while the CLI itself works,\n"
-            "grant Full Disk Access to the Python interpreter used by `remctl-server`, then run\n"
-            "`remctl service restart` and `remctl doctor` again."
+            "the background service is missing its own Full Disk Access grant. `doctor` prints\n"
+            "the exact Python path to add, followed by the restart and verification commands."
         ),
         formatter_class=HelpFormatter,
     ); js(c)
@@ -3740,12 +3811,12 @@ def main():
             "  remctl setup --service install --port 8080\n"
             "\n"
             "`setup` creates config files, installs completions, and optionally installs the\n"
-            "background service. It does not trigger the native macOS Reminders permission prompts.\n"
-            "Run `remctl onboard` after setup on a new Mac.\n"
+            "background service. It does not grant macOS permissions. Run `remctl onboard`\n"
+            "after setup on a new Mac.\n"
             "\n"
             "The service is optional. Use it only if you need the local REST API or Android sync,\n"
-            "and expect to grant Full Disk Access to the Python interpreter if doctor reports a\n"
-            "degraded API with `database: not found`."
+            "and grant Full Disk Access to the service Python interpreter if doctor reports\n"
+            "`local_api` as degraded with `database: not found`."
         ),
         formatter_class=HelpFormatter,
     )
@@ -3773,9 +3844,8 @@ def main():
             "  remctl service uninstall\n"
             "\n"
             "Only `install` uses --host, --port, --allow-origin, and --enable-opengraph.\n"
-            "If `doctor` reports a degraded API with\n"
-            "`database: not found`, grant Full Disk Access to the Python interpreter shown\n"
-            "by `remctl service status`, then restart the service."
+            "`remctl service status` prints the Server path, URL, Python path, live health,\n"
+            "and the exact Full Disk Access target for the background service."
         ),
         formatter_class=HelpFormatter,
     )

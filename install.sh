@@ -14,7 +14,7 @@ usage() {
 Usage: ./install.sh [options]
 
 Options:
-  --bootstrap                 Install completions, run doctor, and prepare first-run onboarding
+  --bootstrap                 Install completions, create config, and print a doctor report
   --with-service              Install and start the launch agent after copying binaries
   --doctor                    Run `remctl doctor` after installation
   --shell-completions SHELL   Install completions for auto, zsh, bash, fish, or none (default: auto)
@@ -23,7 +23,8 @@ Options:
 Notes:
   The installer copies binaries into ~/bin by default.
   Use PREFIX="$HOME/.local" if you want ~/.local/bin instead.
-  Run `remctl onboard` after install to trigger native macOS permission prompts.
+  Run `remctl onboard` after install to trigger macOS permission prompts.
+  The optional service is a separate launchd process and may need its own Full Disk Access grant.
 EOF
 }
 
@@ -174,14 +175,17 @@ fi
 
 if [[ "$RUN_DOCTOR" -eq 1 || "$BOOTSTRAP" -eq 1 ]]; then
     echo -e "${BLUE}→${RESET} Running remctl doctor..."
-    "$BIN_DIR/remctl" doctor
+    if ! "$BIN_DIR/remctl" doctor; then
+        echo -e "${YELLOW}⚠${RESET}  Doctor found setup issues. This is common before macOS permissions are granted."
+        echo -e "${DIM}Run '$BIN_DIR/remctl onboard', follow the printed Full Disk Access steps, then run '$BIN_DIR/remctl doctor'.${RESET}"
+    fi
 fi
 
 echo ""
 echo -e "${GREEN}${BOLD}Done!${RESET} RemCTL v3.0.0 installed."
 if [[ "$BOOTSTRAP" -eq 1 ]]; then
-    echo -e "${DIM}Run 'remctl' or 'remctl onboard' to trigger macOS permission prompts on first launch.${RESET}"
+    echo -e "${DIM}Next: run 'remctl onboard', then 'remctl doctor'.${RESET}"
 else
-    echo -e "${DIM}Run 'remctl onboard' after setup to trigger macOS permission prompts.${RESET}"
+    echo -e "${DIM}Next: run 'remctl onboard' to trigger macOS permission prompts.${RESET}"
 fi
 echo ""

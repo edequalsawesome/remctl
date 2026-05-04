@@ -60,13 +60,14 @@ cd remctl
 PREFIX="$HOME/.local" ./install.sh --bootstrap
 ```
 
-`--bootstrap` does the first-run setup:
+`--bootstrap` does the file-and-config setup:
 - copies `remctl`, `remctl-server`, and the shared helper modules into your install directory
 - compiles `remctl-bridge` when `swiftc` is available
 - creates `~/.config/remctl/api-token`
 - installs shell completion for your current shell when supported
-- runs `remctl doctor`
-- leaves the native macOS permission prompts to `remctl onboard` or the first interactive `remctl` run
+- prints a `remctl doctor` report
+
+It does not grant macOS permissions. Apple requires those to happen interactively, so run `remctl onboard` after installation.
 
 If you also want the background local API service:
 
@@ -76,6 +77,16 @@ PREFIX="$HOME/.local" ./install.sh --bootstrap --with-service
 ```
 
 The service is optional. Most people only need it if they want the local REST API or a fallback when direct SQLite reads are blocked.
+
+### Setup Flow In Plain English
+
+There are three separate steps:
+
+1. `./install.sh --bootstrap` copies files, creates config, installs completions, and reports what is missing.
+2. `remctl onboard` opens Reminders.app, triggers the native permission prompts, and opens the Full Disk Access settings pane when needed.
+3. `remctl doctor` verifies the CLI and, if installed, the optional background API service.
+
+The local API service is a separate launchd process. If you install it, it may need a separate Full Disk Access grant for the Python interpreter shown by `remctl service status`.
 
 ### What The Installer Copies
 
@@ -101,6 +112,7 @@ git clone https://github.com/viticci/remctl.git
 cd remctl
 ./install.sh --bootstrap
 remctl onboard
+remctl doctor
 remctl today
 ```
 
@@ -109,6 +121,7 @@ If you installed to `~/.local/bin`, either make sure that directory is already i
 ```bash
 PREFIX="$HOME/.local" ./install.sh --bootstrap
 ~/.local/bin/remctl onboard
+~/.local/bin/remctl doctor
 ~/.local/bin/remctl today
 ```
 
@@ -119,13 +132,13 @@ What `remctl onboard` does:
 4. Verifies whether direct database reads are available.
 5. If Full Disk Access is missing, opens the correct System Settings pane and tells you exactly what to add.
 
-Important: macOS does not provide a native Full Disk Access prompt. If onboarding reports that direct SQLite reads are blocked, grant Full Disk Access to the terminal app running `remctl` or to the Python interpreter shown by `remctl doctor`, then rerun:
+Important: macOS does not provide a native Full Disk Access prompt and command-line tools cannot grant it automatically. If onboarding reports that direct CLI reads are blocked, add the terminal app running `remctl` or the Python interpreter shown by `remctl doctor`, then rerun:
 
 ```bash
 remctl doctor
 ```
 
-If onboarding says the local `remctl` service fallback is already healthy, you can keep using `remctl` immediately and come back to Full Disk Access later. The warning only affects direct SQLite reads in that shell.
+If onboarding says the local `remctl` service fallback is already healthy, you can keep using `remctl` immediately and come back to direct CLI Full Disk Access later. The warning only affects direct SQLite reads in that shell.
 
 ### Verify What You Are Actually Running
 
@@ -520,12 +533,28 @@ The launch agent lives at `~/Library/LaunchAgents/com.remctl.server.plist`. Logs
 
 RemCTL writes the launch agent with the same `python3` interpreter that ran `remctl setup` or `remctl service install`, which avoids relying on launchd's limited default `PATH`.
 
-If `remctl doctor` reports `local_api` as degraded with `database: not found` while the CLI itself still works, the background server likely lacks Reminders database access. Grant Full Disk Access to the Python interpreter used by `remctl-server`, then run:
+If `remctl doctor` reports `local_api` as degraded with `database: not found` while the CLI itself still works, the background server likely lacks Reminders database access. This is a separate permission from the terminal app that runs `remctl`.
+
+Use `remctl service status` to see the exact target:
+
+```bash
+remctl service status
+```
+
+Look for:
+
+```text
+Full Disk Access target: /path/to/python3
+```
+
+Then open **System Settings → Privacy & Security → Full Disk Access**, add that Python path, and run:
 
 ```bash
 remctl service restart
 remctl doctor
 ```
+
+`remctl onboard` can open the Full Disk Access settings pane for you, but macOS still requires you to add the target manually.
 
 ### Public-Friendly Setup Flow
 
@@ -544,14 +573,14 @@ If `onboard` or `doctor` reports failures, each check includes the specific fix.
 
 | File | Description | Size |
 |------|-------------|------|
-| `remctl` | Main CLI (Python 3, stdlib only) | ~3,700 lines |
+| `remctl` | Main CLI (Python 3, stdlib only) | ~3,900 lines |
 | `remctl-bridge.swift` | Swift EventKit write helper (source) | ~440 lines |
 | `remctl-bridge` | Compiled Swift binary | ~130 KB |
 | `remctl-server` | REST API server (Python 3, stdlib only) | ~1,650 lines |
 | `remctl_runtime.py` | Shared path/config/runtime helpers | ~120 lines |
 | `remctl_serialization.py` | Shared reminder serialization helpers | ~125 lines |
 | `completions/_remctl` | zsh completion | ~160 lines |
-| `install.sh` | Installer/bootstrap script | ~170 lines |
+| `install.sh` | Installer/bootstrap script | ~190 lines |
 
 ## License
 

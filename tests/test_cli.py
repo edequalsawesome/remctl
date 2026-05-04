@@ -174,9 +174,14 @@ class CliTests(unittest.TestCase):
                 "stats": None,
                 "error": None,
             },
+            settings={"python_path": "/tmp/service-python", "server_path": "/tmp/remctl-server"},
         )
         self.assertEqual(result["status"], "fail")
         self.assertIn("database: not found", result["detail"])
+        self.assertIn("separate launchd process", result["fix"])
+        self.assertIn("/tmp/service-python", result["fix"])
+        self.assertIn("remctl service restart", result["fix"])
+        self.assertIn("remctl doctor", result["fix"])
 
     def test_stop_service_treats_no_such_process_as_already_stopped(self):
         proc = SimpleNamespace(
@@ -260,6 +265,25 @@ class CliTests(unittest.TestCase):
         self.assertIn("/tmp/python3", text)
         self.assertIn("remctl onboard", text)
         self.assertIn("ignore this warning", text)
+
+    def test_print_check_report_indents_multiline_fixes(self):
+        checks = [
+            {
+                "name": "local_api",
+                "status": "fail",
+                "detail": "degraded",
+                "fix": "First line\n  remctl service restart\n  remctl doctor",
+            }
+        ]
+        with (
+            mock.patch.object(self.remctl.C, "enabled", False),
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+        ):
+            self.remctl.print_check_report(None, checks)
+        output = stdout.getvalue()
+        self.assertIn("      First line", output)
+        self.assertIn("        remctl service restart", output)
+        self.assertIn("        remctl doctor", output)
 
     def test_cmd_onboard_opens_full_disk_access_settings_when_database_not_ready(self):
         result = {
