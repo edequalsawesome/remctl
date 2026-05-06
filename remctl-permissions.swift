@@ -12,6 +12,12 @@ struct AfterCommand {
     let command: String
 }
 
+enum PermissionStatus {
+    case checking
+    case verified
+    case needsAccess
+}
+
 struct Options {
     var title = "RemCTL Permissions"
     var subtitle = "Grant Full Disk Access to the processes RemCTL uses."
@@ -80,6 +86,63 @@ func revealInFinder(_ path: String) {
     NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
 }
 
+func remindersStoreReadable() -> Bool {
+    let storesURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Group Containers/group.com.apple.reminders/Container_v1/Stores")
+    guard let contents = try? FileManager.default.contentsOfDirectory(
+        at: storesURL,
+        includingPropertiesForKeys: nil,
+        options: [.skipsHiddenFiles]
+    ) else {
+        return false
+    }
+    return contents.contains { url in
+        url.lastPathComponent.hasPrefix("Data-") &&
+            url.pathExtension == "sqlite" &&
+            FileManager.default.isReadableFile(atPath: url.path)
+    }
+}
+
+func isPythonExecutable(_ path: String) -> Bool {
+    let name = URL(fileURLWithPath: path).lastPathComponent.lowercased()
+    return name.hasPrefix("python") && FileManager.default.isExecutableFile(atPath: path)
+}
+
+func pythonTargetCanReadRemindersStore(_ path: String) -> Bool {
+    let script = """
+import glob
+import os
+import sys
+
+base = os.path.expanduser("~/Library/Group Containers/group.com.apple.reminders/Container_v1/Stores")
+try:
+    paths = glob.glob(os.path.join(base, "Data-*.sqlite"))
+    ok = any(os.path.isfile(path) and os.access(path, os.R_OK) for path in paths)
+except Exception:
+    ok = False
+sys.exit(0 if ok else 2)
+"""
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: path)
+    process.arguments = ["-c", script]
+    process.standardOutput = Pipe()
+    process.standardError = Pipe()
+    do {
+        try process.run()
+        process.waitUntilExit()
+        return process.terminationStatus == 0
+    } catch {
+        return false
+    }
+}
+
+func verifyPermissionTarget(_ target: PermissionTarget) -> PermissionStatus {
+    if isPythonExecutable(target.path) {
+        return pythonTargetCanReadRemindersStore(target.path) ? .verified : .needsAccess
+    }
+    return remindersStoreReadable() ? .verified : .needsAccess
+}
+
 final class ActionButton: NSButton {
     private let handler: (ActionButton) -> Void
 
@@ -113,6 +176,7 @@ func label(_ text: String, font: NSFont, color: NSColor = .labelColor, lines: In
 
 final class TargetRowView: NSView, NSDraggingSource {
     private let target: PermissionTarget
+    private let statusField = NSTextField(labelWithString: "Checking...")
 
     init(target: PermissionTarget, onLog: @escaping (String) -> Void) {
         self.target = target
@@ -132,6 +196,11 @@ final class TargetRowView: NSView, NSDraggingSource {
         let subtitleField = label(target.subtitle, font: .systemFont(ofSize: 12), color: .secondaryLabelColor, lines: 2)
         let pathField = label(target.path, font: .monospacedSystemFont(ofSize: 11, weight: .regular), color: .tertiaryLabelColor, lines: 1)
         pathField.lineBreakMode = .byTruncatingMiddle
+        statusField.font = .systemFont(ofSize: 12, weight: .semibold)
+        statusField.textColor = .secondaryLabelColor
+        statusField.lineBreakMode = .byTruncatingTail
+        statusField.maximumNumberOfLines = 1
+        statusField.translatesAutoresizingMaskIntoConstraints = false
 
         let textStack = NSStackView(views: [titleField, subtitleField, pathField])
         textStack.orientation = .vertical
@@ -154,9 +223,15 @@ final class TargetRowView: NSView, NSDraggingSource {
         buttonStack.spacing = 8
         buttonStack.translatesAutoresizingMaskIntoConstraints = false
 
+        let trailingStack = NSStackView(views: [statusField, buttonStack])
+        trailingStack.orientation = .vertical
+        trailingStack.spacing = 8
+        trailingStack.alignment = .trailing
+        trailingStack.translatesAutoresizingMaskIntoConstraints = false
+
         addSubview(icon)
         addSubview(textStack)
-        addSubview(buttonStack)
+        addSubview(trailingStack)
 
         NSLayoutConstraint.activate([
             heightAnchor.constraint(greaterThanOrEqualToConstant: 92),
@@ -167,10 +242,10 @@ final class TargetRowView: NSView, NSDraggingSource {
 
             textStack.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 12),
             textStack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            textStack.trailingAnchor.constraint(lessThanOrEqualTo: buttonStack.leadingAnchor, constant: -12),
+            textStack.trailingAnchor.constraint(lessThanOrEqualTo: trailingStack.leadingAnchor, constant: -12),
 
-            buttonStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-            buttonStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            trailingStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            trailingStack.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
 
         toolTip = "Drag this row into Full Disk Access, or copy the path and use Command-Shift-G."
@@ -193,11 +268,28 @@ final class TargetRowView: NSView, NSDraggingSource {
     func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
         return .copy
     }
+
+    func updateStatus(_ status: PermissionStatus) {
+        switch status {
+        case .checking:
+            statusField.stringValue = "Checking..."
+            statusField.textColor = .secondaryLabelColor
+        case .verified:
+            statusField.stringValue = "✓ Access verified"
+            statusField.textColor = .systemGreen
+        case .needsAccess:
+            statusField.stringValue = "Needs access"
+            statusField.textColor = .systemOrange
+        }
+    }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let options: Options
     private var window: NSWindow?
+    private var targetRows: [TargetRowView] = []
+    private var refreshTimer: Timer?
+    private var refreshInProgress = false
     private let outputView = NSTextView()
 
     init(options: Options) {
@@ -215,7 +307,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             copyPath(first.path)
             log("Copied first target. In the file picker press Command-Shift-G, paste, press Return, then click Open.")
         }
+        refreshTargetStatuses()
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.refreshTargetStatuses()
+        }
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        refreshTimer?.invalidate()
     }
 
     private func buildWindow() {
@@ -238,11 +338,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         openButton.keyEquivalent = "\r"
 
+        let checkButton = ActionButton(title: "Check Access") { _ in
+            self.refreshTargetStatuses(logResult: true)
+        }
+
         let quitButton = ActionButton(title: "Done") { _ in
             NSApp.terminate(nil)
         }
 
-        let topButtons = NSStackView(views: [openButton, quitButton])
+        let topButtons = NSStackView(views: [openButton, checkButton, quitButton])
         topButtons.orientation = .horizontal
         topButtons.spacing = 8
         topButtons.alignment = .trailing
@@ -252,7 +356,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         header.spacing = 8
         header.alignment = .leading
 
-        let targetRows = options.targets.map { target in
+        targetRows = options.targets.map { target in
             TargetRowView(target: target) { [weak self] message in
                 self?.log(message)
             }
@@ -319,6 +423,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         outputView.scrollToEndOfDocument(nil)
     }
 
+    private func refreshTargetStatuses(logResult: Bool = false) {
+        if refreshInProgress {
+            return
+        }
+        refreshInProgress = true
+        targetRows.forEach { $0.updateStatus(.checking) }
+        let targets = options.targets
+        DispatchQueue.global(qos: .utility).async {
+            let statuses = targets.map { verifyPermissionTarget($0) }
+            DispatchQueue.main.async {
+                for (row, status) in zip(self.targetRows, statuses) {
+                    row.updateStatus(status)
+                }
+                self.refreshInProgress = false
+                if logResult {
+                    let verified = statuses.filter {
+                        if case .verified = $0 { return true }
+                        return false
+                    }.count
+                    self.log("Verified \(verified) of \(statuses.count) Full Disk Access targets.")
+                }
+            }
+        }
+    }
+
     private func commandEnvironment() -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         let homeBin = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("bin").path
@@ -360,6 +489,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if let originalTitle {
                         sender?.title = originalTitle
                     }
+                    self.refreshTargetStatuses()
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -368,6 +498,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if let originalTitle {
                         sender?.title = originalTitle
                     }
+                    self.refreshTargetStatuses()
                 }
             }
         }

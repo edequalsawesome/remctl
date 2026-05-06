@@ -35,6 +35,8 @@ remctl today
 
 `--bootstrap` prepares the install, but it does not run `doctor` before macOS permissions are granted. Run the visual permission flow first, then verify.
 
+If the installer says `PATH action required`, add the printed PATH line and open a new Terminal window before typing `remctl`.
+
 If you install to `~/.local/bin`, use the same prefix every time:
 
 ```bash
@@ -114,7 +116,7 @@ remctl permissions full-disk-access
 remctl doctor
 ```
 
-The visual permission helper is the default Full Disk Access flow. It opens System Settings, copies the first target path, and shows draggable targets for the CLI and optional service.
+The visual permission helper is the default Full Disk Access flow. It opens System Settings, copies the first target path, shows draggable targets for the CLI and optional service, and marks verified targets with a green check.
 
 If you only need to fix the background API service, run:
 

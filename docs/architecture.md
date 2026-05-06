@@ -111,7 +111,7 @@ remctl permissions full-disk-access
 remctl permissions full-disk-access --scope service
 ```
 
-The helper opens the Full Disk Access pane, copies the first path to the clipboard, and exposes each target as a draggable file row. It does not edit macOS TCC data directly.
+The helper opens the Full Disk Access pane, copies the first path to the clipboard, exposes each target as a draggable file row, and periodically checks whether each target can read the Reminders store. Verified targets get a green check. It does not edit macOS TCC data directly.
 
 ## Environment Overrides
 

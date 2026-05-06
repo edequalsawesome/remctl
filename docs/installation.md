@@ -37,6 +37,8 @@ It does not grant macOS permissions. Apple requires those grants to happen inter
 
 It also does not run `doctor` by default. A new user should grant permissions first, then verify with `doctor` so the first health report is meaningful. For upgrades on an already-authorized Mac, use `./install.sh --doctor` if you want an immediate health check.
 
+If the installer says `PATH action required`, add the printed line to your shell profile, then open a new Terminal window before typing `remctl`. The current Terminal keeps its old PATH until you start a new session. You can also run commands with the full installed path, such as `~/bin/remctl onboard`.
+
 ## First Run
 
 ```bash
@@ -66,7 +68,7 @@ Default visual flow:
 remctl permissions full-disk-access
 ```
 
-The helper opens System Settings, copies the first target path, and shows draggable targets. In the System Settings file picker:
+The helper opens System Settings, copies the first target path, shows draggable targets, and marks a target with a green check when that process can read the Reminders store. In the System Settings file picker:
 
 1. Click `+`.
 2. Drag a target row from the RemCTL helper into the picker.
@@ -149,7 +151,7 @@ remctl --version
 remctl doctor
 ```
 
-If `which remctl` points at `~/.local/bin/remctl`, keep using `PREFIX="$HOME/.local"` for upgrades.
+If `which remctl` does not find RemCTL after install, add the installer’s PATH line to your shell profile, then open a new Terminal window. If `which remctl` points at `~/.local/bin/remctl`, keep using `PREFIX="$HOME/.local"` for upgrades.
 
 ## Shell Completion
 

@@ -75,6 +75,8 @@ DIM='\033[2m'
 BOLD='\033[1m'
 RESET='\033[0m'
 
+PATH_NEEDS_UPDATE=0
+
 echo ""
 echo -e "${GREEN}██████${YELLOW}██████${ORANGE:-\033[38;2;245;132;31m}█████${RED}██████${RESET}"
 echo -e "${BOLD}RemCTL Installer${RESET}"
@@ -171,9 +173,17 @@ fi
 
 # 6. Check PATH
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
+    PATH_NEEDS_UPDATE=1
     echo ""
-    echo -e "${YELLOW}⚠${RESET}  $BIN_DIR is not in your PATH. Add it:"
-    echo -e "  ${DIM}echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.zshrc${RESET}"
+    echo -e "${YELLOW}${BOLD}PATH action required${RESET}"
+    echo -e "${YELLOW}RemCTL was installed to:${RESET} $BIN_DIR"
+    echo -e "${YELLOW}Your current Terminal cannot find the ${BOLD}remctl${RESET}${YELLOW} command yet.${RESET}"
+    echo ""
+    echo -e "Add RemCTL to your zsh PATH:"
+    echo -e "  ${BOLD}echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.zshrc${RESET}"
+    echo ""
+    echo -e "${BOLD}Then open a new Terminal window before running remctl.${RESET}"
+    echo -e "${DIM}For this existing window only, you can also run: export PATH=\"$BIN_DIR:\$PATH\"${RESET}"
 fi
 
 SETUP_SHELL="$COMPLETION_SHELL"
@@ -206,5 +216,9 @@ if [[ "$BOOTSTRAP" -eq 1 ]]; then
     echo -e "${DIM}Bootstrap is ready. Next: run 'remctl onboard', then 'remctl permissions full-disk-access', then 'remctl doctor'.${RESET}"
 else
     echo -e "${DIM}Next: run 'remctl onboard' on a new Mac, then 'remctl permissions full-disk-access' for visual Full Disk Access setup.${RESET}"
+fi
+if [[ "$PATH_NEEDS_UPDATE" -eq 1 ]]; then
+    echo -e "${YELLOW}${BOLD}Reminder:${RESET}${YELLOW} open a new Terminal window after adding $BIN_DIR to PATH, or run commands with the full path:${RESET}"
+    echo -e "  ${BOLD}$BIN_DIR/remctl onboard${RESET}"
 fi
 echo ""
