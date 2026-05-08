@@ -322,10 +322,16 @@ def urgent_where_clause(db, table_alias="r"):
         return f"{table_alias}.ZISURGENTSTATEENABLEDFORCURRENTUSER = 1"
     return "0 = 1"
 
+def display_due_expr(db, table_alias="r"):
+    if reminder_has_column(db, "ZDISPLAYDATEDATE"):
+        return f"COALESCE({table_alias}.ZDISPLAYDATEDATE, {table_alias}.ZDUEDATE)"
+    return f"{table_alias}.ZDUEDATE"
+
 def rem_cols(db):
+    due_expr = display_due_expr(db)
     return f"""r.Z_PK, r.ZTITLE, r.ZNOTES, r.ZCOMPLETED, r.ZFLAGGED, r.ZPRIORITY,
     {urgent_column_expr(db)} AS ZISURGENTSTATEENABLEDFORCURRENTUSER,
-    r.ZDUEDATE, r.ZALLDAY, r.ZCOMPLETIONDATE, r.ZCREATIONDATE,
+    {due_expr} AS ZDUEDATE, r.ZALLDAY, r.ZCOMPLETIONDATE, r.ZCREATIONDATE,
     r.ZPARENTREMINDER, r.ZLIST, r.ZICSURL, r.ZCKIDENTIFIER, l.ZNAME as list_name,
     {_RECURRENCE_COLS}"""
 
@@ -418,49 +424,54 @@ def q_search(db, query, completed=False):
 
 def q_due_today(db, include_overdue=True):
     sod, eod = due_today_window()
+    due_expr = display_due_expr(db)
     if include_overdue:
-        w = f"r.ZDUEDATE < {to_ts(eod)} AND r.ZDUEDATE IS NOT NULL"
+        w = f"{due_expr} < {to_ts(eod)} AND {due_expr} IS NOT NULL"
     else:
-        w = f"r.ZDUEDATE >= {to_ts(sod)} AND r.ZDUEDATE < {to_ts(eod)}"
+        w = f"{due_expr} >= {to_ts(sod)} AND {due_expr} < {to_ts(eod)}"
     return db.execute(
         f"SELECT {rem_cols(db)} FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l "
         f"ON r.ZLIST = l.Z_PK WHERE r.ZMARKEDFORDELETION = 0 AND r.ZCOMPLETED = 0 AND r.ZACCOUNT IS NOT NULL "
-        f"AND l.Z_PK IS NOT NULL AND {w} ORDER BY r.ZDUEDATE"
+        f"AND l.Z_PK IS NOT NULL AND {w} ORDER BY {due_expr}"
     ).fetchall()
 
 def q_flagged(db):
+    due_expr = display_due_expr(db)
     return db.execute(
         f"SELECT {rem_cols(db)} FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l "
         f"ON r.ZLIST = l.Z_PK WHERE r.ZMARKEDFORDELETION = 0 AND r.ZCOMPLETED = 0 AND r.ZACCOUNT IS NOT NULL "
-        f"AND l.Z_PK IS NOT NULL AND r.ZFLAGGED = 1 ORDER BY r.ZDUEDATE NULLS LAST"
+        f"AND l.Z_PK IS NOT NULL AND r.ZFLAGGED = 1 ORDER BY {due_expr} NULLS LAST"
     ).fetchall()
 
 def q_urgent(db):
+    due_expr = display_due_expr(db)
     return db.execute(
         f"SELECT {rem_cols(db)} FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l "
         f"ON r.ZLIST = l.Z_PK WHERE r.ZMARKEDFORDELETION = 0 AND r.ZCOMPLETED = 0 AND r.ZACCOUNT IS NOT NULL "
-        f"AND l.Z_PK IS NOT NULL AND {urgent_where_clause(db)} ORDER BY r.ZDUEDATE NULLS LAST"
+        f"AND l.Z_PK IS NOT NULL AND {urgent_where_clause(db)} ORDER BY {due_expr} NULLS LAST"
     ).fetchall()
 
 def q_upcoming(db, days=7):
     """Reminders due within the next N days (not overdue)."""
     sod, future = upcoming_window(days)
+    due_expr = display_due_expr(db)
     return db.execute(
         f"SELECT {rem_cols(db)} FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l "
         f"ON r.ZLIST = l.Z_PK WHERE r.ZMARKEDFORDELETION = 0 AND r.ZCOMPLETED = 0 AND r.ZACCOUNT IS NOT NULL "
-        f"AND l.Z_PK IS NOT NULL AND r.ZDUEDATE IS NOT NULL "
-        f"AND r.ZDUEDATE >= {to_ts(sod)} AND r.ZDUEDATE < {to_ts(future)} "
-        f"ORDER BY r.ZDUEDATE"
+        f"AND l.Z_PK IS NOT NULL AND {due_expr} IS NOT NULL "
+        f"AND {due_expr} >= {to_ts(sod)} AND {due_expr} < {to_ts(future)} "
+        f"ORDER BY {due_expr}"
     ).fetchall()
 
 def q_overdue(db):
     """All overdue incomplete reminders."""
     sod = start_of_day()
+    due_expr = display_due_expr(db)
     return db.execute(
         f"SELECT {rem_cols(db)} FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l "
         f"ON r.ZLIST = l.Z_PK WHERE r.ZMARKEDFORDELETION = 0 AND r.ZCOMPLETED = 0 AND r.ZACCOUNT IS NOT NULL "
-        f"AND l.Z_PK IS NOT NULL AND r.ZDUEDATE IS NOT NULL "
-        f"AND r.ZDUEDATE < {to_ts(sod)} ORDER BY r.ZDUEDATE"
+        f"AND l.Z_PK IS NOT NULL AND {due_expr} IS NOT NULL "
+        f"AND {due_expr} < {to_ts(sod)} ORDER BY {due_expr}"
     ).fetchall()
 
 # ── Format ───────────────────────────────────────────────────────────────────
@@ -1843,12 +1854,10 @@ def cmd_edit(a):
             )
             sys.exit(1)
 
-    # Auto double-tap: if the CoreData ZDUEDATE already equals the requested
-    # target, AppleScript treats it as a no-op and pushes only lastModifiedDate —
-    # CloudKit then drops the dueDate field entirely and other devices stay
-    # stale. Force a real value change by setting an intermediate date first
-    # (bumped 1 hour), then the real target. This matches what fixed the 9
-    # stuck email reminders on 2026-04-17.
+    # Auto double-tap: if Reminders' displayed due date already equals the
+    # requested target, AppleScript treats it as a no-op and pushes only
+    # lastModifiedDate. Force a real value change by setting an intermediate
+    # date first (bumped 1 hour), then the real target.
     dt_nudge = None
     if dt is not None and r["ZDUEDATE"] is not None:
         current = ts(r["ZDUEDATE"])
@@ -1860,10 +1869,9 @@ def cmd_edit(a):
     # dueDateComponents set, so CloudKit now receives the new due date). If
     # the bridge is unavailable, we fall back to AppleScript via Reminders.app.
     #
-    # Double-tap defense: if the CoreData ZDUEDATE already equals the new
-    # target (legacy ghost from a pre-fix bridge write that never reached
-    # iCloud), fire an intermediate update first so the CKRecord is forced
-    # to carry a real dueDateComponents change. Cheap insurance.
+    # Double-tap defense: if the displayed date already equals the new target,
+    # fire an intermediate update first so the CKRecord is forced to carry a
+    # real dueDateComponents change.
     if bridge_available() and r["ZCKIDENTIFIER"]:
         if dt_nudge is not None:
             bridge_call({
@@ -2163,6 +2171,7 @@ def cmd_sections(a):
 
 def cmd_stats(a):
     db = open_db()
+    due_expr = display_due_expr(db)
     total = db.execute("SELECT COUNT(*) FROM ZREMCDREMINDER WHERE ZMARKEDFORDELETION = 0 AND ZACCOUNT IS NOT NULL").fetchone()[0]
     active = db.execute("SELECT COUNT(*) FROM ZREMCDREMINDER WHERE ZMARKEDFORDELETION = 0 AND ZCOMPLETED = 0 AND ZACCOUNT IS NOT NULL").fetchone()[0]
     flagged = db.execute("SELECT COUNT(*) FROM ZREMCDREMINDER WHERE ZMARKEDFORDELETION = 0 AND ZCOMPLETED = 0 AND ZFLAGGED = 1 AND ZACCOUNT IS NOT NULL").fetchone()[0]
@@ -2171,8 +2180,8 @@ def cmd_stats(a):
         f"AND r.ZCOMPLETED = 0 AND r.ZACCOUNT IS NOT NULL AND {urgent_where_clause(db)}"
     ).fetchone()[0]
     overdue = db.execute(
-        f"SELECT COUNT(*) FROM ZREMCDREMINDER WHERE ZMARKEDFORDELETION = 0 AND ZCOMPLETED = 0 AND ZACCOUNT IS NOT NULL "
-        f"AND ZDUEDATE IS NOT NULL AND ZDUEDATE < {to_ts(datetime.now())}"
+        f"SELECT COUNT(*) FROM ZREMCDREMINDER r WHERE r.ZMARKEDFORDELETION = 0 AND r.ZCOMPLETED = 0 AND r.ZACCOUNT IS NOT NULL "
+        f"AND {due_expr} IS NOT NULL AND {due_expr} < {to_ts(datetime.now())}"
     ).fetchone()[0]
     lists_count = len(q_lists(db))
     sections_count = len(q_sections(db))
