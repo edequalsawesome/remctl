@@ -6,23 +6,18 @@ attachments, completion status, list colors). Writes via remctl-bridge (EventKit
 with AppleScript fallback. Zero Python dependencies with small shared helpers.
 """
 
-import argparse, csv, io, json, os, platform, plistlib, re, secrets, shlex, shutil, sqlite3, subprocess, sys, time
+import argparse, csv, io, json, os, platform, plistlib, re, shlex, shutil, sqlite3, subprocess, sys, time
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen
 
 from remctl_runtime import (
     due_today_window,
-    ensure_private_dir,
     resolve_binary_path,
     resolve_config_dir,
     resolve_store_dir,
     start_of_day,
     upcoming_window,
-    write_private_text_file,
 )
 from remctl_serialization import (
     preload_extras as shared_preload_extras,
@@ -42,16 +37,11 @@ VERSION = "1.0.0"
 APPLE_EPOCH = 978307200
 STORE_DIR = resolve_store_dir()
 BRIDGE_PATH = resolve_binary_path(__file__, "remctl-bridge", "REMCTL_BRIDGE_PATH")
-SERVER_PATH = resolve_binary_path(__file__, "remctl-server", "REMCTL_SERVER_PATH")
 PERMISSIONS_PATH = resolve_binary_path(__file__, "remctl-permissions", "REMCTL_PERMISSIONS_PATH")
 CONFIG_DIR = resolve_config_dir("remctl")
-TOKEN_FILE = CONFIG_DIR / "api-token"
-DEFAULT_SERVER_HOST = "127.0.0.1"
-DEFAULT_SERVER_PORT = 19876
-LAUNCH_AGENT_LABEL = "com.remctl.server"
 ONBOARD_STATE_FILE = CONFIG_DIR / "onboard-state.json"
 AUTO_ONBOARD_SKIP_ENV = "REMCTL_SKIP_ONBOARD"
-AUTO_ONBOARD_SKIP_COMMANDS = {"completion", "doctor", "onboard", "permissions", "service", "setup"}
+AUTO_ONBOARD_SKIP_COMMANDS = {"completion", "doctor", "onboard", "permissions", "setup"}
 FULL_DISK_ACCESS_SETTINGS_URLS = [
     "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles",
     "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
@@ -82,13 +72,6 @@ class HelpFormatter(argparse.RawDescriptionHelpFormatter, argparse.ArgumentDefau
 class RemindersDBUnavailable(RuntimeError):
     """Raised when the local Reminders CoreData store is unavailable."""
 
-
-class LocalAPIUnavailable(RuntimeError):
-    """Raised when the local remctl-server fallback cannot be used."""
-
-
-class LocalAPIRequestError(RuntimeError):
-    """Raised when the local remctl-server returns a request error."""
 
 # ── Color System ─────────────────────────────────────────────────────────────
 
@@ -1005,7 +988,7 @@ def _add_permission_target(targets, seen, title, path, subtitle):
     targets.append({"title": title, "path": path, "subtitle": subtitle})
 
 
-def full_disk_access_target_specs(*, include_cli=True, include_service=False):
+def full_disk_access_target_specs(*, include_cli=True):
     targets = []
     seen = set()
     if include_cli:
@@ -1026,22 +1009,11 @@ def full_disk_access_target_specs(*, include_cli=True, include_service=False):
                 terminal_path,
                 "Alternative target for direct CLI reads from this terminal app.",
             )
-    if include_service:
-        settings = parse_launch_agent_settings() or {}
-        service_target = service_full_disk_access_clipboard_target(settings)
-        service_label = "Local API Python" if settings.get("python_path") else "remctl-server"
-        _add_permission_target(
-            targets,
-            seen,
-            service_label,
-            service_target,
-            "Required when remctl-server reports database: not found.",
-        )
     return targets
 
 
 def full_disk_access_targets():
-    specs = full_disk_access_target_specs(include_cli=True, include_service=False)
+    specs = full_disk_access_target_specs(include_cli=True)
     targets = [f"{spec['title']}: {spec['path']}" for spec in specs]
     if not any(spec["title"].endswith(".app") for spec in specs):
         terminal_name = detect_terminal_app_name()
@@ -1052,7 +1024,7 @@ def full_disk_access_targets():
     return targets
 
 
-def full_disk_access_fix_text(*, api_healthy=False, rerun_command="remctl doctor", mention_onboard=False):
+def full_disk_access_fix_text(*, rerun_command="remctl doctor", mention_onboard=False):
     targets = full_disk_access_targets()
     if mention_onboard:
         intro = "`remctl onboard` can open a guided permission helper, but macOS still requires you to add the access target manually."
@@ -1066,42 +1038,7 @@ def full_disk_access_fix_text(*, api_healthy=False, rerun_command="remctl doctor
         "Tip: click +, press Command-Shift-G, paste the path, press Return, then click Open.",
         f"Then relaunch the terminal and rerun `{rerun_command}`.",
     ]
-    if api_healthy:
-        parts.append(
-            "Direct CLI reads are optional because the local remctl service fallback is healthy; you can ignore this warning if that is enough for your workflow."
-        )
     return "\n".join(parts)
-
-
-def service_full_disk_access_target(settings=None):
-    settings = settings or parse_launch_agent_settings() or {}
-    python_path = settings.get("python_path")
-    if python_path:
-        return python_path
-    server_path = settings.get("server_path") or str(current_server_path())
-    return f"{server_path} (or the Python interpreter that runs it)"
-
-
-def service_full_disk_access_clipboard_target(settings=None):
-    settings = settings or parse_launch_agent_settings() or {}
-    return settings.get("python_path") or settings.get("server_path") or str(current_server_path())
-
-
-def service_full_disk_access_fix_text(settings=None, *, rerun_command="remctl doctor"):
-    target = service_full_disk_access_target(settings)
-    return "\n".join(
-        [
-            "The local API runs as a separate launchd process, so it needs its own Full Disk Access grant.",
-            "Open System Settings > Privacy & Security > Full Disk Access and add:",
-            f"  {target}",
-            "Tip: click +, press Command-Shift-G, paste the path, press Return, then click Open.",
-            "`remctl onboard` can open that settings pane, but macOS still requires you to add the target manually.",
-            "Then run:",
-            "  remctl service restart",
-            f"  {rerun_command}",
-            "`remctl service status` shows the current Server, Python, and Full Disk Access target.",
-        ]
-    )
 
 
 def copy_to_clipboard(text):
@@ -1134,7 +1071,7 @@ def open_full_disk_access_settings():
     return False
 
 
-def print_full_disk_access_guidance(*, api_healthy=False, settings_opened=False, rerun_command="remctl doctor"):
+def print_full_disk_access_guidance(*, settings_opened=False, rerun_command="remctl doctor"):
     clipboard_target = str(current_python_path())
     copied = copy_to_clipboard(clipboard_target)
     print()
@@ -1152,29 +1089,6 @@ def print_full_disk_access_guidance(*, api_healthy=False, settings_opened=False,
         print(C.dim(f"  Copy this path if you need the file picker: {clipboard_target}"))
     print(C.dim("  In the file picker, press Command-Shift-G, paste the path, press Return, then click Open."))
     print(C.dim(f"  Then relaunch the terminal and rerun `{rerun_command}`."))
-    if api_healthy:
-        print(C.dim("  Direct SQLite reads are optional here because the local remctl service fallback is already healthy."))
-
-
-def print_service_full_disk_access_guidance(*, settings_opened=False, rerun_command="remctl doctor"):
-    settings = parse_launch_agent_settings() or {}
-    clipboard_target = service_full_disk_access_clipboard_target(settings)
-    copied = copy_to_clipboard(clipboard_target)
-    print()
-    print(C.bold("Full Disk Access for the local API service"))
-    if settings_opened:
-        print(C.dim("  Opened System Settings > Privacy & Security > Full Disk Access."))
-    else:
-        print(C.dim("  Open System Settings > Privacy & Security > Full Disk Access."))
-    print(C.dim("  The service runs under launchd, so it needs its own access target."))
-    print(C.dim(f"  Add: {service_full_disk_access_target(settings)}"))
-    if copied:
-        print(C.dim(f"  Copied path to clipboard: {clipboard_target}"))
-    else:
-        print(C.dim(f"  Copy this path: {clipboard_target}"))
-    print(C.dim("  In the file picker, press Command-Shift-G, paste the path, press Return, then click Open."))
-    print(C.dim("  Then run `remctl service restart`."))
-    print(C.dim(f"  Finally rerun `{rerun_command}`."))
 
 
 def permission_helper_available():
@@ -1182,13 +1096,13 @@ def permission_helper_available():
     return helper.exists() and os.access(helper, os.X_OK)
 
 
-def launch_full_disk_access_helper(*, include_cli=True, include_service=False, wait=False):
+def launch_full_disk_access_helper(*, include_cli=True, wait=False):
     helper = current_permissions_path()
     if not helper.exists() or not os.access(helper, os.X_OK):
         return False
-    targets = full_disk_access_target_specs(include_cli=include_cli, include_service=include_service)
+    targets = full_disk_access_target_specs(include_cli=include_cli)
     if not targets:
-        targets = full_disk_access_target_specs(include_cli=True, include_service=False)
+        targets = full_disk_access_target_specs(include_cli=True)
     args = [
         str(helper),
         "--title",
@@ -1199,8 +1113,6 @@ def launch_full_disk_access_helper(*, include_cli=True, include_service=False, w
     for target in targets:
         args.extend(["--target", target["title"], target["path"], target["subtitle"]])
     cli_command = shlex.quote(str(current_cli_path()))
-    if include_service:
-        args.extend(["--after", "Restart Service", f"{cli_command} service restart"])
     args.extend(["--after", "Run Doctor", f"{cli_command} doctor"])
     try:
         if wait:
@@ -1365,53 +1277,18 @@ def applescript_access_check_for_onboarding():
     )
 
 
-def local_api_check_for_onboarding():
-    service = launch_agent_status()
-    if not service["running"]:
-        fix = "Run `remctl service install` if you want optional local API fallback."
-        if service["installed"]:
-            fix = "Run `remctl service restart` to bring the optional local API fallback back online."
-        return check_result("local_api", "warn", service["path"], fix)
-
-    settings = parse_launch_agent_settings() or {}
-    host = settings.get("host") or DEFAULT_SERVER_HOST
-    port = settings.get("port") or DEFAULT_SERVER_PORT
-    token = TOKEN_FILE.read_text().strip() if TOKEN_FILE.exists() else None
-    probe = local_api_probe(host, port, token=token or None)
-    assessed = assess_local_api_probe(host, port, probe, settings=settings)
-    return check_result("local_api", assessed["status"], assessed["detail"], assessed["fix"])
-
-
-def database_access_check_for_onboarding(api_check=None):
+def database_access_check_for_onboarding():
     access_error = reminders_store_access_error()
     db_path = find_main_db_path()
-    api_healthy = bool(api_check and api_check["status"] == "ok")
     if access_error:
-        if api_healthy:
-            return check_result(
-                "database",
-                "warn",
-                (
-                    f"{access_error} Direct SQLite reads are blocked in this shell, "
-                    "but the local remctl service fallback is healthy."
-                ),
-                full_disk_access_fix_text(api_healthy=True, rerun_command="remctl doctor"),
-            )
         return check_result(
             "database",
             "fail",
             access_error,
-            full_disk_access_fix_text(api_healthy=False, rerun_command="remctl doctor"),
+            full_disk_access_fix_text(rerun_command="remctl doctor"),
         )
     if db_path:
         return check_result("database", "ok", str(db_path))
-    if api_healthy:
-        return check_result(
-            "database",
-            "warn",
-            "No local Reminders database found. The local remctl service fallback is healthy.",
-            "Enable iCloud Reminders and open Reminders.app once if you want direct SQLite reads.",
-        )
     return check_result(
         "database",
         "fail",
@@ -1426,17 +1303,12 @@ def gather_onboarding_checks():
         bridge_access_check_for_onboarding(),
         applescript_access_check_for_onboarding(),
     ]
-    service = launch_agent_status()
-    api_check = local_api_check_for_onboarding() if service["installed"] else None
-    db_check = database_access_check_for_onboarding(api_check=api_check)
+    db_check = database_access_check_for_onboarding()
     checks.append(db_check)
-    if api_check and (db_check["status"] != "ok" or api_check["status"] in {"ok", "fail"}):
-        checks.append(api_check)
     return checks
 
 
 def run_onboarding(*, auto=False):
-    ensure_api_token()
     checks = gather_onboarding_checks()
     fail_count = sum(1 for check in checks if check["status"] == "fail")
     warn_count = sum(1 for check in checks if check["status"] == "warn")
@@ -1473,13 +1345,11 @@ def maybe_run_first_launch_onboarding(args):
     result = run_onboarding(auto=True)
     print_check_report("RemCTL onboard", result["checks"])
     database_check = next((check for check in result["checks"] if check["name"] == "database"), None)
-    api_check = next((check for check in result["checks"] if check["name"] == "local_api"), None)
     if needs_full_disk_access_guidance(database_check):
-        if launch_full_disk_access_helper(include_cli=True, include_service=False):
+        if launch_full_disk_access_helper(include_cli=True):
             print_permission_helper_opened()
         else:
             print_full_disk_access_guidance(
-                api_healthy=bool(api_check and api_check["status"] == "ok"),
                 settings_opened=False,
                 rerun_command="remctl doctor",
             )
@@ -2669,8 +2539,7 @@ _remctl() {
         'list-delete:Delete a list'
         'onboard:Prompt for macOS permissions and verify readiness'
         'doctor:Diagnose setup and runtime issues'
-        'setup:Install completions and optional service'
-        'service:Manage the remctl launch agent'
+        'setup:Install shell completions'
         'permissions:Open guided macOS permission helper'
         'completion:Generate shell completions'
     )
@@ -2683,7 +2552,7 @@ BASH_COMPLETION = '''_remctl() {
     local cur prev commands
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="lists show add done undone edit delete search today upcoming overdue flagged urgent flag unflag tags subtasks info sections stats link open export import list-create list-rename list-delete onboard doctor setup service permissions completion"
+    commands="lists show add done undone edit delete search today upcoming overdue flagged urgent flag unflag tags subtasks info sections stats link open export import list-create list-rename list-delete onboard doctor setup permissions completion"
 
     if [ $COMP_CWORD -eq 1 ]; then
         COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -2722,8 +2591,7 @@ complete -c remctl -n "__fish_use_subcommand" -a list-rename -d "Rename a list"
 complete -c remctl -n "__fish_use_subcommand" -a list-delete -d "Delete a list"
 complete -c remctl -n "__fish_use_subcommand" -a onboard -d "Prompt for macOS permissions and verify readiness"
 complete -c remctl -n "__fish_use_subcommand" -a doctor -d "Diagnose setup and runtime issues"
-complete -c remctl -n "__fish_use_subcommand" -a setup -d "Install completions and optional service"
-complete -c remctl -n "__fish_use_subcommand" -a service -d "Manage the remctl launch agent"
+complete -c remctl -n "__fish_use_subcommand" -a setup -d "Install shell completions"
 complete -c remctl -n "__fish_use_subcommand" -a permissions -d "Open guided macOS permission helper"
 complete -c remctl -n "__fish_use_subcommand" -a completion -d "Generate shell completions"
 '''
@@ -2774,15 +2642,6 @@ def current_cli_path():
     return Path(__file__).resolve()
 
 
-def current_server_path():
-    if SERVER_PATH.exists():
-        return SERVER_PATH.resolve()
-    discovered = shutil.which("remctl-server")
-    if discovered:
-        return Path(discovered).resolve()
-    return SERVER_PATH.resolve()
-
-
 def current_python_path():
     return Path(sys.executable).resolve()
 
@@ -2803,304 +2662,6 @@ def current_permissions_path():
     if discovered:
         return Path(discovered).resolve()
     return PERMISSIONS_PATH.resolve()
-
-
-def launch_agent_path():
-    return Path.home() / "Library" / "LaunchAgents" / f"{LAUNCH_AGENT_LABEL}.plist"
-
-
-def launch_agent_log_path():
-    return Path.home() / "Library" / "Logs" / "remctl-server.log"
-
-
-def launchctl_domain():
-    return f"gui/{os.getuid()}"
-
-
-def launchctl_job_ref():
-    return f"{launchctl_domain()}/{LAUNCH_AGENT_LABEL}"
-
-
-def launch_agent_program_args(
-    server_path,
-    python_path=None,
-    host=DEFAULT_SERVER_HOST,
-    port=DEFAULT_SERVER_PORT,
-    allow_origin=None,
-    enable_opengraph=False,
-):
-    args = [str(server_path), "--port", str(port)]
-    if python_path:
-        args = [str(python_path), *args]
-    if host and host != DEFAULT_SERVER_HOST:
-        args.extend(["--host", host])
-    if allow_origin:
-        args.extend(["--allow-origin", allow_origin])
-    if enable_opengraph:
-        args.append("--enable-opengraph")
-    return args
-
-
-def build_launch_agent_plist(
-    server_path,
-    python_path=None,
-    host=DEFAULT_SERVER_HOST,
-    port=DEFAULT_SERVER_PORT,
-    allow_origin=None,
-    enable_opengraph=False,
-):
-    log_path = launch_agent_log_path()
-    return {
-        "Label": LAUNCH_AGENT_LABEL,
-        "ProgramArguments": launch_agent_program_args(
-            server_path,
-            python_path=python_path or current_python_path(),
-            host=host,
-            port=port,
-            allow_origin=allow_origin,
-            enable_opengraph=enable_opengraph,
-        ),
-        "RunAtLoad": True,
-        "KeepAlive": True,
-        "WorkingDirectory": str(Path.home()),
-        "EnvironmentVariables": {
-            "HOME": str(Path.home()),
-            "REMCTL_STORE_DIR": str(STORE_DIR),
-            "REMCTL_CONFIG_DIR": str(CONFIG_DIR),
-        },
-        "StandardOutPath": str(log_path),
-        "StandardErrorPath": str(log_path),
-    }
-
-
-def write_launch_agent_plist(
-    server_path,
-    python_path=None,
-    host=DEFAULT_SERVER_HOST,
-    port=DEFAULT_SERVER_PORT,
-    allow_origin=None,
-    enable_opengraph=False,
-):
-    path = launch_agent_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    launch_agent_log_path().parent.mkdir(parents=True, exist_ok=True)
-    with path.open("wb") as fh:
-        plistlib.dump(
-            build_launch_agent_plist(
-                server_path,
-                python_path=python_path,
-                host=host,
-                port=port,
-                allow_origin=allow_origin,
-                enable_opengraph=enable_opengraph,
-            ),
-            fh,
-        )
-    return path
-
-
-def ensure_api_token():
-    ensure_private_dir(CONFIG_DIR)
-    if TOKEN_FILE.exists():
-        token = TOKEN_FILE.read_text().strip()
-        if token:
-            TOKEN_FILE.chmod(0o600)
-            return token, False
-    token = secrets.token_urlsafe(32)
-    write_private_text_file(TOKEN_FILE, token + "\n")
-    return token, True
-
-
-def parse_launch_agent_settings():
-    path = launch_agent_path()
-    if not path.exists():
-        return None
-    with path.open("rb") as fh:
-        data = plistlib.load(fh)
-    args = list(data.get("ProgramArguments", []))
-    if args and args[0] == "/bin/zsh" and "-c" in args:
-        command = args[-1]
-        if command.startswith("exec "):
-            command = command[5:]
-        args = shlex.split(command)
-    settings = {
-        "path": str(path),
-        "python_path": None,
-        "server_path": None,
-        "host": DEFAULT_SERVER_HOST,
-        "port": DEFAULT_SERVER_PORT,
-        "allow_origin": None,
-        "enable_opengraph": False,
-        "allow_unsafe_sqlite_writes": False,
-    }
-    server_idx = next((idx for idx, arg in enumerate(args) if Path(arg).name == "remctl-server"), None)
-    if server_idx is None:
-        server_idx = 0 if args else None
-    if server_idx is not None and args:
-        settings["server_path"] = args[server_idx]
-        if server_idx > 0:
-            settings["python_path"] = " ".join(args[:server_idx])
-    idx = (server_idx + 1) if server_idx is not None else 0
-    while idx < len(args):
-        arg = args[idx]
-        if arg == "--host" and idx + 1 < len(args):
-            settings["host"] = args[idx + 1]
-            idx += 2
-        elif arg == "--port" and idx + 1 < len(args):
-            settings["port"] = int(args[idx + 1])
-            idx += 2
-        elif arg == "--allow-origin" and idx + 1 < len(args):
-            settings["allow_origin"] = args[idx + 1]
-            idx += 2
-        elif arg == "--enable-opengraph":
-            settings["enable_opengraph"] = True
-            idx += 1
-        elif arg == "--allow-unsafe-sqlite-writes":
-            settings["allow_unsafe_sqlite_writes"] = True
-            idx += 1
-        else:
-            idx += 1
-    return settings
-
-
-def launchctl_run(*args):
-    return subprocess.run(["launchctl", *args], capture_output=True, text=True)
-
-
-def wait_for_service_loaded(expected_loaded, timeout=3.0):
-    deadline = time.monotonic() + timeout
-    status = launch_agent_status()
-    while time.monotonic() < deadline:
-        if status["loaded"] == expected_loaded:
-            return status
-        time.sleep(0.1)
-        status = launch_agent_status()
-    return status
-
-
-def launch_agent_status():
-    path = launch_agent_path()
-    status = {
-        "installed": path.exists(),
-        "loaded": False,
-        "running": False,
-        "path": str(path),
-        "job": launchctl_job_ref(),
-        "pid": None,
-        "state": None,
-        "details": "",
-    }
-    if sys.platform != "darwin":
-        status["details"] = "launchctl is only available on macOS"
-        return status
-    proc = launchctl_run("print", launchctl_job_ref())
-    status["details"] = (proc.stdout or proc.stderr).strip()
-    if proc.returncode != 0:
-        return status
-    status["loaded"] = True
-    state_match = re.search(r"^\s*state = (\w+)", proc.stdout, re.MULTILINE)
-    if state_match:
-        status["state"] = state_match.group(1)
-        status["running"] = status["state"] == "running"
-    pid_match = re.search(r"^\s*pid = (\d+)", proc.stdout, re.MULTILINE)
-    if pid_match:
-        status["pid"] = int(pid_match.group(1))
-    return status
-
-
-def local_api_probe(host, port, token=None, timeout=2):
-    host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
-    result = {"health": None, "stats": None, "error": None}
-    try:
-        with urlopen(f"http://{host}:{port}/health", timeout=timeout) as resp:
-            result["health"] = json.loads(resp.read().decode("utf-8"))
-        if token:
-            req = Request(
-                f"http://{host}:{port}/api/v1/stats",
-                headers={"Authorization": f"Bearer {token}"},
-            )
-            with urlopen(req, timeout=timeout) as resp:
-                result["stats"] = json.loads(resp.read().decode("utf-8"))
-    except (HTTPError, URLError, OSError, json.JSONDecodeError) as exc:
-        result["error"] = str(exc)
-    return result
-
-
-def assess_local_api_probe(host, port, probe, settings=None):
-    host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
-    base_url = f"http://{host}:{port}"
-    health = probe.get("health")
-    if not health:
-        return {
-            "status": "warn",
-            "detail": probe.get("error") or f"{base_url} unavailable",
-            "fix": "\n".join(
-                [
-                    "Check the launch agent state with:",
-                    "  remctl service status",
-                    "If it is stopped, run:",
-                    "  remctl service restart",
-                    f"Logs: {launch_agent_log_path()}",
-                ]
-            ),
-        }
-
-    health_data = health.get("data", {}) if isinstance(health, dict) else {}
-    api_status = health_data.get("status", "unknown")
-    database_state = health_data.get("database", "unknown")
-    detail = f"{base_url} {api_status} (database: {database_state})"
-    if api_status == "healthy" and database_state == "connected":
-        return {"status": "ok", "detail": detail, "fix": None}
-    return {
-        "status": "fail",
-        "detail": detail,
-        "fix": service_full_disk_access_fix_text(settings, rerun_command="remctl doctor"),
-    }
-
-
-def local_api_connection_info():
-    settings = parse_launch_agent_settings() or {}
-    host = settings.get("host") or DEFAULT_SERVER_HOST
-    port = settings.get("port") or DEFAULT_SERVER_PORT
-    host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
-    token = TOKEN_FILE.read_text().strip() if TOKEN_FILE.exists() else ""
-    if not token:
-        raise LocalAPIUnavailable(
-            "Local API token not configured. Run remctl setup or remctl service install."
-        )
-    return host, port, token
-
-
-def local_api_request(method, path, *, query=None, body=None, timeout=5):
-    host, port, token = local_api_connection_info()
-    url = f"http://{host}:{port}{path}"
-    if query:
-        url += "?" + urlencode(query, doseq=True)
-    headers = {"Authorization": f"Bearer {token}"}
-    data = None
-    if body is not None:
-        headers["Content-Type"] = "application/json"
-        data = json.dumps(body).encode("utf-8")
-    req = Request(url, headers=headers, data=data, method=method)
-    try:
-        with urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except HTTPError as exc:
-        message = str(exc)
-        try:
-            payload = json.loads(exc.read().decode("utf-8"))
-            message = payload.get("error") or payload.get("message") or message
-        except Exception:
-            pass
-        raise LocalAPIRequestError(message) from exc
-    except (URLError, OSError, json.JSONDecodeError) as exc:
-        raise LocalAPIUnavailable(f"Local API unavailable: {exc}") from exc
-
-    if isinstance(payload, dict) and payload.get("ok") is False:
-        raise LocalAPIRequestError(payload.get("error", "Local API request failed"))
-    if isinstance(payload, dict) and "data" in payload:
-        return payload["data"]
-    return payload
 
 
 def _item_due_datetime(item):
@@ -3367,218 +2928,10 @@ def _normalize_write_result(result, *, status, reminder_id, title=None, include_
     return payload
 
 
-def handle_local_api_fallback(args):
-    cmd = getattr(args, "cmd", None) or "today"
-    if cmd == "lists":
-        rows = local_api_request("GET", "/api/v1/lists")
-        _print_list_payload(rows, json_mode=args.json, table_mode=getattr(args, "format", None) == "table")
-        return True
-    if cmd == "show":
-        items = local_api_request(
-            "GET",
-            f"/api/v1/lists/{quote(args.list, safe='')}",
-            query={"completed": "1"} if args.completed else None,
-        )
-        _print_show_payload(args.list, items, args)
-        return True
-    if cmd == "search":
-        query = {"q": args.query}
-        if args.completed:
-            query["completed"] = "1"
-        items = local_api_request("GET", "/api/v1/search", query=query)
-        _print_search_payload(args.query, items, args)
-        return True
-    if cmd == "today":
-        items = local_api_request("GET", "/api/v1/today")
-        _print_today_payload(items, args)
-        return True
-    if cmd == "upcoming":
-        days = args.days if hasattr(args, "days") and args.days else 7
-        items = local_api_request("GET", "/api/v1/upcoming", query={"days": str(days)})
-        _print_simple_reminder_list(
-            items,
-            args,
-            empty_message=f"Nothing due in the next {days} days",
-            heading=f"Upcoming ({days} days):",
-            total_label="upcoming",
-            group_by_day=True,
-        )
-        return True
-    if cmd == "overdue":
-        items = local_api_request("GET", "/api/v1/overdue")
-        _print_simple_reminder_list(
-            items,
-            args,
-            empty_message="No overdue reminders",
-            heading=C.red(C.bold(f"Overdue ({len(items)}):")),
-            total_label="overdue",
-        )
-        return True
-    if cmd == "flagged":
-        items = local_api_request("GET", "/api/v1/flagged")
-        _print_simple_reminder_list(
-            items,
-            args,
-            empty_message="No flagged reminders",
-            heading=C.bold("Flagged:"),
-            total_label="flagged",
-        )
-        return True
-    if cmd == "urgent":
-        items = local_api_request("GET", "/api/v1/urgent")
-        _print_simple_reminder_list(
-            items,
-            args,
-            empty_message="No urgent reminders",
-            heading=C.bold("Urgent:"),
-            total_label="urgent",
-        )
-        return True
-    if cmd == "tags":
-        rows = local_api_request("GET", "/api/v1/tags")
-        _print_tags_payload(rows, json_mode=args.json)
-        return True
-    if cmd == "sections":
-        grouped = local_api_request("GET", "/api/v1/sections")
-        _print_sections_payload(grouped, json_mode=args.json)
-        return True
-    if cmd == "stats":
-        stats = local_api_request("GET", "/api/v1/stats")
-        _print_stats_payload(stats, json_mode=args.json)
-        return True
-    if cmd == "info":
-        item = local_api_request("GET", f"/api/v1/reminders/{args.id}")
-        _print_info_payload(item, args)
-        return True
-    if cmd == "subtasks":
-        item = local_api_request("GET", f"/api/v1/reminders/{args.id}")
-        subtasks = item.get("subtasks", [])
-        if args.json:
-            payload = dict(item)
-            payload["subtasks"] = subtasks
-            print(json.dumps(payload, indent=2))
-            return True
-        print(f"Parent: {item.get('title') or '(untitled)'}")
-        if not subtasks:
-            print("  No subtasks")
-        else:
-            for sub in subtasks:
-                print(fmt(sub, indent="  "))
-            print(f"\n{len(subtasks)} subtask{'s' if len(subtasks) != 1 else ''}")
-        return True
-    if cmd == "link":
-        if args.list:
-            query = {"completed": "1"} if args.completed else None
-            items = local_api_request("GET", f"/api/v1/lists/{quote(args.list, safe='')}", query=query)
-        else:
-            items = [local_api_request("GET", f"/api/v1/reminders/{rid}") for rid in args.ids]
-        results = [
-            {"id": item["id"], "title": item["title"], "link": item["deepLink"]}
-            for item in items
-            if item.get("deepLink")
-        ]
-        if args.json:
-            print(json.dumps(results, indent=2))
-        else:
-            for item in results:
-                print(f"#{item['id']} {item['title']}")
-                print(f"  {C.dim(item['link'])}")
-        return True
-    if cmd == "open":
-        if getattr(args, "id", None):
-            item = local_api_request("GET", f"/api/v1/reminders/{args.id}")
-            if item.get("deepLink"):
-                subprocess.run(["open", item["deepLink"]])
-                print(f"Opened #{args.id} in Reminders.app")
-            else:
-                subprocess.run(["open", "-a", "Reminders"])
-                print("Opened Reminders.app (no deep link available)")
-        else:
-            subprocess.run(["open", "-a", "Reminders"])
-            print("Opened Reminders.app")
-        return True
-    if cmd == "done":
-        result = local_api_request("POST", f"/api/v1/reminders/{args.id}/complete", body={})
-        payload = _normalize_write_result(result, status="completed", reminder_id=args.id)
-        print(json.dumps(payload) if args.json else f"Completed: {payload.get('title', args.id)}")
-        return True
-    if cmd == "undone":
-        result = local_api_request("POST", f"/api/v1/reminders/{args.id}/uncomplete", body={})
-        payload = _normalize_write_result(result, status="uncompleted", reminder_id=args.id)
-        print(json.dumps(payload) if args.json else f"Uncompleted: {payload.get('title', args.id)}")
-        return True
-    if cmd == "flag":
-        result = local_api_request("POST", f"/api/v1/reminders/{args.id}/flag", body={})
-        payload = _normalize_write_result(result, status="flagged", reminder_id=args.id)
-        print(json.dumps(payload) if args.json else f"Flagged: {payload.get('title', args.id)}")
-        return True
-    if cmd == "unflag":
-        result = local_api_request("POST", f"/api/v1/reminders/{args.id}/unflag", body={})
-        payload = _normalize_write_result(result, status="unflagged", reminder_id=args.id)
-        print(json.dumps(payload) if args.json else f"Unflagged: {payload.get('title', args.id)}")
-        return True
-    if cmd == "delete":
-        reminder = local_api_request("GET", f"/api/v1/reminders/{args.id}")
-        if not args.force:
-            ans = input(f"Delete '{reminder.get('title')}' from {reminder.get('list')}? [y/N] ")
-            if not ans.lower().startswith("y"):
-                print("Cancelled.")
-                return True
-        local_api_request("DELETE", f"/api/v1/reminders/{args.id}")
-        payload = _normalize_write_result({}, status="deleted", reminder_id=args.id, title=reminder.get("title"))
-        print(json.dumps(payload) if args.json else f"Deleted: {payload.get('title', args.id)}")
-        return True
-    if cmd == "edit":
-        pm = {"high": 1, "medium": 5, "low": 9, "none": 0}
-        dt = None
-        if args.due and args.due != "clear":
-            dt = parse_due(args.due)
-            if dt is None:
-                print(
-                    f"Error: could not parse due date {args.due!r}. Use ISO "
-                    "(YYYY-MM-DD [HH:MM]) or shortcuts like today/tomorrow/eod/+3d.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-        body = {}
-        if args.title:
-            body["title"] = args.title
-        if args.notes is not None:
-            body["notes"] = args.notes
-        if args.priority and args.priority.lower() in pm:
-            body["priority"] = pm[args.priority.lower()]
-        if args.due == "clear":
-            body["due"] = None
-        elif dt is not None:
-            body["due"] = dt.isoformat()
-        if getattr(args, "url", None):
-            body["url"] = args.url
-        if getattr(args, "recurrence", None):
-            body["recurrence"] = parse_recurrence(args.recurrence)
-        if getattr(args, "alarm", None):
-            body["alarm"] = parse_alarm(args.alarm)
-        if not body:
-            print("Nothing to update.")
-            return True
-        local_api_request("PATCH", f"/api/v1/reminders/{args.id}", body=body)
-        payload = {"status": "updated", "id": args.id}
-        print(json.dumps(payload) if args.json else f"Updated #{args.id}")
-        return True
-    return False
-
-
 def run_handler_with_fallback(args, handler):
     try:
         handler(args)
     except RemindersDBUnavailable as exc:
-        try:
-            if handle_local_api_fallback(args):
-                return
-        except LocalAPIRequestError as api_exc:
-            print(f"Error: {api_exc}", file=sys.stderr)
-            sys.exit(1)
-        except LocalAPIUnavailable:
-            pass
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
@@ -3589,196 +2942,6 @@ def cmd_completion(a):
         sys.stdout.write(get_completion_script(shell))
     except ValueError as exc:
         print(f"Error: {exc}. Use bash, zsh, or fish.", file=sys.stderr)
-        sys.exit(1)
-
-
-def _service_result(ok, action, **extra):
-    data = {"ok": ok, "action": action}
-    data.update(extra)
-    return data
-
-
-def install_service(
-    *,
-    host=DEFAULT_SERVER_HOST,
-    port=DEFAULT_SERVER_PORT,
-    allow_origin=None,
-    enable_opengraph=False,
-    start=True,
-):
-    if sys.platform != "darwin":
-        return _service_result(False, "install", error="launchd service management requires macOS")
-    server_path = current_server_path()
-    if not server_path.exists():
-        return _service_result(False, "install", error=f"remctl-server not found at {server_path}")
-    path = write_launch_agent_plist(
-        server_path,
-        python_path=current_python_path(),
-        host=host,
-        port=port,
-        allow_origin=allow_origin,
-        enable_opengraph=enable_opengraph,
-    )
-    service = None
-    if start:
-        status = launch_agent_status()
-        if status["loaded"]:
-            stop_result = stop_service()
-            if not stop_result["ok"]:
-                return _service_result(
-                    False,
-                    "install",
-                    path=str(path),
-                    error=stop_result.get("error"),
-                    service=stop_result,
-                )
-        service = start_service()
-        if not service["ok"]:
-            return _service_result(
-                False,
-                "install",
-                path=str(path),
-                error=service.get("error"),
-                service=service,
-            )
-    return _service_result(True, "install", path=str(path), service=service)
-
-
-def start_service():
-    path = launch_agent_path()
-    if sys.platform != "darwin":
-        return _service_result(False, "start", error="launchd service management requires macOS")
-    if not path.exists():
-        return _service_result(False, "start", error=f"Launch agent not installed at {path}")
-    details = ""
-    for _ in range(5):
-        proc = launchctl_run("bootstrap", launchctl_domain(), str(path))
-        details = (proc.stdout or proc.stderr).strip()
-        if proc.returncode == 0:
-            wait_for_service_loaded(True)
-            return _service_result(True, "start", details=details)
-        if "input/output error" not in details.lower():
-            break
-        time.sleep(0.2)
-    if "already" in details.lower():
-        return restart_service()
-    return _service_result(False, "start", error=details or "launchctl bootstrap failed")
-
-
-def stop_service():
-    if sys.platform != "darwin":
-        return _service_result(False, "stop", error="launchd service management requires macOS")
-    proc = launchctl_run("bootout", launchctl_job_ref())
-    if proc.returncode == 0:
-        wait_for_service_loaded(False)
-        return _service_result(True, "stop", details=(proc.stdout or proc.stderr).strip())
-    details = (proc.stdout or proc.stderr).strip()
-    if (
-        "could not find service" in details.lower()
-        or "not found" in details.lower()
-        or "no such process" in details.lower()
-    ):
-        return _service_result(True, "stop", details="Service was not loaded")
-    return _service_result(False, "stop", error=details or "launchctl bootout failed")
-
-
-def restart_service():
-    if sys.platform != "darwin":
-        return _service_result(False, "restart", error="launchd service management requires macOS")
-    status = launch_agent_status()
-    if status["loaded"]:
-        proc = launchctl_run("kickstart", "-k", launchctl_job_ref())
-        if proc.returncode == 0:
-            return _service_result(True, "restart", details=(proc.stdout or proc.stderr).strip())
-        details = (proc.stdout or proc.stderr).strip()
-        return _service_result(False, "restart", error=details or "launchctl kickstart failed")
-    return start_service()
-
-
-def uninstall_service(remove_file=True):
-    stop_result = stop_service()
-    path = launch_agent_path()
-    if remove_file and path.exists():
-        path.unlink()
-    if stop_result["ok"]:
-        return _service_result(True, "uninstall", path=str(path), service=stop_result)
-    if path.exists():
-        return _service_result(False, "uninstall", path=str(path), service=stop_result, error=stop_result.get("error"))
-    return _service_result(True, "uninstall", path=str(path), service=stop_result)
-
-
-def cmd_service(a):
-    if a.action == "install":
-        result = install_service(
-            host=a.host,
-            port=a.port,
-            allow_origin=a.allow_origin,
-            enable_opengraph=a.enable_opengraph,
-            start=not a.no_start,
-        )
-    elif a.action == "start":
-        result = start_service()
-    elif a.action == "stop":
-        result = stop_service()
-    elif a.action == "restart":
-        result = restart_service()
-    elif a.action == "uninstall":
-        result = uninstall_service(remove_file=not a.keep_file)
-    elif a.action == "status":
-        status = launch_agent_status()
-        settings = parse_launch_agent_settings()
-        result = {"ok": status["installed"], "action": "status", "status": status, "settings": settings}
-    else:
-        print(f"Error: Unsupported service action '{a.action}'", file=sys.stderr)
-        sys.exit(1)
-
-    if getattr(a, "json", False):
-        print(json.dumps(result, indent=2))
-    else:
-        if a.action == "status":
-            status = result["status"]
-            settings = result["settings"] or {}
-            state = "running" if status["running"] else ("loaded" if status["loaded"] else "not loaded")
-            print(f"Launch agent: {status['path']}")
-            print(f"State: {state}")
-            if settings:
-                host = settings.get("host") or DEFAULT_SERVER_HOST
-                port = settings.get("port") or DEFAULT_SERVER_PORT
-                display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
-                print(f"Server: {settings.get('server_path')} --host {host} --port {port}")
-                print(f"URL: http://{display_host}:{port}")
-                if settings.get("python_path"):
-                    print(f"Python: {settings['python_path']}")
-                print(f"Full Disk Access target: {service_full_disk_access_target(settings)}")
-            if status["pid"]:
-                print(f"PID: {status['pid']}")
-            if status["details"] and not status["loaded"]:
-                print(f"Details: {status['details']}")
-            if status["running"] and settings:
-                token = TOKEN_FILE.read_text().strip() if TOKEN_FILE.exists() else None
-                probe = local_api_probe(
-                    settings.get("host") or DEFAULT_SERVER_HOST,
-                    settings.get("port") or DEFAULT_SERVER_PORT,
-                    token=token or None,
-                )
-                api_check = assess_local_api_probe(
-                    settings.get("host") or DEFAULT_SERVER_HOST,
-                    settings.get("port") or DEFAULT_SERVER_PORT,
-                    probe,
-                    settings=settings,
-                )
-                print(f"Health: {api_check['detail']}")
-                if api_check["status"] != "ok" and api_check.get("fix"):
-                    print("Fix:")
-                    for line in str(api_check["fix"]).splitlines():
-                        print(f"  {line}")
-        elif result["ok"]:
-            print(f"Service {result['action']} completed.")
-            if result.get("path"):
-                print(f"Launch agent: {result['path']}")
-        else:
-            print(f"Error: {result.get('error', 'Service action failed')}", file=sys.stderr)
-    if not result.get("ok", False):
         sys.exit(1)
 
 
@@ -3819,7 +2982,6 @@ def gather_doctor_checks():
             "fail",
             db_access_error,
             full_disk_access_fix_text(
-                api_healthy=False,
                 rerun_command="remctl doctor",
                 mention_onboard=True,
             ),
@@ -3862,28 +3024,12 @@ def gather_doctor_checks():
         None if permissions_ok else "Run ./install.sh to compile remctl-permissions for the guided Full Disk Access flow.",
     )
 
-    server_ok = current_server_path().exists()
-    add(
-        "server_binary",
-        "ok" if server_ok else "warn",
-        str(current_server_path()),
-        None if server_ok else "Install remctl-server if you want REST API access.",
-    )
-
     config_ok = CONFIG_DIR.exists()
     add(
         "config_dir",
         "ok" if config_ok else "warn",
         str(CONFIG_DIR),
         None if config_ok else "Run remctl setup to create config files.",
-    )
-
-    token = TOKEN_FILE.read_text().strip() if TOKEN_FILE.exists() else ""
-    add(
-        "api_token",
-        "ok" if token else "warn",
-        str(TOKEN_FILE),
-        None if token else "Run remctl setup to generate an API token.",
     )
 
     shell = detect_shell_name()
@@ -3897,39 +3043,6 @@ def gather_doctor_checks():
         )
     else:
         add("completion", "warn", f"Unsupported shell '{shell}'", "Run remctl setup --shell zsh|bash|fish.")
-
-    service = launch_agent_status()
-    service_status = "ok" if service["running"] else ("warn" if service["installed"] else "warn")
-    service_fix = None
-    if not service["installed"]:
-        service_fix = "Run remctl setup --service install or remctl service install."
-    elif not service["running"]:
-        service_fix = "Run remctl service restart."
-    add("launch_agent", service_status, service["path"], service_fix)
-
-    settings = parse_launch_agent_settings()
-    if service["running"]:
-        host = settings["host"] if settings else DEFAULT_SERVER_HOST
-        port = settings["port"] if settings else DEFAULT_SERVER_PORT
-        probe = local_api_probe(host, port, token=token or None)
-        api_check = assess_local_api_probe(host, port, probe, settings=settings)
-        add("local_api", api_check["status"], api_check["detail"], api_check["fix"])
-        if api_check["status"] == "ok":
-            for check in checks:
-                if check["name"] == "database" and check["status"] == "fail":
-                    check["status"] = "warn"
-                    check["detail"] = (
-                        f"{check['detail']} Direct SQLite reads are blocked in this shell, "
-                        "but the local remctl service fallback is healthy."
-                    )
-                    check["fix"] = full_disk_access_fix_text(
-                        api_healthy=True,
-                        rerun_command="remctl doctor",
-                        mention_onboard=True,
-                    )
-                    break
-    else:
-        add("local_api", "warn", "Server not running", "Run remctl service restart to probe the local API.")
 
     return checks
 
@@ -3962,21 +3075,12 @@ def cmd_onboard(a):
         print()
         print_check_report(None, result["checks"])
         database_check = next((check for check in result["checks"] if check["name"] == "database"), None)
-        api_check = next((check for check in result["checks"] if check["name"] == "local_api"), None)
         needs_cli_access = needs_full_disk_access_guidance(database_check)
-        needs_service_access = needs_full_disk_access_guidance(api_check)
-        if needs_cli_access or needs_service_access:
-            include_cli_target = needs_cli_access or needs_service_access
-            if launch_full_disk_access_helper(include_cli=include_cli_target, include_service=needs_service_access):
+        if needs_cli_access:
+            if launch_full_disk_access_helper(include_cli=True):
                 print_permission_helper_opened()
-            elif needs_cli_access:
-                print_full_disk_access_guidance(
-                    api_healthy=bool(api_check and api_check["status"] == "ok"),
-                    settings_opened=open_full_disk_access_settings(),
-                    rerun_command="remctl doctor",
-                )
             else:
-                print_service_full_disk_access_guidance(
+                print_full_disk_access_guidance(
                     settings_opened=open_full_disk_access_settings(),
                     rerun_command="remctl doctor",
                 )
@@ -3988,9 +3092,7 @@ def cmd_permissions(a):
     if a.topic != "full-disk-access":
         print(f"Error: Unsupported permissions topic '{a.topic}'", file=sys.stderr)
         sys.exit(1)
-    include_cli = a.scope in {"all", "cli"}
-    include_service = a.scope in {"all", "service"}
-    targets = full_disk_access_target_specs(include_cli=include_cli, include_service=include_service)
+    targets = full_disk_access_target_specs(include_cli=True)
     result = {
         "helper": str(current_permissions_path()),
         "available": permission_helper_available(),
@@ -3999,23 +3101,21 @@ def cmd_permissions(a):
     if getattr(a, "json", False):
         print(json.dumps(result, indent=2))
         return
-    if launch_full_disk_access_helper(include_cli=include_cli, include_service=include_service, wait=a.wait):
+    if launch_full_disk_access_helper(include_cli=True, wait=a.wait):
         print_permission_helper_opened()
         return
-    if include_cli:
-        print_full_disk_access_guidance(
-            settings_opened=open_full_disk_access_settings(),
-            rerun_command="remctl doctor",
-        )
-    if include_service:
-        print_service_full_disk_access_guidance(
-            settings_opened=not include_cli,
-            rerun_command="remctl doctor",
-        )
+    print_full_disk_access_guidance(
+        settings_opened=open_full_disk_access_settings(),
+        rerun_command="remctl doctor",
+    )
 
 
 def cmd_setup(a):
-    token, token_created = ensure_api_token()
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        CONFIG_DIR.chmod(0o700)
+    except OSError:
+        pass
     selected_shell = resolve_setup_shell(a.shell)
     completion_path = None
     if selected_shell != "skip":
@@ -4025,30 +3125,11 @@ def cmd_setup(a):
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
 
-    service_result = None
-    if a.service == "install":
-        service_result = install_service(
-            host=a.host,
-            port=a.port,
-            allow_origin=a.allow_origin,
-            enable_opengraph=a.enable_opengraph,
-            start=True,
-        )
-        if not service_result["ok"]:
-            if getattr(a, "json", False):
-                print(json.dumps(service_result, indent=2))
-            else:
-                print(f"Error: {service_result.get('error', 'Service setup failed')}", file=sys.stderr)
-            sys.exit(1)
-
     result = {
         "ok": True,
         "config_dir": str(CONFIG_DIR),
-        "token_file": str(TOKEN_FILE),
-        "token_created": token_created,
         "completion_shell": None if selected_shell == "skip" else selected_shell,
         "completion_path": str(completion_path) if completion_path else None,
-        "service": service_result,
     }
     if getattr(a, "doctor", False):
         doctor_checks = gather_doctor_checks()
@@ -4062,32 +3143,15 @@ def cmd_setup(a):
     else:
         print(C.bold("RemCTL setup"))
         print(f"Config directory: {CONFIG_DIR}")
-        print(f"API token: {TOKEN_FILE}" + (" (created)" if token_created else " (already exists)"))
         if completion_path:
             print(f"Shell completion: {completion_path}")
         else:
             print("Shell completion: skipped")
-        if service_result:
-            settings = parse_launch_agent_settings() or {}
-            print("Local API service: installed")
-            print(f"Launch agent: {launch_agent_path()}")
-            print(f"Full Disk Access target: {service_full_disk_access_target(settings)}")
-        else:
-            service = launch_agent_status()
-            if service["installed"]:
-                state = "running" if service["running"] else ("loaded" if service["loaded"] else "stopped")
-                settings = parse_launch_agent_settings() or {}
-                print(f"Local API service: already installed ({state})")
-                print(f"Launch agent: {service['path']}")
-                if settings:
-                    print(f"Full Disk Access target: {service_full_disk_access_target(settings)}")
-            else:
-                print("Local API service: not installed (optional; run `remctl service install` if you need the REST API)")
         print()
         print("Next:")
         print("  1. remctl onboard   # trigger macOS Reminders and Automation prompts")
         print("  2. remctl permissions full-disk-access   # visual Full Disk Access setup")
-        print("  3. remctl doctor    # verify the CLI and optional service")
+        print("  3. remctl doctor    # verify the CLI")
         if getattr(a, "doctor", False):
             print()
             cmd_doctor(SimpleNamespace(json=False))
@@ -4104,19 +3168,17 @@ def main():
             "  1. ./install.sh --bootstrap   # copy files, create config, install completions\n"
             "  2. remctl onboard             # trigger Reminders and Automation prompts\n"
             "  3. remctl permissions full-disk-access   # visual Full Disk Access setup\n"
-            "  4. remctl doctor              # verify the CLI and optional service\n"
+            "  4. remctl doctor              # verify the CLI\n"
             "\n"
             "Examples:\n"
             "  remctl onboard\n"
             "  remctl today\n"
             "  remctl add \"Buy milk\" -d tomorrow\n"
             "  remctl setup --shell auto --doctor\n"
-            "  remctl service install\n"
-            "  remctl service status\n"
             "  remctl permissions full-disk-access\n"
             "\n"
-            "Use `remctl onboard --help`, `remctl permissions --help`, `remctl setup --help`, `remctl doctor --help`, and `remctl service --help`\n"
-            "for onboarding and service-management details. The local API service is optional."
+            "Use `remctl onboard --help`, `remctl permissions --help`, `remctl setup --help`, and `remctl doctor --help`\n"
+            "for onboarding details."
         ),
         formatter_class=HelpFormatter,
     )
@@ -4224,7 +3286,7 @@ def main():
         help="Prompt for macOS Reminders permissions and verify readiness",
         description=(
             "Open Reminders.app, trigger the native EventKit and AppleScript permission prompts,\n"
-            "then verify whether direct database reads and optional local API fallback are ready.\n"
+            "then verify whether direct database reads are ready.\n"
             "If Full Disk Access is still missing, remctl opens the guided permission helper."
         ),
         epilog=(
@@ -4234,8 +3296,7 @@ def main():
             "\n"
             "macOS will not show a native Full Disk Access prompt. If onboarding reports that\n"
             "direct CLI reads are blocked, use `remctl permissions full-disk-access` for a\n"
-            "guided drag-and-drop flow. If the local API fallback is already healthy, you can\n"
-            "keep using remctl and come back to direct CLI Full Disk Access later."
+            "guided drag-and-drop flow."
         ),
         formatter_class=HelpFormatter,
     ); js(c)
@@ -4244,7 +3305,7 @@ def main():
         "doctor",
         help="Diagnose setup and runtime issues",
         description=(
-            "Run environment and runtime checks for the CLI and optional local API service.\n"
+            "Run environment and runtime checks for the CLI.\n"
             "This is the first troubleshooting step after install or onboarding."
         ),
         epilog=(
@@ -4253,74 +3314,28 @@ def main():
             "  remctl doctor --json\n"
             "\n"
             "If this is your first run on a new Mac, use `remctl onboard` first so macOS can\n"
-            "show the Reminders and Automation permission prompts.\n"
-            "\n"
-            "If `local_api` reports `degraded (database: not found)` while the CLI itself works,\n"
-            "the background service is missing its own Full Disk Access grant. `doctor` prints\n"
-            "the exact Python path to add, followed by the restart and verification commands."
+            "show the Reminders and Automation permission prompts."
         ),
         formatter_class=HelpFormatter,
     ); js(c)
 
     c = sub.add_parser(
         "setup",
-        help="Install completions and optional launch agent",
+        help="Install shell completions",
         description=(
-            "Create the RemCTL config directory and API token, install shell completions,\n"
-            "and optionally install/start the background remctl-server launch agent."
+            "Create the RemCTL config directory and install shell completions."
         ),
         epilog=(
             "Examples:\n"
             "  remctl setup --shell auto --doctor\n"
-            "  remctl setup --service install\n"
-            "  remctl setup --service install --port 8080\n"
             "\n"
-            "`setup` creates config files, installs completions, and optionally installs the\n"
-            "background service. It does not grant macOS permissions. Run `remctl onboard`\n"
-            "after setup on a new Mac.\n"
-            "\n"
-            "The service is optional. Use it only if you need the local REST API or Android sync,\n"
-            "and grant Full Disk Access to the service Python interpreter if doctor reports\n"
-            "`local_api` as degraded with `database: not found`."
+            "`setup` creates config files and installs completions. It does not grant macOS\n"
+            "permissions. Run `remctl onboard` after setup on a new Mac."
         ),
         formatter_class=HelpFormatter,
     )
     c.add_argument("--shell", choices=["auto", "bash", "zsh", "fish", "skip"], default="auto", help="Shell completion to install")
-    c.add_argument("--service", choices=["skip", "install"], default="skip", help="Whether to install and start the launch agent")
-    c.add_argument("--host", default=DEFAULT_SERVER_HOST, help="Host for the launch agent's remctl-server process")
-    c.add_argument("--port", type=int, default=DEFAULT_SERVER_PORT, help="Port for the launch agent's remctl-server process")
-    c.add_argument("--allow-origin", help="Optional Access-Control-Allow-Origin for the launch agent")
-    c.add_argument("--enable-opengraph", action="store_true", help="Enable OpenGraph fetches for the launch agent")
     c.add_argument("--doctor", action="store_true", help="Run remctl doctor after setup")
-    js(c)
-
-    c = sub.add_parser(
-        "service",
-        help="Manage the remctl launch agent",
-        description=(
-            "Manage the background remctl-server launch agent stored at\n"
-            "~/Library/LaunchAgents/com.remctl.server.plist."
-        ),
-        epilog=(
-            "Examples:\n"
-            "  remctl service install\n"
-            "  remctl service status\n"
-            "  remctl service restart\n"
-            "  remctl service uninstall\n"
-            "\n"
-            "Only `install` uses --host, --port, --allow-origin, and --enable-opengraph.\n"
-            "`remctl service status` prints the Server path, URL, Python path, live health,\n"
-            "and the exact Full Disk Access target for the background service."
-        ),
-        formatter_class=HelpFormatter,
-    )
-    c.add_argument("action", choices=["install", "start", "stop", "restart", "status", "uninstall"], help="Service action to run")
-    c.add_argument("--host", default=DEFAULT_SERVER_HOST, help="Host for the launch agent's remctl-server process")
-    c.add_argument("--port", type=int, default=DEFAULT_SERVER_PORT, help="Port for the launch agent's remctl-server process")
-    c.add_argument("--allow-origin", help="Optional Access-Control-Allow-Origin for the launch agent")
-    c.add_argument("--enable-opengraph", action="store_true", help="Enable OpenGraph fetches for the launch agent")
-    c.add_argument("--no-start", action="store_true", help="Install the launch agent without starting it")
-    c.add_argument("--keep-file", action="store_true", help="Keep the plist file when uninstalling")
     js(c)
 
     c = sub.add_parser(
@@ -4330,7 +3345,6 @@ def main():
         epilog=(
             "Examples:\n"
             "  remctl permissions full-disk-access\n"
-            "  remctl permissions full-disk-access --scope service\n"
             "  remctl permissions full-disk-access --json\n"
             "\n"
             "The helper opens System Settings, copies the first target path, and shows\n"
@@ -4340,7 +3354,6 @@ def main():
         formatter_class=HelpFormatter,
     )
     c.add_argument("topic", choices=["full-disk-access"], help="Permission flow to open")
-    c.add_argument("--scope", choices=["all", "cli", "service"], default="all", help="Which RemCTL targets to include")
     c.add_argument("--wait", action="store_true", help="Wait for the helper to close")
     js(c)
 
@@ -4422,7 +3435,6 @@ def main():
         "onboard": cmd_onboard,
         "doctor": cmd_doctor,
         "setup": cmd_setup,
-        "service": cmd_service,
         "permissions": cmd_permissions,
         "completion": cmd_completion,
     }

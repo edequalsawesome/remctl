@@ -208,7 +208,7 @@ func applyFields(_ reminder: EKReminder, _ cmd: Command, store: EKEventStore) {
     // produces a changedKeys set CloudKit accepts as a full dueDate update. The
     // previous variant embedded .timeZone in the components + cleared
     // startDateComponents; that produced a CKRecord push that remindd logged as
-    // successful but which the server silently ignored for the dueDate field
+    // successful but CloudKit silently ignored the dueDate field
     // (observed 2026-04-17, verified against AppleScript-authored pushes).
     if cmd.due != nil {
         if let dueStr = cmd.due, !dueStr.isEmpty, let date = parseISO(dueStr) {

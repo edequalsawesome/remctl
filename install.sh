@@ -1,11 +1,10 @@
 #!/bin/bash
 # RemCTL Installer
-# Installs remctl, remctl-bridge, remctl-permissions, remctl-server, and shared runtime helpers.
+# Installs remctl, remctl-bridge, remctl-permissions, and shared runtime helpers.
 
 set -euo pipefail
 
 BOOTSTRAP=0
-WITH_SERVICE=0
 RUN_DOCTOR=0
 COMPLETION_SHELL="auto"
 
@@ -15,7 +14,6 @@ Usage: ./install.sh [options]
 
 Options:
   --bootstrap                 Install completions and create config for first-run onboarding
-  --with-service              Install and start the launch agent after copying binaries
   --doctor                    Run `remctl doctor` after installation
   --shell-completions SHELL   Install completions for auto, zsh, bash, fish, or none (default: auto)
   -h, --help                  Show this help text
@@ -25,7 +23,6 @@ Notes:
   Use PREFIX="$HOME/.local" if you want ~/.local/bin instead.
   Run `remctl onboard`, then `remctl permissions full-disk-access` for the visual Full Disk Access flow.
   Run `remctl doctor` after permissions, or pass --doctor when upgrading an already-authorized install.
-  The optional service is a separate launchd process and may need its own Full Disk Access grant.
 EOF
 }
 
@@ -33,10 +30,6 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --bootstrap)
             BOOTSTRAP=1
-            shift
-            ;;
-        --with-service)
-            WITH_SERVICE=1
             shift
             ;;
         --doctor)
@@ -144,34 +137,7 @@ else
     echo -e "    ${DIM}remctl will fall back to AppleScript for writes and manual Full Disk Access steps${RESET}"
 fi
 
-# 3. Install API server
-echo -e "${BLUE}→${RESET} Installing remctl-server..."
-cp "$SCRIPT_DIR/remctl-server" "$BIN_DIR/remctl-server"
-chmod +x "$BIN_DIR/remctl-server"
-echo -e "  ${GREEN}✓${RESET} remctl-server → $BIN_DIR/remctl-server"
-
-# 5. Generate API token if missing
-if [[ ! -e "$CONFIG_DIR/api-token" ]]; then
-    python3 - "$CONFIG_DIR/api-token" <<'PY'
-import os
-import secrets
-import sys
-
-path = sys.argv[1]
-flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-if hasattr(os, "O_NOFOLLOW"):
-    flags |= os.O_NOFOLLOW
-fd = os.open(path, flags, 0o600)
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(secrets.token_urlsafe(32) + "\n")
-finally:
-    os.chmod(path, 0o600)
-PY
-    echo -e "  ${GREEN}✓${RESET} API token generated → $CONFIG_DIR/api-token"
-fi
-
-# 6. Check PATH
+# 3. Check PATH
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     PATH_NEEDS_UPDATE=1
     echo ""
@@ -191,14 +157,9 @@ if [[ "$SETUP_SHELL" == "none" ]]; then
     SETUP_SHELL="skip"
 fi
 
-if [[ "$SETUP_SHELL" != "skip" || "$WITH_SERVICE" -eq 1 ]]; then
+if [[ "$SETUP_SHELL" != "skip" ]]; then
     echo -e "${BLUE}→${RESET} Running remctl setup..."
     SETUP_ARGS=("$BIN_DIR/remctl" "setup" "--shell" "$SETUP_SHELL")
-    if [[ "$WITH_SERVICE" -eq 1 ]]; then
-        SETUP_ARGS+=("--service" "install")
-    else
-        SETUP_ARGS+=("--service" "skip")
-    fi
     "${SETUP_ARGS[@]}"
 fi
 

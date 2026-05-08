@@ -4,7 +4,7 @@ RemCTL intentionally splits reads and writes.
 
 ## Components
 
-```
+```text
 remctl (Python)
   ├─ reads Reminders CoreData SQLite database
   ├─ formats human and JSON output
@@ -15,10 +15,9 @@ remctl-bridge (Swift)
 
 remctl-permissions (Swift/AppKit)
   └─ guides Full Disk Access setup with draggable targets
-
-remctl-server (Python, optional)
-  └─ exposes the same model over localhost HTTP
 ```
+
+There is no daemon, localhost API, launch agent, or token setup in RemCTL 1.0. The CLI is the only runtime surface.
 
 ## Reads
 
@@ -74,41 +73,20 @@ Flags are read from `ZFLAGGED` and shown as `⚑`.
 
 macOS 26 urgent reminders are read from `ZISURGENTSTATEENABLEDFORCURRENTUSER` and shown as `⏰`. Apple describes urgent reminders as reminders that schedule an alarm when due; RemCTL treats this as read-only metadata and does not write the private urgent fields.
 
-## Local API
-
-`remctl-server` is optional. It runs as a launchd agent when installed and defaults to:
-
-```text
-http://127.0.0.1:19876
-```
-
-Security defaults:
-
-- binds to localhost
-- requires Bearer auth for `/api/v1/*`
-- leaves CORS disabled unless configured
-- disables Open Graph fetching unless configured
-
 ## Permissions
 
-The CLI process and the service process are separate macOS privacy subjects.
+The CLI process may need Full Disk Access for the terminal app or Python interpreter running `remctl`.
 
-The CLI may need Full Disk Access for the terminal app or Python interpreter running `remctl`.
-
-The service may need Full Disk Access for the Python interpreter launchd uses to run `remctl-server`.
-
-Check both with:
+Check setup with:
 
 ```bash
 remctl doctor
-remctl service status
 ```
 
 Open the guided setup flow with:
 
 ```bash
 remctl permissions full-disk-access
-remctl permissions full-disk-access --scope service
 ```
 
 The helper opens the Full Disk Access pane, copies the first path to the clipboard, exposes each target as a draggable file row, and periodically checks whether each target can read the Reminders store. Verified targets get a green check. It does not edit macOS TCC data directly.
@@ -118,7 +96,6 @@ The helper opens the Full Disk Access pane, copies the first path to the clipboa
 ```bash
 REMCTL_BRIDGE_PATH=/path/to/remctl-bridge
 REMCTL_PERMISSIONS_PATH=/path/to/remctl-permissions
-REMCTL_SERVER_PATH=/path/to/remctl-server
 REMCTL_PATH=/path/to/remctl
 REMCTL_STORE_DIR=/path/to/reminders/store
 REMCTL_CONFIG_DIR=/path/to/config

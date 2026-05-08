@@ -4,22 +4,21 @@
 
 Fast, scriptable Apple Reminders for macOS.
 
-RemCTL is a hybrid CLI: it reads the local iCloud Reminders database directly for speed and detail, then writes through Apple’s public EventKit APIs so your changes sync normally to iPhone, iPad, and Mac.
+RemCTL reads the local iCloud Reminders database directly for speed and detail, then writes through Apple's public EventKit APIs so changes sync normally to iPhone, iPad, and Mac.
 
 ## How It Works
 
-```
+```text
 remctl
   reads:  ~/Library/Group Containers/group.com.apple.reminders/.../Data-*.sqlite
   writes: remctl-bridge -> EventKit
-  serves: optional remctl-server -> localhost REST API
 ```
 
 Why this architecture exists:
 
 - **Direct SQLite reads** expose sections, subtasks, tags, attachments, deep links, list colors, and recurrence metadata in tens of milliseconds.
 - **EventKit writes** keep Reminders and iCloud in charge of mutations. RemCTL does not write directly to the database.
-- **The local API service is optional**. Use it only when you want HTTP access or a local fallback process.
+- **The CLI is the product**. There is no background service, API token, localhost server, or launch agent to configure.
 
 ## Quick Start
 
@@ -33,7 +32,7 @@ remctl doctor
 remctl today
 ```
 
-`--bootstrap` prepares the install, but it does not run `doctor` before macOS permissions are granted. Run the visual permission flow first, then verify.
+`--bootstrap` copies the CLI and helpers, compiles the Swift helpers when `swiftc` is available, creates RemCTL's config directory, and installs shell completion when supported.
 
 If the installer says `PATH action required`, add the printed PATH line and open a new Terminal window before typing `remctl`.
 
@@ -54,7 +53,7 @@ Full setup details live in [docs/installation.md](docs/installation.md).
 | Create and edit | `add`, `edit`, `done`, `undone`, `delete`, `flag`, `unflag` |
 | Organize | `list-create`, `list-rename`, `list-delete`, `sections`, `tags` |
 | Share data | `export`, `import`, `link`, `open`, `--json`, `--format table` |
-| Set up the Mac | `onboard`, `permissions`, `doctor`, `setup`, `service`, `completion` |
+| Set up the Mac | `onboard`, `permissions`, `doctor`, `setup`, `completion` |
 
 Common examples:
 
@@ -87,22 +86,9 @@ remctl --format table upcoming 14
 NO_COLOR=1 remctl today
 ```
 
-## Optional Local API
-
-The local REST API is served by `remctl-server` and defaults to `127.0.0.1:19876` with Bearer token auth.
-
-```bash
-remctl service install
-remctl service status
-curl -H "Authorization: Bearer $(cat ~/.config/remctl/api-token)" \
-  http://127.0.0.1:19876/api/v1/today
-```
-
-API details are in [docs/rest-api.md](docs/rest-api.md).
-
 ## macOS Permissions
 
-RemCTL may need three different macOS grants:
+RemCTL may need three macOS grants:
 
 - Reminders access for EventKit writes
 - Automation access for AppleScript fallback operations
@@ -116,17 +102,9 @@ remctl permissions full-disk-access
 remctl doctor
 ```
 
-The visual permission helper is the default Full Disk Access flow. It opens System Settings, copies the first target path, shows draggable targets for the CLI and optional service, and marks verified targets with a green check. If the service target is shown, restart the service after access is verified.
+The visual permission helper opens System Settings, copies the first target path, shows draggable targets for the current CLI process, and marks verified targets with a green check.
 
-If you only need to fix the background API service, run:
-
-```bash
-remctl permissions full-disk-access --scope service
-```
-
-Manual fallback: `remctl doctor` and `remctl service status` print the exact target paths. Open System Settings > Privacy & Security > Full Disk Access, click `+`, press `Command-Shift-G`, paste the printed path, press Return, then click Open.
-
-The background API service is a separate launchd process, so it can need its own Full Disk Access grant. `remctl service status` prints the exact service target.
+Manual fallback: run `remctl doctor`, then add the printed target in System Settings > Privacy & Security > Full Disk Access. In the file picker, press `Command-Shift-G`, paste the path, press Return, then click Open.
 
 ## For Agents
 
@@ -138,7 +116,7 @@ remctl show Work --json
 remctl info 23880 --json
 ```
 
-Do not mutate the Reminders SQLite database. Use RemCTL commands, the local API, or EventKit.
+Do not mutate the Reminders SQLite database. Use RemCTL commands or EventKit.
 
 After a repo update, reinstall the copied CLI before testing:
 
@@ -155,7 +133,6 @@ remctl doctor
 - [Installation and onboarding](docs/installation.md)
 - [Command guide](docs/commands.md)
 - [Architecture](docs/architecture.md)
-- [REST API](docs/rest-api.md)
 
 ## Project Layout
 
@@ -164,7 +141,6 @@ remctl doctor
 | `remctl` | Main Python CLI |
 | `remctl-bridge.swift` | Swift/EventKit write helper source |
 | `remctl-permissions.swift` | Swift/AppKit guided Full Disk Access helper source |
-| `remctl-server` | Optional localhost REST API |
 | `remctl_runtime.py` | Shared paths, config, date windows, safety helpers |
 | `remctl_serialization.py` | Shared reminder JSON serialization |
 | `install.sh` | Copy-based installer and bootstrap script |
