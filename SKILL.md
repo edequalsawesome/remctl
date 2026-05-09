@@ -1,11 +1,11 @@
 ---
 name: remctl
-description: Use when an agent needs to read, create, edit, complete, inspect, or troubleshoot Federico Viticci's Apple Reminders through the RemCTL CLI on macOS.
+description: Use when an agent needs to read, create, edit, complete, inspect, or troubleshoot Apple Reminders through the RemCTL CLI on macOS.
 ---
 
 # RemCTL
 
-RemCTL is Federico's Apple Reminders CLI. It reads the local Reminders CoreData database for fast, detailed output and writes through `remctl-bridge` using EventKit. It is CLI-only: there is no local API server, token, launch agent, or service command.
+RemCTL is a power-user Apple Reminders CLI. It reads the local Reminders CoreData database for fast, detailed output and writes through `remctl-bridge` using EventKit. It is CLI-only: there is no local API server, token, launch agent, or service command.
 
 ## Default Workflow
 
