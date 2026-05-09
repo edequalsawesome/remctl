@@ -2,9 +2,11 @@
 
 ![RemCTL](https://cdn.macstories.net/cleanshot-2026-05-04-at-18-15-17-2x-1777911332976.png)
 
-Fast, scriptable Apple Reminders for macOS.
+RemCTL is a fast, scriptable Reminders CLI for macOS designed for power users and AI agents.
 
-RemCTL reads the local iCloud Reminders database directly for speed and detail, then writes through Apple's public EventKit APIs so changes sync normally to iPhone, iPad, and Mac.
+RemCTL reads the user's local iCloud Reminders database directly (with native macOS permission access) for speed and detail, then writes through Apple's public EventKit APIs so changes sync normally to other devices.
+
+Most Reminders CLIs are wrappers around EventKit. That is fine for simple tasks, but EventKit does not expose everything Reminders users now rely on, such as subtasks, tags, or the new 'urgent' reminders in iOS and macOS 26. RemCTL can read nearly every piece of metadata from tasks in the Reminders app.
 
 ## How It Works
 
