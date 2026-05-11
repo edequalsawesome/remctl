@@ -16,6 +16,7 @@ remctl show Shopping
 remctl show Work --completed
 remctl show Family -v
 remctl search "milk"
+remctl search "milk" --completed
 remctl info 23880
 remctl subtasks 23880
 remctl sections
@@ -59,13 +60,19 @@ Unsupported private metadata writes:
 
 ```bash
 remctl add "Research" -l Projects --private --url "https://example.com" -t remctl --new-section "Research"
+remctl add "Research" -l Projects --private --section-id DCD255E2-7CF5-4B45-9566-3F9A5D84AFA8
 remctl add "Prepare images" -l Projects --private --image ~/Desktop/mockup.png --subtask "Export final PNG"
 remctl add "Launch assets" -l Projects --private --subtask '{"title":"Export PNG","notes":"Use final crop","due":"tomorrow","url":"https://example.com","tags":["media"]}'
 remctl edit 23880 --private --section "Research"
+remctl edit 23880 --private --section-id DCD255E2-7CF5-4B45-9566-3F9A5D84AFA8
 remctl edit 23880 --private --subtask '{"title":"Follow up","notes":"Bring latest numbers","due":"next friday at 3pm","url":"https://example.com","tags":["work"]}'
 remctl edit 23880 --private --flagged --urgent
 remctl edit 23880 --private --location-title "Apple Park" --latitude 37.3349 --longitude -122.0090 --radius 200
 ```
+
+`search` matches reminder titles and notes. By default it searches active reminders; add `--completed` to include completed reminders.
+
+`--section` resolves by name inside the target list. If duplicate section names exist, RemCTL uses the only non-empty matching section when there is exactly one. If the duplicate is still ambiguous, use `--section-id`.
 
 `--subtask` accepts either a plain child title or a JSON object with child metadata. Rich subtask fields include `notes`, `due`, `priority`, `alarm`, `recurrence`, `url`/`urls`, `tags`, `image`/`images`, `flagged`, `urgent`, and location alarm fields.
 

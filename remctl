@@ -366,11 +366,11 @@ def q_subtask_count(db, pk):
 def q_sections(db, list_pk=None):
     if list_pk:
         return db.execute(
-            "SELECT Z_PK, ZDISPLAYNAME, ZLIST FROM ZREMCDBASESECTION "
+            "SELECT Z_PK, ZDISPLAYNAME, ZLIST, ZCKIDENTIFIER FROM ZREMCDBASESECTION "
             "WHERE ZMARKEDFORDELETION = 0 AND ZLIST = ? ORDER BY Z_PK", (list_pk,)
         ).fetchall()
     return db.execute(
-        "SELECT s.Z_PK, s.ZDISPLAYNAME, s.ZLIST, l.ZNAME as list_name FROM ZREMCDBASESECTION s "
+        "SELECT s.Z_PK, s.ZDISPLAYNAME, s.ZLIST, s.ZCKIDENTIFIER, l.ZNAME as list_name FROM ZREMCDBASESECTION s "
         "LEFT JOIN ZREMCDBASELIST l ON s.ZLIST = l.Z_PK "
         "WHERE s.ZMARKEDFORDELETION = 0 ORDER BY l.ZNAME, s.Z_PK"
     ).fetchall()
@@ -395,6 +395,27 @@ def q_section_memberships(db, list_pk):
         for m in data.get("memberships", [])
         if m.get("groupID") in g2n and m.get("memberID")
     }
+
+def q_section_member_counts(db, list_pk):
+    row = db.execute(
+        "SELECT ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA FROM ZREMCDBASELIST WHERE Z_PK = ?",
+        (list_pk,)
+    ).fetchone()
+    if not row or not row[0]:
+        return {}
+    try:
+        data = json.loads(row[0])
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    counts = {}
+    for membership in data.get("memberships", []):
+        if membership.get("isObsolete"):
+            continue
+        group_id = membership.get("groupID")
+        member_id = membership.get("memberID")
+        if group_id and member_id:
+            counts[group_id] = counts.get(group_id, 0) + 1
+    return counts
 
 def q_attachments(db, pk):
     return db.execute(
@@ -1250,27 +1271,61 @@ def private_action(data):
     return result
 
 
-def resolve_section_ckid(db, list_pk, section_name):
-    if not section_name:
+def normalize_section_id(value):
+    if not value:
+        return None
+    value = str(value).strip()
+    if "/" in value:
+        value = value.rstrip("/").split("/")[-1]
+    return value or None
+
+
+def resolve_section_ckid(db, list_pk, section_name=None, section_id=None):
+    section_id = normalize_section_id(section_id)
+    if section_name and section_id:
+        print("Error: pass either --section or --section-id, not both.", file=sys.stderr)
+        sys.exit(1)
+    if not section_name and not section_id:
         return None
     if not list_pk:
-        print("Error: --section requires a known list. Pass -l/--list when creating.", file=sys.stderr)
+        print("Error: section assignment requires a known list. Pass -l/--list when creating.", file=sys.stderr)
         sys.exit(1)
+
+    if section_id:
+        row = db.execute(
+            "SELECT ZCKIDENTIFIER FROM ZREMCDBASESECTION "
+            "WHERE ZLIST = ? AND ZMARKEDFORDELETION = 0 AND lower(ZCKIDENTIFIER) = lower(?)",
+            (list_pk, section_id),
+        ).fetchone()
+        if not row or not row["ZCKIDENTIFIER"]:
+            print(f"Error: section ID not found in target list: {section_id}", file=sys.stderr)
+            sys.exit(1)
+        return row["ZCKIDENTIFIER"]
+
     matches = [s for s in q_sections(db, list_pk) if (s["ZDISPLAYNAME"] or "").lower() == section_name.lower()]
     if not matches:
         print(f"Error: section not found in target list: {section_name}", file=sys.stderr)
         sys.exit(1)
     if len(matches) > 1:
-        print(f"Error: multiple sections named {section_name!r} in target list", file=sys.stderr)
-        sys.exit(1)
-    row = db.execute(
-        "SELECT ZCKIDENTIFIER FROM ZREMCDBASESECTION WHERE Z_PK = ?",
-        (matches[0]["Z_PK"],),
-    ).fetchone()
-    if not row or not row["ZCKIDENTIFIER"]:
+        counts = q_section_member_counts(db, list_pk)
+        non_empty = [s for s in matches if counts.get(s["ZCKIDENTIFIER"], 0) > 0]
+        if len(non_empty) == 1:
+            matches = non_empty
+        else:
+            options = ", ".join(
+                f"{s['ZCKIDENTIFIER']} ({counts.get(s['ZCKIDENTIFIER'], 0)} reminder{'s' if counts.get(s['ZCKIDENTIFIER'], 0) != 1 else ''})"
+                for s in matches
+            )
+            print(
+                f"Error: multiple sections named {section_name!r} in target list. "
+                f"Use --section-id with one of: {options}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    if not matches[0]["ZCKIDENTIFIER"]:
         print(f"Error: section has no stable CloudKit identifier: {section_name}", file=sys.stderr)
         sys.exit(1)
-    return row["ZCKIDENTIFIER"]
+    return matches[0]["ZCKIDENTIFIER"]
 
 
 def private_changes_from_args(a):
@@ -1278,6 +1333,7 @@ def private_changes_from_args(a):
         getattr(a, "url", None),
         getattr(a, "tags", None),
         getattr(a, "section", None),
+        getattr(a, "section_id", None),
         getattr(a, "new_section", None),
         getattr(a, "subtask", None),
         getattr(a, "image", None),
@@ -1293,6 +1349,7 @@ def private_changes_from_args(a):
 def private_only_changes_from_args(a):
     return any([
         getattr(a, "section", None),
+        getattr(a, "section_id", None),
         getattr(a, "new_section", None),
         getattr(a, "subtask", None),
         getattr(a, "image", None),
@@ -1328,10 +1385,15 @@ def apply_private_changes(reminder_ckid, a, db=None, list_pk=None):
             "tags": tags,
         }))
 
-    if getattr(a, "section", None):
+    if getattr(a, "section", None) or getattr(a, "section_id", None):
         if db is None:
             db = open_db()
-        section_id = resolve_section_ckid(db, list_pk, a.section)
+        section_id = resolve_section_ckid(
+            db,
+            list_pk,
+            section_name=getattr(a, "section", None),
+            section_id=getattr(a, "section_id", None),
+        )
         results.append(private_action({
             "action": "assign_section",
             "id": reminder_ckid,
@@ -3168,6 +3230,7 @@ _remctl() {
             _arguments \
                 '--private[Use unsupported private ReminderKit metadata writes]' \
                 '--section[Assign to existing section]:section:' \
+                '--section-id[Assign to section by stable ID]:section-id:' \
                 '--new-section[Create and assign to new section]:section:' \
                 '--subtask[Add private subtask title or JSON object]:subtask:' \
                 '--image[Add private image attachment]:path:_files' \
@@ -3186,6 +3249,7 @@ _remctl() {
             _arguments \
                 '--private[Use unsupported private ReminderKit metadata writes]' \
                 '--section[Assign to existing section]:section:' \
+                '--section-id[Assign to section by stable ID]:section-id:' \
                 '--new-section[Create and assign to new section]:section:' \
                 '--subtask[Add private subtask title or JSON object]:subtask:' \
                 '--image[Add private image attachment]:path:_files' \
@@ -3224,10 +3288,10 @@ BASH_COMPLETION = '''_remctl() {
 
     local cmd="${COMP_WORDS[1]}"
     if [ "$cmd" = "add" ]; then
-        COMPREPLY=( $(compgen -W "--private --section --new-section --subtask --image --url --tags -t --list -l --notes -n --due -d --priority -p --flag -f --recurrence --alarm --json" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--private --section --section-id --new-section --subtask --image --url --tags -t --list -l --notes -n --due -d --priority -p --flag -f --recurrence --alarm --json" -- "$cur") )
         return
     elif [ "$cmd" = "edit" ]; then
-        COMPREPLY=( $(compgen -W "--private --section --new-section --subtask --image --flagged --no-flagged --urgent --no-urgent --location-title --latitude --longitude --radius --proximity --address --title --url --tags -t --notes -n --due -d --priority -p --recurrence --alarm --json" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--private --section --section-id --new-section --subtask --image --flagged --no-flagged --urgent --no-urgent --location-title --latitude --longitude --radius --proximity --address --title --url --tags -t --notes -n --due -d --priority -p --recurrence --alarm --json" -- "$cur") )
         return
     elif [ $COMP_CWORD -eq 1 ]; then
         COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -3271,6 +3335,7 @@ complete -c remctl -n "__fish_use_subcommand" -a permissions -d "Open guided mac
 complete -c remctl -n "__fish_use_subcommand" -a completion -d "Generate shell completions"
 complete -c remctl -n "__fish_seen_subcommand_from add" -l private -d "Use unsupported private ReminderKit metadata writes"
 complete -c remctl -n "__fish_seen_subcommand_from add" -l section -d "Assign to existing section" -r
+complete -c remctl -n "__fish_seen_subcommand_from add" -l section-id -d "Assign to section by stable ID" -r
 complete -c remctl -n "__fish_seen_subcommand_from add" -l new-section -d "Create and assign to new section" -r
 complete -c remctl -n "__fish_seen_subcommand_from add" -l subtask -d "Add private subtask title or JSON object" -r
 complete -c remctl -n "__fish_seen_subcommand_from add" -l image -d "Add private image attachment" -r
@@ -3278,6 +3343,7 @@ complete -c remctl -n "__fish_seen_subcommand_from add" -l url -d "URL, web rich
 complete -c remctl -n "__fish_seen_subcommand_from add" -s t -l tags -d "Tags, synced with --private" -r
 complete -c remctl -n "__fish_seen_subcommand_from edit" -l private -d "Use unsupported private ReminderKit metadata writes"
 complete -c remctl -n "__fish_seen_subcommand_from edit" -l section -d "Assign to existing section" -r
+complete -c remctl -n "__fish_seen_subcommand_from edit" -l section-id -d "Assign to section by stable ID" -r
 complete -c remctl -n "__fish_seen_subcommand_from edit" -l new-section -d "Create and assign to new section" -r
 complete -c remctl -n "__fish_seen_subcommand_from edit" -l subtask -d "Add private subtask title or JSON object" -r
 complete -c remctl -n "__fish_seen_subcommand_from edit" -l image -d "Add private image attachment" -r
@@ -3928,6 +3994,7 @@ def main():
             "Examples:\n"
             "  remctl add \"Review PR\" -l Work -d tomorrow\n"
             "  remctl add \"Research\" -l Projects --private --url https://example.com -t remctl --section Research\n"
+            "  remctl add \"Research\" -l Projects --private --section-id DCD255E2-7CF5-4B45-9566-3F9A5D84AFA8\n"
             "  remctl add \"Prepare screenshots\" -l Projects --private --image ~/Desktop/mockup.png --subtask \"Export PNG\"\n"
             "  remctl add \"Launch assets\" -l Projects --private --subtask '{\"title\":\"Export PNG\",\"notes\":\"Use final crop\",\"due\":\"tomorrow\",\"url\":\"https://example.com\",\"tags\":[\"media\"]}'\n"
             "\n"
@@ -3948,6 +4015,7 @@ def main():
     c.add_argument("--private", action="store_true", help="Use unsupported private ReminderKit writes for URL/tags/sections/subtasks/images")
     c.add_argument("--private-metadata", action="store_true", help=argparse.SUPPRESS)
     c.add_argument("--section", help="Private metadata: assign to an existing section in the target list")
+    c.add_argument("--section-id", help="Private metadata: assign to a section by stable ID when names collide")
     c.add_argument("--new-section", help="Private metadata: create a section in the target list and assign this reminder")
     c.add_argument("--subtask", action="append", help="Private metadata: add a subtask title or JSON object (repeatable)")
     c.add_argument("--image", action="append", help="Private metadata: add an image attachment path (repeatable)")
@@ -3968,6 +4036,7 @@ def main():
             "  remctl edit 23880 -d clear\n"
             "  remctl edit 23880 --private --url https://example.com -t remctl\n"
             "  remctl edit 23880 --private --section Research --subtask \"Follow up\"\n"
+            "  remctl edit 23880 --private --section-id DCD255E2-7CF5-4B45-9566-3F9A5D84AFA8\n"
             "  remctl edit 23880 --private --subtask '{\"title\":\"Follow up\",\"notes\":\"Bring latest numbers\",\"due\":\"next friday at 3pm\",\"url\":\"https://example.com\",\"tags\":[\"work\"]}'\n"
             "  remctl edit 23880 --private --flagged --urgent\n"
             "  remctl edit 23880 --private --location-title \"Apple Park\" --latitude 37.3349 --longitude -122.0090 --radius 200\n"
@@ -3987,6 +4056,7 @@ def main():
     c.add_argument("--private-metadata", action="store_true", help=argparse.SUPPRESS)
     c.add_argument("-t", "--tags", help="Private metadata: add comma-separated synced hashtag labels")
     c.add_argument("--section", help="Private metadata: assign to an existing section in the reminder's list")
+    c.add_argument("--section-id", help="Private metadata: assign to a section by stable ID when names collide")
     c.add_argument("--new-section", help="Private metadata: create a section in the reminder's list and assign this reminder")
     c.add_argument("--subtask", action="append", help="Private metadata: add a subtask title or JSON object (repeatable)")
     c.add_argument("--image", action="append", help="Private metadata: add an image attachment path (repeatable)")

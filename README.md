@@ -74,6 +74,24 @@ remctl info 23880 --json
 
 The full command guide is in [docs/commands.md](docs/commands.md).
 
+## Private API Features
+
+RemCTL's default writes use EventKit. For metadata Apple does not expose publicly, RemCTL has an explicit `--private` mode backed by `remctl-private`, an Objective-C helper that uses Apple's private ReminderKit framework and saves through the Reminders stack. It never writes directly to SQLite.
+
+Private writes are opt-in and power-user only:
+
+```bash
+remctl add "Research" -l Projects --private --url "https://example.com" -t remctl --section "Research"
+remctl edit 23880 --private --section-id DCD255E2-7CF5-4B45-9566-3F9A5D84AFA8
+remctl add "Launch assets" -l Projects --private --subtask '{"title":"Export PNG","notes":"Use final crop","due":"tomorrow","url":"https://example.com","tags":["media"]}'
+remctl edit 23880 --private --image ~/Desktop/mockup.png --flagged --urgent
+remctl edit 23880 --private --location-title "Apple Park" --latitude 37.3349 --longitude -122.0090 --radius 200
+```
+
+Supported private metadata includes synced web rich links, synced tags, section assignment and creation, rich subtasks with per-child notes/due/URL/tags/images, image attachments, real flag state, urgent state, and location alarms. If a section name is duplicated in the same list, RemCTL picks the single non-empty match when there is one; otherwise use `--section-id`.
+
+This is the major difference from ordinary EventKit-only Reminders CLIs, but it is still unsupported by Apple. Private-only flags fail before writing unless `--private` is present, generic file/PDF attachments are intentionally rejected, and agents should verify writes with `remctl info ID --json` plus a UI/device check when sync behavior matters.
+
 ## Output
 
 RemCTL output is designed for both humans and agents:
@@ -119,8 +137,11 @@ Use JSON when scripting:
 ```bash
 remctl today --json
 remctl show Work --json
+remctl search "query" --completed --json
 remctl info 23880 --json
 ```
+
+`search` matches reminder titles and notes. By default it searches active reminders; pass `--completed` to include completed reminders too.
 
 Do not mutate the Reminders SQLite database. Use RemCTL commands or EventKit.
 

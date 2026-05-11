@@ -19,6 +19,7 @@ Verified on macOS/iCloud sync:
 - web rich URL attachments: `--private --url https://example.com`
 - synced tags: `--private -t remctl,work`
 - section assignment: `--private --section "Research"`
+- section assignment by stable ID: `--private --section-id DCD255E2-7CF5-4B45-9566-3F9A5D84AFA8`
 - section creation and assignment: `--private --new-section "Research"`
 - subtasks: `--private --subtask "Follow up"` or rich JSON objects with child metadata
 - image attachments: `--private --image ~/Desktop/mockup.png`
@@ -39,6 +40,9 @@ remctl add "Research" -l Projects --private \
   -t remctl \
   --section "Research"
 
+remctl add "Research" -l Projects --private \
+  --section-id DCD255E2-7CF5-4B45-9566-3F9A5D84AFA8
+
 remctl add "Prepare screenshots" -l Projects --private \
   --image ~/Desktop/mockup.png \
   --subtask "Export final PNG"
@@ -57,6 +61,7 @@ With `--private`, `--url` creates a web rich link attachment and `-t/--tags` cre
 remctl edit 23880 --private --url "https://example.com"
 remctl edit 23880 --private -t remctl,work
 remctl edit 23880 --private --section "Research"
+remctl edit 23880 --private --section-id DCD255E2-7CF5-4B45-9566-3F9A5D84AFA8
 remctl edit 23880 --private --new-section "Inbox Zero"
 remctl edit 23880 --private --subtask "Follow up"
 remctl edit 23880 --private --subtask '{"title":"Follow up","notes":"Bring latest numbers","due":"next friday at 3pm","url":"https://example.com","tags":["work"],"flagged":true}'
@@ -67,6 +72,8 @@ remctl edit 23880 --private --location-title "Apple Park" --latitude 37.3349 --l
 ```
 
 `--subtask` remains backwards compatible with a plain title string. To set metadata on the child reminder itself, pass a JSON object. Supported subtask fields are `title`, `notes`, `due`, `priority`, `alarm`, `recurrence`, `url`/`urls`, `tags`, `image`/`images`, `flagged`, `urgent`, and location fields (`locationTitle`, `latitude`, `longitude`, `radius`, `proximity`, `address`). Public fields such as notes and due dates are applied through `remctl-bridge`; private fields such as rich links and tags are applied through `remctl-private`.
+
+`--section` resolves by name inside the target list. If duplicate section names exist, RemCTL automatically uses the only non-empty matching section when there is exactly one. If the duplicate remains ambiguous, the command fails before writing and prints the available stable IDs; pass one with `--section-id`.
 
 ## Guardrails
 

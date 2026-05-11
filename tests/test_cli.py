@@ -311,6 +311,95 @@ class CliTests(unittest.TestCase):
                 ])
         self.assertIn("http or https", stderr.getvalue())
 
+    def _section_db(self):
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        db.executescript("""
+            CREATE TABLE ZREMCDBASESECTION (
+                Z_PK INTEGER PRIMARY KEY,
+                ZDISPLAYNAME TEXT,
+                ZLIST INTEGER,
+                ZCKIDENTIFIER TEXT,
+                ZMARKEDFORDELETION INTEGER DEFAULT 0
+            );
+            CREATE TABLE ZREMCDBASELIST (
+                Z_PK INTEGER PRIMARY KEY,
+                ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA TEXT
+            );
+        """)
+        return db
+
+    def test_duplicate_section_name_resolves_single_non_empty_match(self):
+        db = self._section_db()
+        section_a = "11111111-1111-1111-1111-111111111111"
+        section_b = "22222222-2222-2222-2222-222222222222"
+        db.execute(
+            "INSERT INTO ZREMCDBASELIST (Z_PK, ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA) VALUES (?, ?)",
+            (7, json.dumps({"memberships": [{"groupID": section_b, "memberID": "REMINDER-1"}]})),
+        )
+        db.executemany(
+            "INSERT INTO ZREMCDBASESECTION (Z_PK, ZDISPLAYNAME, ZLIST, ZCKIDENTIFIER, ZMARKEDFORDELETION) VALUES (?, ?, ?, ?, 0)",
+            [(1, "RemCTL", 7, section_a), (2, "RemCTL", 7, section_b)],
+        )
+
+        self.assertEqual(
+            self.remctl.resolve_section_ckid(db, 7, section_name="RemCTL"),
+            section_b,
+        )
+        db.close()
+
+    def test_duplicate_section_name_errors_when_ambiguous_and_lists_section_ids(self):
+        db = self._section_db()
+        section_a = "11111111-1111-1111-1111-111111111111"
+        section_b = "22222222-2222-2222-2222-222222222222"
+        db.execute(
+            "INSERT INTO ZREMCDBASELIST (Z_PK, ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA) VALUES (?, ?)",
+            (7, json.dumps({"memberships": []})),
+        )
+        db.executemany(
+            "INSERT INTO ZREMCDBASESECTION (Z_PK, ZDISPLAYNAME, ZLIST, ZCKIDENTIFIER, ZMARKEDFORDELETION) VALUES (?, ?, ?, ?, 0)",
+            [(1, "RemCTL", 7, section_a), (2, "RemCTL", 7, section_b)],
+        )
+
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            with self.assertRaises(SystemExit):
+                self.remctl.resolve_section_ckid(db, 7, section_name="RemCTL")
+        self.assertIn("--section-id", stderr.getvalue())
+        self.assertIn(section_a, stderr.getvalue())
+        self.assertIn(section_b, stderr.getvalue())
+        db.close()
+
+    def test_section_id_resolves_exact_target_and_rejects_section_name_too(self):
+        db = self._section_db()
+        section_id = "11111111-1111-1111-1111-111111111111"
+        db.execute(
+            "INSERT INTO ZREMCDBASELIST (Z_PK, ZMEMBERSHIPSOFREMINDERSINSECTIONSASDATA) VALUES (?, ?)",
+            (7, json.dumps({"memberships": []})),
+        )
+        db.execute(
+            "INSERT INTO ZREMCDBASESECTION (Z_PK, ZDISPLAYNAME, ZLIST, ZCKIDENTIFIER, ZMARKEDFORDELETION) VALUES (?, ?, ?, ?, 0)",
+            (1, "RemCTL", 7, section_id),
+        )
+
+        self.assertEqual(
+            self.remctl.resolve_section_ckid(
+                db,
+                7,
+                section_id=f"x-apple-reminderkit://REMCDListSection/{section_id}",
+            ),
+            section_id,
+        )
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            with self.assertRaises(SystemExit):
+                self.remctl.resolve_section_ckid(
+                    db,
+                    7,
+                    section_name="RemCTL",
+                    section_id=section_id,
+                )
+        self.assertIn("either --section or --section-id", stderr.getvalue())
+        db.close()
+
     def test_cmd_add_private_invalid_url_fails_before_creation(self):
         args = SimpleNamespace(
             title="Bad private URL",

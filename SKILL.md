@@ -25,6 +25,7 @@ remctl overdue --json
 remctl lists --json
 remctl show Work --json
 remctl search "query" --json
+remctl search "query" --completed --json
 remctl info 23880 --json
 remctl add "Review PR" -l Work -d "tomorrow 10:00" -p high --json
 remctl edit 23880 -d clear --json
@@ -37,10 +38,12 @@ Use `--private` only when Federico explicitly asks for private Reminders metadat
 
 ```bash
 remctl add "Research" -l Projects --private --url "https://example.com" -t remctl --section "Research" --json
+remctl add "Research" -l Projects --private --section-id DCD255E2-7CF5-4B45-9566-3F9A5D84AFA8 --json
 remctl add "Prepare screenshots" -l Projects --private --image ~/Desktop/mockup.png --subtask "Export PNG" --json
 remctl add "Launch assets" -l Projects --private --subtask '{"title":"Export PNG","notes":"Use final crop","due":"tomorrow","url":"https://example.com","tags":["media"]}' --json
 remctl edit 23880 --private --url "https://example.com" -t remctl --json
 remctl edit 23880 --private --section "Research" --subtask "Follow up" --json
+remctl edit 23880 --private --section-id DCD255E2-7CF5-4B45-9566-3F9A5D84AFA8 --json
 remctl edit 23880 --private --subtask '{"title":"Follow up","notes":"Bring latest numbers","due":"next friday at 3pm","url":"https://example.com","tags":["work"]}' --json
 remctl edit 23880 --private --flagged --urgent --json
 remctl edit 23880 --private --location-title "Apple Park" --latitude 37.3349 --longitude -122.0090 --radius 200 --json
@@ -50,6 +53,7 @@ Private metadata rules:
 
 - `--private --url` creates a synced web rich link. Without `--private`, `--url` is appended to notes.
 - `--private -t/--tags` creates real synced tags. On `add` without `--private`, tags are inline title hashtags. On `edit`, tags require `--private`.
+- `--section` resolves by name; if duplicates exist in the same list, RemCTL uses the single non-empty match when possible. Use `--section-id` for exact assignment.
 - `--subtask` accepts either a plain child title or a JSON object with child metadata: `title`, `notes`, `due`, `priority`, `alarm`, `recurrence`, `url`/`urls`, `tags`, `image`/`images`, `flagged`, `urgent`, and location fields.
 - `--section`, `--new-section`, `--subtask`, `--image`, `--flagged`, `--urgent`, and location alarm fields require `--private` and should fail before writing if omitted.
 - `add --private -f` writes the real private flag instead of the EventKit priority proxy.
@@ -61,6 +65,7 @@ Private metadata rules:
 - Treat `remctl doctor --json` as the first setup check.
 - Check `private_helper` in `remctl doctor --json` before using `--private`.
 - For writes, verify against live Reminders data after the command succeeds.
+- `remctl search QUERY --completed --json` includes completed reminders and searches both titles and notes.
 - `remctl add` can return a UUID-like object ID; `remctl info` expects the numeric `#ID`. Resolve it with `remctl show <list> --json` by matching the created title before calling `remctl info`.
 - Date output should match Reminders.app's displayed date. RemCTL reads `ZDISPLAYDATEDATE` first and falls back to `ZDUEDATE`.
 - When debugging due-date mismatches, compare both fields in the Reminders database before assuming the CLI or UI is wrong.
