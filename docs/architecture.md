@@ -91,12 +91,14 @@ macOS 26 urgent reminders are read from `ZISURGENTSTATEENABLEDFORCURRENTUSER` an
 
 ## Permissions
 
-The CLI process may need Full Disk Access for the terminal app or Python interpreter running `remctl`.
+The CLI process may need Full Disk Access for the app or Python interpreter running `remctl`.
+
+TCC grants are context-specific. Terminal, Codex, a CI runner, and another host app can each have different access to the same Reminders database. A green report from Terminal does not prove that an agent context can read the database.
 
 Check setup with:
 
 ```bash
-remctl doctor
+remctl doctor --for-agent
 ```
 
 Open the guided setup flow with:

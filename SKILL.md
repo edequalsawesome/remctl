@@ -34,7 +34,7 @@ remctl done 23880 --json
 
 ## Private Metadata
 
-Use `--private` only when Federico explicitly asks for private Reminders metadata or when a command needs synced web rich links, real tags, sections, subtasks, image attachments, real flags, urgent state, or location alarms.
+Use `--private` only when the user explicitly asks for private Reminders metadata or when a command needs synced web rich links, real tags, sections, subtasks, image attachments, real flags, urgent state, or location alarms.
 
 ```bash
 remctl add "Research" -l Projects --private --url "https://example.com" -t remctl --section "Research" --json
@@ -58,11 +58,12 @@ Private metadata rules:
 - `--section`, `--new-section`, `--subtask`, `--image`, `--flagged`, `--urgent`, and location alarm fields require `--private` and should fail before writing if omitted.
 - `add --private -f` writes the real private flag instead of the EventKit priority proxy.
 - Generic file/PDF attachments are rejected because Reminders does not reliably show them.
-- Verify private writes with `remctl info <numeric-id> --json`; if cross-device sync matters, ask Federico to check iPhone/iPad.
+- Verify private writes with `remctl info <numeric-id> --json`; if cross-device sync matters, ask the user to check iPhone/iPad.
 
 ## Verification Rules
 
 - Treat `remctl doctor --json` as the first setup check.
+- For agents, prefer `remctl doctor --for-agent --json`; `doctor` must pass in the same execution context that will run the write.
 - Check `private_helper` in `remctl doctor --json` before using `--private`.
 - For writes, verify against live Reminders data after the command succeeds.
 - `remctl search QUERY --completed --json` includes completed reminders and searches both titles and notes.
@@ -82,6 +83,8 @@ remctl doctor
 
 RemCTL may need Reminders access for EventKit writes and private ReminderKit writes, Automation access for AppleScript fallback operations, and Full Disk Access for direct database reads. The guided permission helper only handles CLI targets; there is no service target. `remctl-private` does not have its own first-run flow; it depends on the same Reminders access and must be installed next to `remctl`.
 
+macOS TCC permissions are scoped to the process context. Terminal can pass `remctl doctor` while Codex or another agent runner fails from its own context. If agent-side `doctor` fails but the user's Terminal passes, treat that as expected TCC scoping rather than a broken install. Ask the user to grant Full Disk Access to the target printed by `remctl doctor --for-agent`, or for a one-off unblock run the requested `remctl` command through Terminal via AppleScript and capture stdout/stderr in temp files.
+
 ## Development Checks
 
 ```bash
@@ -90,5 +93,5 @@ swiftc -O -framework EventKit -framework Foundation -o /tmp/remctl-bridge-check 
 swiftc -O -framework AppKit -framework Foundation -o /tmp/remctl-permissions-check remctl-permissions.swift
 clang -fobjc-arc -O -F/System/Library/PrivateFrameworks -framework Foundation -framework AppKit -framework ReminderKit -o /tmp/remctl-private-check remctl-private.m
 ./install.sh --bootstrap
-remctl doctor --json
+remctl doctor --for-agent --json
 ```

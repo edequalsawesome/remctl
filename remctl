@@ -150,8 +150,8 @@ def reminders_store_access_error():
     if STORE_DIR.exists() and not os.access(STORE_DIR, os.R_OK):
         return (
             f"Direct CLI reads are blocked because the Reminders store at {STORE_DIR} "
-            f"is not readable from {sys.executable}. This usually means Full Disk Access "
-            "is missing for the terminal app or this Python interpreter."
+            f"is not readable from this process context ({sys.executable}). This usually means "
+            "Full Disk Access is missing for the app or interpreter that is running remctl here."
         )
     return None
 
@@ -1563,6 +1563,83 @@ def detect_terminal_app_name():
     return None
 
 
+def process_info(pid):
+    try:
+        proc = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "ppid=", "-o", "ucomm=", "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    line = proc.stdout.strip()
+    if not line:
+        return None
+    parts = line.split(None, 2)
+    if len(parts) < 2:
+        return None
+    try:
+        parent_pid = int(parts[0])
+    except ValueError:
+        parent_pid = None
+    name = parts[1]
+    command = parts[2] if len(parts) > 2 else name
+    return {"pid": int(pid), "ppid": parent_pid, "name": name, "command": command}
+
+
+def process_ancestry(limit=8):
+    ancestry = []
+    pid = os.getppid()
+    for _ in range(limit):
+        if not pid or pid <= 1:
+            break
+        info = process_info(pid)
+        if not info:
+            break
+        ancestry.append(info)
+        pid = info.get("ppid")
+    return ancestry
+
+
+def _app_name_from_process_name(name):
+    if not name:
+        return None
+    lower = name.lower()
+    if "codex" in lower:
+        return "Codex.app"
+    return _normalize_terminal_app_name(name)
+
+
+def doctor_execution_context():
+    ancestry = process_ancestry()
+    parent = ancestry[0] if ancestry else None
+    terminal_app = detect_terminal_app_name()
+    host_app = terminal_app
+    effective_context = "Terminal" if terminal_app else "unknown"
+
+    for proc in ancestry:
+        app_name = _app_name_from_process_name(proc.get("name"))
+        if app_name:
+            host_app = app_name
+            if "codex" in app_name.lower():
+                effective_context = "Codex"
+            elif app_name.endswith(".app"):
+                effective_context = app_name.removesuffix(".app")
+            break
+
+    return {
+        "python": sys.executable,
+        "pid": os.getpid(),
+        "parent_process": parent,
+        "terminal_app": terminal_app,
+        "host_app": host_app,
+        "effective_context": effective_context,
+    }
+
+
 def find_app_bundle(app_name):
     if not app_name:
         return None
@@ -1608,6 +1685,7 @@ def full_disk_access_target_specs(*, include_cli=True):
     targets = []
     seen = set()
     if include_cli:
+        context = doctor_execution_context()
         _add_permission_target(
             targets,
             seen,
@@ -1615,6 +1693,16 @@ def full_disk_access_target_specs(*, include_cli=True):
             sys.executable,
             "Required when direct CLI reads cannot see the Reminders database.",
         )
+        host_app = context.get("host_app")
+        host_path = find_app_bundle(host_app) if host_app and host_app.endswith(".app") else None
+        if host_path:
+            _add_permission_target(
+                targets,
+                seen,
+                host_app,
+                host_path,
+                "Required when this host app launches remctl or an agent runner.",
+            )
         terminal_name = detect_terminal_app_name()
         terminal_path = find_app_bundle(terminal_name) if terminal_name else None
         if terminal_path:
@@ -1642,17 +1730,21 @@ def full_disk_access_targets():
 
 def full_disk_access_fix_text(*, rerun_command="remctl doctor", mention_onboard=False):
     targets = full_disk_access_targets()
+    context = doctor_execution_context()
+    effective_context = context.get("effective_context") or "this runner"
     if mention_onboard:
         intro = "`remctl onboard` can open a guided permission helper, but macOS still requires you to add the access target manually."
     else:
-        intro = "macOS cannot grant Full Disk Access from the command line."
+        intro = "Full Disk Access is missing for this process context; macOS cannot grant it from the command line."
     parts = [
         intro,
+        f"Current execution context: {effective_context} ({sys.executable}).",
+        "A green `remctl doctor` in Terminal does not grant access to a separate agent or app runner.",
         "For the guided flow, run: remctl permissions full-disk-access",
         "Open System Settings > Privacy & Security > Full Disk Access and add:",
         *[f"  {target}" for target in targets],
         "Tip: click +, press Command-Shift-G, paste the path, press Return, then click Open.",
-        f"Then relaunch the terminal and rerun `{rerun_command}`.",
+        f"Then relaunch the app or terminal that will run remctl and rerun `{rerun_command}` from that same context.",
     ]
     return "\n".join(parts)
 
@@ -1690,13 +1782,15 @@ def open_full_disk_access_settings():
 def print_full_disk_access_guidance(*, settings_opened=False, rerun_command="remctl doctor"):
     clipboard_target = str(current_python_path())
     copied = copy_to_clipboard(clipboard_target)
+    context = doctor_execution_context()
     print()
     print(C.bold("Full Disk Access"))
     if settings_opened:
         print(C.dim("  Opened System Settings > Privacy & Security > Full Disk Access."))
     else:
         print(C.dim("  Open System Settings > Privacy & Security > Full Disk Access."))
-    print(C.dim("  macOS requires you to add the access target manually."))
+    print(C.dim("  macOS requires you to add the access target manually for this process context."))
+    print(C.dim(f"  Current context: {context.get('effective_context') or 'unknown'} ({sys.executable})"))
     for target in full_disk_access_targets():
         print(C.dim(f"  Add: {target}"))
     if copied:
@@ -1704,7 +1798,7 @@ def print_full_disk_access_guidance(*, settings_opened=False, rerun_command="rem
     else:
         print(C.dim(f"  Copy this path if you need the file picker: {clipboard_target}"))
     print(C.dim("  In the file picker, press Command-Shift-G, paste the path, press Return, then click Open."))
-    print(C.dim(f"  Then relaunch the terminal and rerun `{rerun_command}`."))
+    print(C.dim(f"  Then relaunch the app or terminal that will run remctl and rerun `{rerun_command}`."))
 
 
 def permission_helper_available():
@@ -1901,7 +1995,7 @@ def database_access_check_for_onboarding():
             "database",
             "fail",
             access_error,
-            full_disk_access_fix_text(rerun_command="remctl doctor"),
+            full_disk_access_fix_text(rerun_command="remctl doctor --for-agent"),
         )
     if db_path:
         return check_result("database", "ok", str(db_path))
@@ -3274,6 +3368,12 @@ _remctl() {
                 '--json[JSON output]'
             return
             ;;
+        doctor)
+            _arguments \
+                '--for-agent[Print agent-focused context and TCC guidance]' \
+                '--json[JSON output]'
+            return
+            ;;
     esac
     _describe 'command' commands
 }
@@ -3292,6 +3392,9 @@ BASH_COMPLETION = '''_remctl() {
         return
     elif [ "$cmd" = "edit" ]; then
         COMPREPLY=( $(compgen -W "--private --section --section-id --new-section --subtask --image --flagged --no-flagged --urgent --no-urgent --location-title --latitude --longitude --radius --proximity --address --title --url --tags -t --notes -n --due -d --priority -p --recurrence --alarm --json" -- "$cur") )
+        return
+    elif [ "$cmd" = "doctor" ]; then
+        COMPREPLY=( $(compgen -W "--for-agent --json" -- "$cur") )
         return
     elif [ $COMP_CWORD -eq 1 ]; then
         COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -3333,6 +3436,7 @@ complete -c remctl -n "__fish_use_subcommand" -a doctor -d "Diagnose setup and r
 complete -c remctl -n "__fish_use_subcommand" -a setup -d "Install shell completions"
 complete -c remctl -n "__fish_use_subcommand" -a permissions -d "Open guided macOS permission helper"
 complete -c remctl -n "__fish_use_subcommand" -a completion -d "Generate shell completions"
+complete -c remctl -n "__fish_seen_subcommand_from doctor" -l for-agent -d "Print agent-focused context and TCC guidance"
 complete -c remctl -n "__fish_seen_subcommand_from add" -l private -d "Use unsupported private ReminderKit metadata writes"
 complete -c remctl -n "__fish_seen_subcommand_from add" -l section -d "Assign to existing section" -r
 complete -c remctl -n "__fish_seen_subcommand_from add" -l section-id -d "Assign to section by stable ID" -r
@@ -3755,7 +3859,7 @@ def gather_doctor_checks():
             "fail",
             db_access_error,
             full_disk_access_fix_text(
-                rerun_command="remctl doctor",
+                rerun_command="remctl doctor --for-agent",
                 mention_onboard=True,
             ),
         )
@@ -3831,18 +3935,42 @@ def gather_doctor_checks():
 
 def cmd_doctor(a):
     checks = gather_doctor_checks()
+    context = doctor_execution_context()
     fail_count = sum(1 for check in checks if check["status"] == "fail")
     warn_count = sum(1 for check in checks if check["status"] == "warn")
     result = {
         "ok": fail_count == 0,
         "warnings": warn_count,
         "failures": fail_count,
+        "context": context,
         "checks": checks,
     }
+    if getattr(a, "for_agent", False):
+        result["agent_note"] = (
+            "This report only applies to the process context shown in `context`. "
+            "`doctor` must pass in the same context that will run the write. "
+            "Terminal and Codex or other agent runners can have different Full Disk Access grants."
+        )
     if getattr(a, "json", False):
         print(json.dumps(result, indent=2))
     else:
-        print_check_report("RemCTL doctor", checks)
+        print(C.bold("RemCTL doctor"))
+        print(f"Context: {context.get('effective_context') or 'unknown'}")
+        print(f"Python: {context.get('python')}")
+        parent = context.get("parent_process") or {}
+        if parent:
+            print(f"Parent process: {parent.get('name')} (pid {parent.get('pid')})")
+        if context.get("host_app"):
+            print(f"Host app: {context.get('host_app')}")
+        if context.get("terminal_app"):
+            print(f"Terminal app: {context.get('terminal_app')}")
+        if getattr(a, "for_agent", False):
+            print(
+                "Agent note: `doctor` must pass in the same context that will run the write; "
+                "Terminal may be green while this runner is blocked."
+            )
+        print()
+        print_check_report(None, checks)
     if fail_count:
         sys.exit(1)
 
@@ -4160,12 +4288,16 @@ def main():
             "Examples:\n"
             "  remctl doctor\n"
             "  remctl doctor --json\n"
+            "  remctl doctor --for-agent --json\n"
             "\n"
             "If this is your first run on a new Mac, use `remctl onboard` first so macOS can\n"
-            "show the Reminders and Automation permission prompts."
+            "show the Reminders and Automation permission prompts. Full Disk Access is scoped\n"
+            "to the app or runner shown in the execution context; Terminal can pass while an\n"
+            "agent runner still fails."
         ),
         formatter_class=HelpFormatter,
     ); js(c)
+    c.add_argument("--for-agent", action="store_true", help="Print agent-focused context and TCC guidance")
 
     c = sub.add_parser(
         "setup",

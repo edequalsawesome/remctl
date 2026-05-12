@@ -192,8 +192,9 @@ Natural-language parsing uses `parsedatetime` when it is installed. The core CLI
 remctl onboard
 remctl permissions full-disk-access
 remctl doctor
+remctl doctor --for-agent --json
 remctl setup --shell auto --doctor
 remctl completion zsh
 ```
 
-Use [installation.md](installation.md) for the first-run visual permission flow. The manual fallback is `remctl doctor`, then adding the printed target in System Settings.
+Use [installation.md](installation.md) for the first-run visual permission flow. The manual fallback is `remctl doctor --for-agent`, then adding the printed target in System Settings. Run `doctor` from the same terminal, app, or agent runner that will run the RemCTL write.

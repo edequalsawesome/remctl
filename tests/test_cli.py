@@ -504,6 +504,10 @@ class CliTests(unittest.TestCase):
             self.remctl,
             "full_disk_access_targets",
             return_value=["Terminal.app (recommended for CLI use)", "/tmp/python3"],
+        ), mock.patch.object(
+            self.remctl,
+            "doctor_execution_context",
+            return_value={"effective_context": "Codex"},
         ):
             text = self.remctl.full_disk_access_fix_text(
                 rerun_command="remctl doctor",
@@ -512,7 +516,46 @@ class CliTests(unittest.TestCase):
         self.assertIn("Terminal.app", text)
         self.assertIn("/tmp/python3", text)
         self.assertIn("remctl onboard", text)
+        self.assertIn("Current execution context: Codex", text)
+        self.assertIn("Terminal does not grant access", text)
         self.assertIn("Command-Shift-G", text)
+
+    def test_doctor_execution_context_reports_codex_ancestor(self):
+        with mock.patch.object(
+            self.remctl,
+            "process_ancestry",
+            return_value=[
+                {"pid": 10, "ppid": 9, "name": "python3", "command": "python3 remctl"},
+                {"pid": 9, "ppid": 1, "name": "Codex", "command": "/Applications/Codex.app/Contents/MacOS/Codex"},
+            ],
+        ), mock.patch.object(self.remctl, "detect_terminal_app_name", return_value=None):
+            context = self.remctl.doctor_execution_context()
+
+        self.assertEqual(context["effective_context"], "Codex")
+        self.assertEqual(context["host_app"], "Codex.app")
+        self.assertEqual(context["parent_process"]["name"], "python3")
+
+    def test_cmd_doctor_json_includes_execution_context_and_agent_note(self):
+        checks = [{"name": "platform", "status": "ok", "detail": "macOS", "fix": None}]
+        context = {
+            "python": "/tmp/python3",
+            "pid": 123,
+            "parent_process": {"pid": 122, "ppid": 1, "name": "Codex", "command": "Codex"},
+            "terminal_app": None,
+            "host_app": "Codex.app",
+            "effective_context": "Codex",
+        }
+        with (
+            mock.patch.object(self.remctl, "gather_doctor_checks", return_value=checks),
+            mock.patch.object(self.remctl, "doctor_execution_context", return_value=context),
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+        ):
+            self.remctl.cmd_doctor(SimpleNamespace(json=True, for_agent=True))
+
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["context"]["effective_context"], "Codex")
+        self.assertIn("same context", payload["agent_note"])
 
     def test_print_full_disk_access_guidance_copies_python_path(self):
         with (

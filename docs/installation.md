@@ -66,6 +66,19 @@ See [private-metadata.md](private-metadata.md) for supported private fields and 
 
 macOS does not provide a native Full Disk Access prompt for command-line tools.
 
+Full Disk Access is scoped to the exact process context. The same Mac can have:
+
+- Terminal green: `remctl doctor` passes from Terminal.
+- Agent runner red: `remctl doctor` fails from Codex or another app runner.
+
+That is normal TCC behavior, not a broken RemCTL install. Run `doctor` from the same context that will run the write. For agents, use:
+
+```bash
+remctl doctor --for-agent --json
+```
+
+Grant access to the target printed by that context, then relaunch the app or terminal that will run RemCTL.
+
 Default visual flow:
 
 ```bash
@@ -82,10 +95,12 @@ The helper opens System Settings, copies the first target path, shows draggable 
 Manual fallback:
 
 ```bash
-remctl doctor
+remctl doctor --for-agent
 ```
 
 Use the exact target printed by `doctor`. Open System Settings > Privacy & Security > Full Disk Access, click `+`, press `Command-Shift-G`, paste the path, press Return, then click Open.
+
+If an agent cannot get Full Disk Access but the user's Terminal already passes `doctor`, a one-off Terminal relay can unblock testing: ask the user for approval, run the requested `remctl` command in Terminal via AppleScript, and capture stdout/stderr through temporary files. Do not treat that as the default automation path; the durable fix is granting access to the actual runner.
 
 ## Upgrading
 

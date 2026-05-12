@@ -111,4 +111,4 @@ REMCTL_PRIVATE_PATH=/tmp/remctl-private remctl edit 23880 --private --url https:
 
 ## Agent Notes
 
-Agents must verify private writes with `remctl info ID --json` and, when sync behavior matters, ask Federico to check another device. Do not assume a CloudKit-clean row means the Reminders UI displays it; generic files and PDFs were the counterexample and are intentionally rejected.
+Agents must verify private writes with `remctl info ID --json` and, when sync behavior matters, ask the user to check another device. Do not assume a CloudKit-clean row means the Reminders UI displays it; generic files and PDFs were the counterexample and are intentionally rejected.

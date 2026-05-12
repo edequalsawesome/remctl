@@ -128,7 +128,9 @@ remctl doctor
 
 The visual permission helper opens System Settings, copies the first target path, shows draggable targets for the current CLI process, and marks verified targets with a green check.
 
-Manual fallback: run `remctl doctor`, then add the printed target in System Settings > Privacy & Security > Full Disk Access. In the file picker, press `Command-Shift-G`, paste the path, press Return, then click Open.
+Full Disk Access is scoped to the process context. A Terminal session can pass `remctl doctor` while Codex, another agent runner, or a different host app fails. Run `remctl doctor` from the same context that will run RemCTL commands; for agent setup, use `remctl doctor --for-agent`.
+
+Manual fallback: run `remctl doctor --for-agent`, then add the printed target in System Settings > Privacy & Security > Full Disk Access. In the file picker, press `Command-Shift-G`, paste the path, press Return, then click Open.
 
 ## For Agents
 
@@ -139,11 +141,14 @@ remctl today --json
 remctl show Work --json
 remctl search "query" --completed --json
 remctl info 23880 --json
+remctl doctor --for-agent --json
 ```
 
 `search` matches reminder titles and notes. By default it searches active reminders; pass `--completed` to include completed reminders too.
 
 Do not mutate the Reminders SQLite database. Use RemCTL commands or EventKit.
+
+For troubleshooting, trust the `context` object in `doctor --for-agent --json`. If Terminal is green but the agent runner is red, the install is not necessarily broken; grant Full Disk Access to the app or interpreter reported by the agent context, or run a one-off command through an already-authorized Terminal session.
 
 After a repo update, reinstall the copied CLI before testing:
 
