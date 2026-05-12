@@ -26,6 +26,19 @@ class CliTests(unittest.TestCase):
             "2026-04-15T14:00:00",
         )
 
+    def test_parse_due_accepts_today_and_tomorrow_with_times(self):
+        today_due = self.remctl.parse_due("today at 3pm")
+        tomorrow_due = self.remctl.parse_due("tomorrow 15:30")
+
+        self.assertIsNotNone(today_due)
+        self.assertEqual((today_due.hour, today_due.minute), (15, 0))
+        self.assertIsNotNone(tomorrow_due)
+        self.assertEqual((tomorrow_due.hour, tomorrow_due.minute), (15, 30))
+        self.assertEqual((tomorrow_due.date() - today_due.date()).days, 1)
+
+    def test_parse_due_rejects_invalid_clock_time(self):
+        self.assertIsNone(self.remctl.parse_due("today at 25:00"))
+
     def test_list_create_uses_bridge_contract_fields(self):
         args = SimpleNamespace(name="Project X", color="blue", json=True)
         with (
@@ -189,6 +202,7 @@ class CliTests(unittest.TestCase):
                 "apply_private_changes",
                 return_value=[{"status": "updated", "action": "add_private_metadata"}],
             ) as apply_private_changes,
+            mock.patch.object(self.remctl, "q_reminder_by_identifier", return_value=None),
             contextlib.redirect_stdout(io.StringIO()) as stdout,
         ):
             self.remctl.cmd_add(args)
@@ -204,6 +218,38 @@ class CliTests(unittest.TestCase):
             list_pk=7,
         )
         self.assertEqual(json.loads(stdout.getvalue())["private"][0]["status"], "updated")
+
+    def test_cmd_add_json_includes_numeric_id_when_database_can_resolve_identifier(self):
+        args = SimpleNamespace(
+            title="Fast create",
+            list="Projects",
+            notes=None,
+            due="today at 3pm",
+            priority=None,
+            flag=False,
+            tags=None,
+            url=None,
+            recurrence=None,
+            alarm=None,
+            private=False,
+            private_metadata=False,
+            section=None,
+            new_section=None,
+            subtask=None,
+            image=None,
+            json=True,
+        )
+        with (
+            mock.patch.object(self.remctl, "bridge_available", return_value=True),
+            mock.patch.object(self.remctl, "bridge_call", return_value={"status": "created", "id": "UUID-1"}),
+            mock.patch.object(self.remctl, "open_db", return_value=object()),
+            mock.patch.object(self.remctl, "q_reminder_by_identifier", return_value={"Z_PK": 17839}),
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+        ):
+            self.remctl.cmd_add(args)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["numericId"], 17839)
 
     def test_subtask_accepts_json_metadata(self):
         specs = self.remctl.parse_subtask_specs([
@@ -1020,6 +1066,52 @@ class CliTests(unittest.TestCase):
         self.assertIn("⏰ ⚑ Urgent flagged", self.remctl._strip_ansi(table[0]["title"]))
         self.assertTrue(payload["urgent"])
         self.assertTrue(payload["flagged"])
+
+    def test_cmd_info_json_includes_private_rich_link_url(self):
+        reminder = {
+            "Z_PK": 42,
+            "ZTITLE": "Final README",
+            "ZNOTES": None,
+            "ZCOMPLETED": 0,
+            "ZFLAGGED": 0,
+            "ZPRIORITY": 0,
+            "ZISURGENTSTATEENABLEDFORCURRENTUSER": 0,
+            "ZDUEDATE": None,
+            "ZALLDAY": None,
+            "ZCOMPLETIONDATE": None,
+            "ZCREATIONDATE": None,
+            "ZPARENTREMINDER": None,
+            "ZLIST": 1,
+            "ZICSURL": None,
+            "ZCKIDENTIFIER": "ABC",
+            "list_name": "Projects",
+            "recurrence_frequency": None,
+            "recurrence_interval": None,
+            "recurrence_count": None,
+            "recurrence_end_date": None,
+            "recurrence_days_of_week": None,
+            "recurrence_days_of_month": None,
+            "recurrence_months_of_year": None,
+            "recurrence_days_of_year": None,
+            "recurrence_weeks_of_year": None,
+            "recurrence_set_positions": None,
+        }
+        with (
+            mock.patch.object(self.remctl, "open_db", return_value=object()),
+            mock.patch.object(self.remctl, "q_reminder", return_value=reminder),
+            mock.patch.object(self.remctl, "q_reminders", return_value=[]),
+            mock.patch.object(self.remctl, "q_attachments", return_value=[]),
+            mock.patch.object(self.remctl, "q_hashtags", return_value=[]),
+            mock.patch.object(self.remctl, "q_section_memberships", return_value={"ABC": "Playground"}),
+            mock.patch.object(self.remctl, "q_rich_link", return_value="https://github.com/viticci/shortcuts-playground-plugin"),
+            mock.patch.object(self.remctl, "q_subtask_count", return_value=0),
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+        ):
+            self.remctl.cmd_info(SimpleNamespace(id=42, json=True))
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["url"], "https://github.com/viticci/shortcuts-playground-plugin")
+        self.assertEqual(payload["section"], "Playground")
 
     def test_reminder_id_uses_list_color_when_database_colors_are_available(self):
         conn = sqlite3.connect(":memory:")

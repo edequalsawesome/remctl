@@ -146,6 +146,8 @@ remctl doctor --for-agent --json
 
 `search` matches reminder titles and notes. By default it searches active reminders; pass `--completed` to include completed reminders too.
 
+For fast agent writes, call `remctl add ... --json`, use the returned `numericId` when present, then verify with `remctl info <numericId> --json`. `info` includes private rich-link URLs, so agents should not need raw SQLite checks for ordinary rich-link verification.
+
 Do not mutate the Reminders SQLite database. Use RemCTL commands or EventKit.
 
 For troubleshooting, trust the `context` object in `doctor --for-agent --json`. If Terminal is green but the agent runner is red, the install is not necessarily broken; grant Full Disk Access to the app or interpreter reported by the agent context, or run a one-off command through an already-authorized Terminal session.

@@ -198,3 +198,14 @@ remctl completion zsh
 ```
 
 Use [installation.md](installation.md) for the first-run visual permission flow. The manual fallback is `remctl doctor --for-agent`, then adding the printed target in System Settings. Run `doctor` from the same terminal, app, or agent runner that will run the RemCTL write.
+
+## Agent Fast Path
+
+For task creation, agents should avoid setup checks once the context is known-good:
+
+```bash
+remctl add "Title" -l Projects --private --section "Section" -d "2026-05-12 15:00" --url "https://example.com" --json
+remctl info <numericId> --json
+```
+
+`add --json` returns `numericId` when the new reminder is immediately visible in the local database. Use that ID for `info`; fall back to resolving by title from `show <list> --json` only if `numericId` is absent. `info --json` includes private rich-link URLs, so raw SQLite verification should not be needed for normal rich-link tasks.

@@ -357,6 +357,17 @@ def q_reminder(db, pk):
         (pk,)
     ).fetchone()
 
+def q_reminder_by_identifier(db, identifier):
+    if not identifier:
+        return None
+    return db.execute(
+        f"SELECT {rem_cols(db)} FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l "
+        f"ON r.ZLIST = l.Z_PK "
+        f"WHERE lower(r.ZCKIDENTIFIER) = lower(?) AND r.ZMARKEDFORDELETION = 0 AND r.ZACCOUNT IS NOT NULL "
+        f"ORDER BY r.Z_PK DESC LIMIT 1",
+        (identifier,)
+    ).fetchone()
+
 def q_subtask_count(db, pk):
     return db.execute(
         "SELECT COUNT(*) FROM ZREMCDREMINDER WHERE ZPARENTREMINDER = ? "
@@ -422,6 +433,18 @@ def q_attachments(db, pk):
         "SELECT ZFILENAME, ZUTI, ZATTACHMENTTYPERAWVALUE FROM ZREMCDSAVEDATTACHMENT "
         "WHERE ZREMINDER = ? AND ZMARKEDFORDELETION = 0", (pk,)
     ).fetchall()
+
+def q_rich_links(db, pk):
+    return db.execute(
+        "SELECT ZURL FROM ZREMCDOBJECT "
+        "WHERE ZREMINDER2 = ? AND ZURL IS NOT NULL AND ZURL != '' "
+        "AND ZMARKEDFORDELETION = 0 ORDER BY Z_PK",
+        (pk,)
+    ).fetchall()
+
+def q_rich_link(db, pk):
+    links = q_rich_links(db, pk)
+    return links[0]["ZURL"] if links else None
 
 def q_hashtags(db, pk):
     return db.execute(
@@ -729,6 +752,7 @@ def to_dict(r, db=None, section=None, _sc=None, _ht=None):
         section=section,
         subtask_counts=_sc,
         hashtags=_ht,
+        rich_link_resolver=q_rich_link,
         fallback_subtask_count=q_subtask_count,
         fallback_hashtags=lambda inner_db, pk: [t["ZNAME"] for t in q_hashtags(inner_db, pk)],
     )
@@ -740,6 +764,7 @@ def reminders_to_dicts(items, db=None, memberships=None):
         priority_names=PRI_NAME,
         db=db,
         memberships=memberships,
+        rich_link_resolver=q_rich_link,
         fallback_subtask_count=q_subtask_count,
         fallback_hashtags=lambda inner_db, pk: [t["ZNAME"] for t in q_hashtags(inner_db, pk)],
     )
@@ -2149,12 +2174,35 @@ def as_date_assign(dt, target="due date of r"):
 def as_date(dt):
     return dt.strftime("%A, %B %d, %Y at %I:%M:%S %p")
 
-# ── Natural Language Date Parser ─────────────────────────────────────────────
+# ── Date Parser ──────────────────────────────────────────────────────────────
+
+def parse_clock_time(value):
+    if not value:
+        return None
+    text = value.strip().lower()
+    m = re.match(r'^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$', text)
+    if not m:
+        return None
+    hour, minute, ampm = m.groups()
+    hour = int(hour)
+    minute = int(minute or 0)
+    if minute > 59:
+        return None
+    if ampm:
+        if hour < 1 or hour > 12:
+            return None
+        if ampm == "pm" and hour < 12:
+            hour += 12
+        if ampm == "am" and hour == 12:
+            hour = 0
+    elif hour > 23:
+        return None
+    return hour, minute
 
 def parse_due(s):
     """Parse due date. Accepts:
       - ISO: 2026-04-15, 2026-04-15 14:00, 2026-04-15T14:00
-      - Shortcuts: today, tomorrow, eod, eow, +3d, +1w, +2h, +1m
+      - Shortcuts: today, today at 3pm, tomorrow 15:00, eod, eow, +3d, +1w, +2h, +1m
       - Relative: "in 3 days", "in 2 weeks"
       - Named days: "next monday", "next friday at 3pm"
       - Natural language (if parsedatetime installed): "march 30 2pm"
@@ -2172,6 +2220,16 @@ def parse_due(s):
         days_ahead = 4 - today.weekday()  # Friday = 4
         if days_ahead <= 0: days_ahead += 7
         return today + timedelta(days=days_ahead)
+
+    # Deterministic same/next-day times: "today at 3pm", "tomorrow 15:00".
+    m = re.match(r'^(today|tomorrow)(?:\s+at)?\s+(.+)$', sl)
+    if m:
+        day_name, time_text = m.groups()
+        parsed_time = parse_clock_time(time_text)
+        if parsed_time:
+            hour, minute = parsed_time
+            base = today if day_name == "today" else today + timedelta(days=1)
+            return base.replace(hour=hour, minute=minute)
 
     # Relative: +3d, +1w, +2m, +2h
     m = re.match(r'^[+]?(\d+)([dwmh])$', sl)
@@ -2197,10 +2255,11 @@ def parse_due(s):
             if days_ahead == 0: days_ahead = 7
             dt = today + timedelta(days=days_ahead)
             if hour:
-                h = int(hour)
-                if ampm == "pm" and h < 12: h += 12
-                if ampm == "am" and h == 12: h = 0
-                dt = dt.replace(hour=h, minute=int(minute or 0))
+                parsed_time = parse_clock_time(f"{hour}:{minute or '00'}{ampm or ''}")
+                if not parsed_time:
+                    return None
+                h, min_value = parsed_time
+                dt = dt.replace(hour=h, minute=min_value)
             return dt
 
     # "in N days/weeks/hours/months"
@@ -2344,6 +2403,7 @@ def cmd_add(a):
         if subtask_specs_need_bridge(parse_subtask_specs(getattr(a, "subtask", None))) and not bridge_available():
             print("Error: rich private subtasks require remctl-bridge for notes, due dates, priority, recurrence, or alarms.", file=sys.stderr)
             sys.exit(1)
+    db = None
     target_list_pk = None
     if wants_private and getattr(a, "list", None):
         db = open_db()
@@ -2380,20 +2440,33 @@ def cmd_add(a):
         result = bridge_call(data)
         if result and result.get("status") == "created":
             private_results = []
+            created_row = None
             if wants_private:
+                if db is None:
+                    db = open_db()
                 private_results = apply_private_changes(
                     result.get("id", ""),
                     a,
-                    db=open_db(),
+                    db=db,
                     list_pk=target_list_pk,
                 )
+            try:
+                if db is None:
+                    db = open_db()
+                created_row = q_reminder_by_identifier(db, result.get("id", ""))
+            except RemindersDBUnavailable:
+                created_row = None
             if a.json:
                 payload = {"status": "created", "id": result.get("id", ""), "title": title}
+                if created_row:
+                    payload["numericId"] = created_row["Z_PK"]
                 if private_results:
                     payload["private"] = private_results
                 print(json.dumps(payload))
             else:
                 print(f"Created: {title}")
+                if created_row:
+                    print(f"ID: #{created_row['Z_PK']}")
                 if private_results:
                     print(f"Private metadata: applied {len(private_results)} update{'s' if len(private_results) != 1 else ''}")
             return
@@ -2855,6 +2928,7 @@ def cmd_info(a):
     subs = q_reminders(db, parent_pk=a.id, completed=True)
     atts = q_attachments(db, a.id)
     tags = q_hashtags(db, a.id)
+    rich_url = q_rich_link(db, a.id)
     sec = None
     if r["ZLIST"]:
         memberships = q_section_memberships(db, r["ZLIST"])
@@ -2892,7 +2966,7 @@ def cmd_info(a):
     if r["ZCOMPLETIONDATE"]:
         print(f"  Completed: {ts(r['ZCOMPLETIONDATE']).strftime('%b %d, %Y at %I:%M %p')}")
     if r["ZNOTES"]: print(f"  Notes:     {r['ZNOTES']}")
-    if r["ZICSURL"]: print(f"  URL:       {r['ZICSURL']}")
+    if r["ZICSURL"] or rich_url: print(f"  URL:       {r['ZICSURL'] or rich_url}")
     if tags:
         tag_str = ", ".join(C.magenta('#' + t['ZNAME']) for t in tags)
         print(f"  Tags:      {tag_str}")

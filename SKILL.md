@@ -65,11 +65,22 @@ Private metadata rules:
 - Treat `remctl doctor --json` as the first setup check.
 - For agents, prefer `remctl doctor --for-agent --json`; `doctor` must pass in the same execution context that will run the write.
 - Check `private_helper` in `remctl doctor --json` before using `--private`.
+- Do not run `doctor` before every ordinary task once the current context is known-good; it is a setup/TCC diagnostic, not a per-write verification step.
 - For writes, verify against live Reminders data after the command succeeds.
 - `remctl search QUERY --completed --json` includes completed reminders and searches both titles and notes.
-- `remctl add` can return a UUID-like object ID; `remctl info` expects the numeric `#ID`. Resolve it with `remctl show <list> --json` by matching the created title before calling `remctl info`.
+- `remctl add --json` returns `numericId` when direct DB reads can resolve the new reminder. Use that for `remctl info <numericId> --json`. If `numericId` is absent, resolve the UUID-like `id` with `remctl show <list> --json` by matching the created title.
+- Prefer deterministic due-date strings. If the user says "today at 3pm", either pass `today at 3pm` or normalize it to `YYYY-MM-DD HH:MM` in the user's timezone before calling `remctl`; do not invent broader natural-language phrases.
 - Date output should match Reminders.app's displayed date. RemCTL reads `ZDISPLAYDATEDATE` first and falls back to `ZDUEDATE`.
 - When debugging due-date mismatches, compare both fields in the Reminders database before assuming the CLI or UI is wrong.
+
+Fast create path for agents:
+
+```bash
+remctl add "Title" -l Projects --private --section "Section" -d "YYYY-MM-DD HH:MM" --url "https://example.com" --json
+remctl info <numericId> --json
+```
+
+`info --json` includes section, due date, tags, subtasks, attachments, deep link, and private rich-link `url` when present. Avoid raw SQLite checks unless the CLI output lacks a field you need.
 
 ## Permissions
 
