@@ -99,6 +99,7 @@
 - (id)sectionsContextChangeItem;
 - (id)appearanceContext;
 - (void)setColor:(id)color;
+- (void)setIsPinned:(BOOL)pinned;
 - (void)setName:(NSString *)name;
 @end
 
@@ -507,6 +508,7 @@ int main(int argc, const char * argv[]) {
             @"set_urgent",
             @"add_location_alarm",
             @"set_list_appearance",
+            @"set_list_pinned",
             @"create_smart_list",
             @"update_smart_list",
             @"delete_smart_list",
@@ -721,6 +723,45 @@ int main(int argc, const char * argv[]) {
                 fail(error.localizedDescription ?: @"ReminderKit list save failed");
             }
             output(details);
+            return 0;
+        }
+        if ([action isEqualToString:@"set_list_pinned"]) {
+            NSString *listID = cmd[@"listId"];
+            if (![listID isKindOfClass:[NSString class]] || listID.length == 0) {
+                fail(@"listId is required");
+            }
+            NSNumber *pinned = cmd[@"pinned"];
+            if (![pinned isKindOfClass:[NSNumber class]]) {
+                fail(@"pinned is required");
+            }
+            NSURL *objectURL = listURL(listID);
+            id objectID = [REMObjectID objectIDWithURL:objectURL];
+            if (!objectID) {
+                fail(@"Could not build ReminderKit list object ID");
+            }
+            REMStore *store = [REMStore new];
+            id list = [store fetchListWithObjectID:objectID error:&error];
+            if (!list) {
+                fail(error.localizedDescription ?: @"List not found");
+            }
+            REMSaveRequest *save = [[REMSaveRequest alloc] initWithStore:store];
+            REMListChangeItem *change = [save updateList:list];
+            if (!change) {
+                fail(@"Could not create ReminderKit list change item");
+            }
+            if (![change respondsToSelector:@selector(setIsPinned:)]) {
+                fail(@"ReminderKit list change item does not support pinning");
+            }
+            [change setIsPinned:[pinned boolValue]];
+            if (![save saveSynchronouslyWithError:&error]) {
+                fail(error.localizedDescription ?: @"ReminderKit list pin save failed");
+            }
+            output(@{
+                @"status": @"updated",
+                @"action": action,
+                @"listId": listID,
+                @"pinned": @([pinned boolValue]),
+            });
             return 0;
         }
         NSString *reminderID = cmd[@"id"];

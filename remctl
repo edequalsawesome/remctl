@@ -410,8 +410,14 @@ def color_by_list(text, list_name=None, db=None):
 # ── Queries ──────────────────────────────────────────────────────────────────
 
 def q_lists(db):
+    columns = ["Z_PK", "ZNAME", "ZCKIDENTIFIER"]
+    table_columns = {row["name"] for row in db.execute("PRAGMA table_info(ZREMCDBASELIST)").fetchall()}
+    if "ZISPINNEDBYCURRENTUSER" in table_columns:
+        columns.append("ZISPINNEDBYCURRENTUSER")
+    if "ZPINNEDDATE" in table_columns:
+        columns.append("ZPINNEDDATE")
     return db.execute(
-        "SELECT Z_PK, ZNAME, ZCKIDENTIFIER FROM ZREMCDBASELIST "
+        f"SELECT {', '.join(columns)} FROM ZREMCDBASELIST "
         "WHERE ZMARKEDFORDELETION = 0 AND Z_ENT = 3 AND ZNAME IS NOT NULL AND ZNAME != '' "
         "ORDER BY ZNAME"
     ).fetchall()
@@ -457,6 +463,12 @@ def _row_value(row, key):
         if key == "ZCKIDENTIFIER":
             return row[2] if len(row) > 2 else None
         raise
+
+def _row_has_key(row, key):
+    try:
+        return key in row.keys()
+    except AttributeError:
+        return False
 
 def normalize_list_lookup_name(name):
     if not name:
@@ -1659,6 +1671,20 @@ def apply_private_list_appearance(db, list_pk, a, *, exit_on_error=True, include
     return {"status": "error", "message": message}
 
 
+def apply_private_list_pinned(db, list_pk, a, pinned):
+    require_private_metadata(a)
+    ckid = q_list_ckid(db, list_pk)
+    if not ckid:
+        print("Error: target list has no stable CloudKit identifier.", file=sys.stderr)
+        sys.exit(1)
+    result = private_call({"action": "set_list_pinned", "listId": ckid, "pinned": bool(pinned)})
+    if result and result.get("status") == "updated":
+        return result
+    message = result.get("message") if isinstance(result, dict) else "private helper failed"
+    print(f"Error: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
 def normalize_section_id(value):
     if not value:
         return None
@@ -2858,10 +2884,41 @@ def _resolve_smart_list_filter_list_ids(db, names, ids):
         resolved.append(ref["objectUUID"])
     return resolved
 
+
+def validate_materializing_smart_list_args(a):
+    if getattr(a, "filter_json", None):
+        return
+    if _smart_list_csv_values(getattr(a, "tags", None)):
+        raise SmartListFilterError(
+            "Selected tag filters do not materialize reliably in Reminders.app. "
+            "Use --any-tag, or inspect existing selected-tag smart lists with smart-lists."
+        )
+    if bool(getattr(a, "untagged", False)):
+        raise SmartListFilterError("Untagged smart-list writes do not materialize reliably in Reminders.app.")
+    if getattr(a, "date", None) == "no-date":
+        raise SmartListFilterError("No-date smart-list writes do not materialize reliably in Reminders.app.")
+    if getattr(a, "date_relative", None):
+        raise SmartListFilterError("Relative-date smart-list writes do not materialize reliably in Reminders.app.")
+    if getattr(a, "time", None) == "no-time":
+        raise SmartListFilterError("No-time smart-list writes do not materialize reliably in Reminders.app.")
+    if getattr(a, "vehicle", None) == "disconnected":
+        raise SmartListFilterError("Vehicle-disconnected smart-list writes do not materialize reliably in Reminders.app.")
+
+    include_count = len(_smart_list_csv_values(getattr(a, "include_list", None))) + len(getattr(a, "include_list_id", None) or [])
+    exclude_count = len(_smart_list_csv_values(getattr(a, "exclude_list", None))) + len(getattr(a, "exclude_list_id", None) or [])
+    if exclude_count:
+        raise SmartListFilterError("List exclusion filters do not materialize reliably in Reminders.app.")
+    if include_count > 1:
+        raise SmartListFilterError("Reminders.app only materializes one included-list filter at a time.")
+    if include_count and getattr(a, "list_match", None):
+        raise SmartListFilterError("Do not pass --list-match with a single included list.")
+
+
 def smart_list_filter_payload_from_args(a, db):
     raw_payload = _load_smart_list_filter_json(getattr(a, "filter_json", None))
     if raw_payload is not None:
         return raw_payload
+    validate_materializing_smart_list_args(a)
     location = None
     if getattr(a, "location_title", None) or getattr(a, "latitude", None) is not None or getattr(a, "longitude", None) is not None:
         location = {
@@ -3097,7 +3154,15 @@ def cmd_lists(a):
     db = open_db()
     rows = q_lists(db)
     if a.json:
-        print(json.dumps([{"id": r["Z_PK"], "title": r["ZNAME"]} for r in rows], indent=2))
+        payload = []
+        for r in rows:
+            item = {"id": r["Z_PK"], "title": r["ZNAME"]}
+            if _row_has_key(r, "ZISPINNEDBYCURRENTUSER"):
+                item["pinned"] = bool(r["ZISPINNEDBYCURRENTUSER"])
+            if _row_has_key(r, "ZPINNEDDATE") and r["ZPINNEDDATE"] is not None:
+                item["pinnedDate"] = r["ZPINNEDDATE"]
+            payload.append(item)
+        print(json.dumps(payload, indent=2))
         return
     if getattr(a, 'format', None) == 'table':
         data = [{"id": r["Z_PK"], "title": r["ZNAME"],
@@ -3109,8 +3174,9 @@ def cmd_lists(a):
         secs = q_sections(db, r["Z_PK"])
         list_name = color_list_name(r["ZNAME"], db)
         sec_info = C.dim(f" [{len(secs)} sections]") if secs else ""
+        pin_info = C.dim(" [pinned]") if _row_has_key(r, "ZISPINNEDBYCURRENTUSER") and r["ZISPINNEDBYCURRENTUSER"] else ""
         id_dim = C.dim(f"(id: {r['Z_PK']})")
-        print(f"  {list_name} {id_dim}{sec_info}")
+        print(f"  {list_name} {id_dim}{sec_info}{pin_info}")
     print(f"\n{len(rows)} list{'s' if len(rows) != 1 else ''}")
 
 REMINDERS_UI_CORE_BUNDLE = Path("/System/Library/PrivateFrameworks/RemindersUICore.framework")
@@ -4439,6 +4505,36 @@ def cmd_list_edit(a):
     else:
         print(f"Updated list: {output_name}")
 
+
+def _cmd_list_pin_state(a, pinned):
+    require_private_metadata(a)
+    db = open_db()
+    list_ref = resolve_required_list_target_or_die(
+        db,
+        name=getattr(a, "name", None),
+        list_id=getattr(a, "list_id", None),
+    )
+    result = apply_private_list_pinned(db, list_ref["id"], a, pinned)
+    status = "pinned" if pinned else "unpinned"
+    if a.json:
+        print(json.dumps({
+            "status": status,
+            "id": list_ref["id"],
+            "name": list_ref["title"],
+            "private": result,
+        }, ensure_ascii=False))
+    else:
+        print(f"{status.capitalize()} list: {list_ref['title']}")
+
+
+def cmd_list_pin(a):
+    _cmd_list_pin_state(a, True)
+
+
+def cmd_list_unpin(a):
+    _cmd_list_pin_state(a, False)
+
+
 def cmd_list_rename(a):
     new_name = getattr(a, "new_name_option", None) or getattr(a, "new_name", None)
     if getattr(a, "new_name_option", None) and getattr(a, "new_name", None):
@@ -4587,24 +4683,24 @@ def add_smart_list_filter_arguments(parser):
     parser.add_argument("--filter-json", help="Advanced: raw official smart-list filter JSON or @path")
     parser.add_argument("--flagged", action="store_true", help="Filter to flagged reminders")
     parser.add_argument("--priority", help="Priority filter: high, medium, low, or comma-separated values")
-    parser.add_argument("--tags", help="Tag filter, comma-separated; use --tag-match for all/any selected")
-    parser.add_argument("--tag-match", choices=["all", "any"], default="all", help="How --tags should match")
+    parser.add_argument("--tags", help=argparse.SUPPRESS)
+    parser.add_argument("--tag-match", choices=["all", "any"], default="all", help=argparse.SUPPRESS)
     parser.add_argument("--any-tag", action="store_true", help="Filter to reminders with any tag")
-    parser.add_argument("--untagged", action="store_true", help="Filter to reminders with no tags")
-    parser.add_argument("--date", choices=["any", "today", "no-date"], help="Date filter")
+    parser.add_argument("--untagged", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--date", choices=["any", "today"], help="Date filter")
     parser.add_argument("--date-today-include-past-due", action="store_true", help="Include past due reminders with --date today")
     parser.add_argument("--date-on", help="Date filter: on YYYY-MM-DD")
     parser.add_argument("--date-before", help="Date filter: before YYYY-MM-DD")
     parser.add_argument("--date-after", help="Date filter: after YYYY-MM-DD")
     parser.add_argument("--date-range", help="Date filter range: START,END")
-    parser.add_argument("--date-relative", help="Relative date range: in-next:1:hour[:past-due]")
-    parser.add_argument("--time", choices=["morning", "afternoon", "evening", "night", "no-time"], help="Time-of-day filter")
-    parser.add_argument("--include-list", action="append", help="Include reminders from list name (repeatable or comma-separated)")
-    parser.add_argument("--exclude-list", action="append", help="Exclude reminders from list name (repeatable or comma-separated)")
-    parser.add_argument("--include-list-id", action="append", type=int, help="Include reminders from numeric list ID")
-    parser.add_argument("--exclude-list-id", action="append", type=int, help="Exclude reminders from numeric list ID")
-    parser.add_argument("--list-match", choices=["all", "any"], help="How multiple included/excluded lists should match")
-    parser.add_argument("--vehicle", choices=["connected", "disconnected"], help="Location vehicle filter")
+    parser.add_argument("--date-relative", help=argparse.SUPPRESS)
+    parser.add_argument("--time", choices=["morning", "afternoon", "evening", "night"], help="Time-of-day filter")
+    parser.add_argument("--include-list", action="append", help="Include reminders from one list name")
+    parser.add_argument("--exclude-list", action="append", help=argparse.SUPPRESS)
+    parser.add_argument("--include-list-id", action="append", type=int, help="Include reminders from one numeric list ID")
+    parser.add_argument("--exclude-list-id", action="append", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--list-match", choices=["all", "any"], help=argparse.SUPPRESS)
+    parser.add_argument("--vehicle", choices=["connected"], help="Location vehicle filter")
     parser.add_argument("--location-title", help="Specific location title")
     parser.add_argument("--latitude", type=float, help="Specific location latitude")
     parser.add_argument("--longitude", type=float, help="Specific location longitude")
@@ -4647,6 +4743,8 @@ _remctl() {
         'smart-list-edit:Edit a private custom smart list'
         'smart-list-delete:Delete a private custom smart list'
         'list-edit:Edit private list appearance'
+        'list-pin:Pin a list in Reminders'
+        'list-unpin:Unpin a list in Reminders'
         'list-rename:Rename a list'
         'list-delete:Delete a list'
         'onboard:Prompt for macOS permissions and verify readiness'
@@ -4751,23 +4849,16 @@ _remctl() {
                 '--flagged[Filter to flagged reminders]' \
                 '--priority[Priority filter]:priority:(high medium low)' \
                 '--match[Match all or any filters]:match:(all any)' \
-                '--tags[Tag filter]:tags:' \
-                '--tag-match[Tag match]:tag-match:(all any)' \
                 '--any-tag[Filter to reminders with any tag]' \
-                '--untagged[Filter to reminders with no tags]' \
-                '--date[Date filter]:date:(any today no-date)' \
+                '--date[Date filter]:date:(any today)' \
                 '--date-on[On date]:date:' \
                 '--date-before[Before date]:date:' \
                 '--date-after[After date]:date:' \
                 '--date-range[Date range START,END]:range:' \
-                '--date-relative[Relative date range]:relative:' \
-                '--time[Time filter]:time:(morning afternoon evening night no-time)' \
-                '--include-list[Include list]:list:' \
-                '--exclude-list[Exclude list]:list:' \
+                '--time[Time filter]:time:(morning afternoon evening night)' \
+                '--include-list[Include one list]:list:' \
                 '--include-list-id[Include numeric list ID]:id:' \
-                '--exclude-list-id[Exclude numeric list ID]:id:' \
-                '--list-match[Match all or any selected lists]:list-match:(all any)' \
-                '--vehicle[Vehicle filter]:vehicle:(connected disconnected)' \
+                '--vehicle[Vehicle filter]:vehicle:(connected)' \
                 '--location-title[Location title]:title:' \
                 '--latitude[Latitude]:latitude:' \
                 '--longitude[Longitude]:longitude:' \
@@ -4787,23 +4878,16 @@ _remctl() {
                 '--flagged[Filter to flagged reminders]' \
                 '--priority[Priority filter]:priority:(high medium low)' \
                 '--match[Match all or any filters]:match:(all any)' \
-                '--tags[Tag filter]:tags:' \
-                '--tag-match[Tag match]:tag-match:(all any)' \
                 '--any-tag[Filter to reminders with any tag]' \
-                '--untagged[Filter to reminders with no tags]' \
-                '--date[Date filter]:date:(any today no-date)' \
+                '--date[Date filter]:date:(any today)' \
                 '--date-on[On date]:date:' \
                 '--date-before[Before date]:date:' \
                 '--date-after[After date]:date:' \
                 '--date-range[Date range START,END]:range:' \
-                '--date-relative[Relative date range]:relative:' \
-                '--time[Time filter]:time:(morning afternoon evening night no-time)' \
-                '--include-list[Include list]:list:' \
-                '--exclude-list[Exclude list]:list:' \
+                '--time[Time filter]:time:(morning afternoon evening night)' \
+                '--include-list[Include one list]:list:' \
                 '--include-list-id[Include numeric list ID]:id:' \
-                '--exclude-list-id[Exclude numeric list ID]:id:' \
-                '--list-match[Match all or any selected lists]:list-match:(all any)' \
-                '--vehicle[Vehicle filter]:vehicle:(connected disconnected)' \
+                '--vehicle[Vehicle filter]:vehicle:(connected)' \
                 '--location-title[Location title]:title:' \
                 '--latitude[Latitude]:latitude:' \
                 '--longitude[Longitude]:longitude:' \
@@ -4828,6 +4912,13 @@ _remctl() {
                 '--json[JSON output]'
             return
             ;;
+        list-pin|list-unpin)
+            _arguments \
+                '--private[Use private ReminderKit list pinning]' \
+                '--list-id[Target list by stable numeric ID]:id:' \
+                '--json[JSON output]'
+            return
+            ;;
         list-delete)
             _arguments \
                 '--list-id[Delete list by stable numeric ID]:id:' \
@@ -4845,7 +4936,7 @@ BASH_COMPLETION = '''_remctl() {
     local cur prev commands
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="lists smart-lists show add done undone edit delete search today upcoming overdue flagged urgent flag unflag tags subtasks info sections stats link open export import list-symbols list-create smart-list-create smart-list-edit smart-list-delete list-edit list-rename list-delete onboard doctor setup permissions completion"
+    commands="lists smart-lists show add done undone edit delete search today upcoming overdue flagged urgent flag unflag tags subtasks info sections stats link open export import list-symbols list-create smart-list-create smart-list-edit smart-list-delete list-edit list-pin list-unpin list-rename list-delete onboard doctor setup permissions completion"
 
     local cmd="${COMP_WORDS[1]}"
     if [ "$cmd" = "add" ]; then
@@ -4873,16 +4964,19 @@ BASH_COMPLETION = '''_remctl() {
         COMPREPLY=( $(compgen -W "--color --private --symbol --emoji --json" -- "$cur") )
         return
     elif [ "$cmd" = "smart-list-create" ]; then
-        COMPREPLY=( $(compgen -W "--private --color --symbol --emoji --match --filter-json --flagged --priority --tags --tag-match --any-tag --untagged --date --date-today-include-past-due --date-on --date-before --date-after --date-range --date-relative --time --include-list --exclude-list --include-list-id --exclude-list-id --list-match --vehicle --location-title --latitude --longitude --radius --proximity --json" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--private --color --symbol --emoji --match --filter-json --flagged --priority --any-tag --date --date-today-include-past-due --date-on --date-before --date-after --date-range --time --include-list --include-list-id --vehicle --location-title --latitude --longitude --radius --proximity --json" -- "$cur") )
         return
     elif [ "$cmd" = "smart-list-edit" ]; then
-        COMPREPLY=( $(compgen -W "--private --smart-list-id --color --symbol --emoji --match --filter-json --flagged --priority --tags --tag-match --any-tag --untagged --date --date-today-include-past-due --date-on --date-before --date-after --date-range --date-relative --time --include-list --exclude-list --include-list-id --exclude-list-id --list-match --vehicle --location-title --latitude --longitude --radius --proximity --json" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--private --smart-list-id --color --symbol --emoji --match --filter-json --flagged --priority --any-tag --date --date-today-include-past-due --date-on --date-before --date-after --date-range --time --include-list --include-list-id --vehicle --location-title --latitude --longitude --radius --proximity --json" -- "$cur") )
         return
     elif [ "$cmd" = "smart-list-delete" ]; then
         COMPREPLY=( $(compgen -W "--private --smart-list-id --force --json" -- "$cur") )
         return
     elif [ "$cmd" = "list-edit" ]; then
         COMPREPLY=( $(compgen -W "--list-id --new-name --color --private --symbol --emoji --json" -- "$cur") )
+        return
+    elif [ "$cmd" = "list-pin" ] || [ "$cmd" = "list-unpin" ]; then
+        COMPREPLY=( $(compgen -W "--private --list-id --json" -- "$cur") )
         return
     elif [ "$cmd" = "list-rename" ]; then
         COMPREPLY=( $(compgen -W "--list-id --new-name --json" -- "$cur") )
@@ -4929,6 +5023,8 @@ complete -c remctl -n "__fish_use_subcommand" -a smart-list-create -d "Create a 
 complete -c remctl -n "__fish_use_subcommand" -a smart-list-edit -d "Edit a private custom smart list"
 complete -c remctl -n "__fish_use_subcommand" -a smart-list-delete -d "Delete a private custom smart list"
 complete -c remctl -n "__fish_use_subcommand" -a list-edit -d "Edit private list appearance"
+complete -c remctl -n "__fish_use_subcommand" -a list-pin -d "Pin a list in Reminders"
+complete -c remctl -n "__fish_use_subcommand" -a list-unpin -d "Unpin a list in Reminders"
 complete -c remctl -n "__fish_use_subcommand" -a list-rename -d "Rename a list"
 complete -c remctl -n "__fish_use_subcommand" -a list-delete -d "Delete a list"
 complete -c remctl -n "__fish_use_subcommand" -a onboard -d "Prompt for macOS permissions and verify readiness"
@@ -4961,24 +5057,17 @@ complete -c remctl -n "__fish_seen_subcommand_from smart-list-create" -l priorit
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create" -l json -d "JSON output"
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l match -d "Match all or any filters" -a "all any"
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l filter-json -d "Raw official filter JSON or @path" -r
-complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l tags -d "Tag filter" -r
-complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l tag-match -d "Tag match" -a "all any"
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l any-tag -d "Filter to reminders with any tag"
-complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l untagged -d "Filter to reminders with no tags"
-complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l date -d "Date filter" -a "any today no-date"
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l date -d "Date filter" -a "any today"
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l date-today-include-past-due -d "Include past due with today"
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l date-on -d "On date" -r
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l date-before -d "Before date" -r
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l date-after -d "After date" -r
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l date-range -d "Date range START,END" -r
-complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l date-relative -d "Relative date range" -r
-complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l time -d "Time filter" -a "morning afternoon evening night no-time"
-complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l include-list -d "Include list" -r
-complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l exclude-list -d "Exclude list" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l time -d "Time filter" -a "morning afternoon evening night"
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l include-list -d "Include one list" -r
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l include-list-id -d "Include numeric list ID" -r
-complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l exclude-list-id -d "Exclude numeric list ID" -r
-complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l list-match -d "Match all or any selected lists" -a "all any"
-complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l vehicle -d "Vehicle filter" -a "connected disconnected"
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l vehicle -d "Vehicle filter" -a "connected"
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l location-title -d "Location title" -r
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l latitude -d "Latitude" -r
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l longitude -d "Longitude" -r
@@ -4999,6 +5088,9 @@ complete -c remctl -n "__fish_seen_subcommand_from list-edit" -l color -d "List 
 complete -c remctl -n "__fish_seen_subcommand_from list-edit" -l private -d "Required for list appearance writes"
 complete -c remctl -n "__fish_seen_subcommand_from list-edit" -l symbol -d "Official Reminders list symbol name" -r
 complete -c remctl -n "__fish_seen_subcommand_from list-edit" -l emoji -d "Private Reminders list emoji badge" -r
+complete -c remctl -n "__fish_seen_subcommand_from list-pin list-unpin" -l private -d "Use private ReminderKit list pinning"
+complete -c remctl -n "__fish_seen_subcommand_from list-pin list-unpin" -l list-id -d "Target list by stable numeric ID" -r
+complete -c remctl -n "__fish_seen_subcommand_from list-pin list-unpin" -l json -d "JSON output"
 complete -c remctl -n "__fish_seen_subcommand_from list-rename" -l list-id -d "Rename list by stable numeric ID" -r
 complete -c remctl -n "__fish_seen_subcommand_from list-rename" -l new-name -d "New list name" -r
 complete -c remctl -n "__fish_seen_subcommand_from list-delete" -l list-id -d "Delete list by stable numeric ID" -r
@@ -5657,7 +5749,8 @@ def main():
             "Use `remctl onboard --help`, `remctl permissions --help`, `remctl setup --help`, and `remctl doctor --help`\n"
             "for onboarding details.\n"
             "\n"
-            "Private metadata writes are unsupported and opt-in: pass --private on add/edit/list-create/list-edit/smart-list-*."
+            "Private metadata writes are unsupported and opt-in: pass --private on "
+            "add/edit/list-create/list-edit/list-pin/list-unpin/smart-list-*."
         ),
         formatter_class=HelpFormatter,
     )
@@ -5833,19 +5926,19 @@ def main():
         help="Create a private custom smart list",
         description=(
             "Create a custom Reminders smart list through unsupported private ReminderKit APIs. "
-            "Supports the official Reminders smart-list filters decoded from Reminders.app."
+            "Supports the Reminders.app filters that materialize reliably through this write path."
         ),
         epilog=(
             "Examples:\n"
             "  remctl smart-list-create \"Flagged Review\" --private --flagged\n"
             "  remctl smart-list-create \"High Priority\" --private --priority high\n"
-            "  remctl smart-list-create \"Tagged or Today\" --private --match any --tags remctl --date today\n"
-            "  remctl smart-list-create \"Work and Projects\" --private --include-list-id 135 --include-list-id 144\n"
-            "  remctl smart-list-create \"Work and Projects (All)\" --private --include-list-id 135 --include-list-id 144 --list-match all\n"
+            "  remctl smart-list-create \"Any Tag\" --private --any-tag\n"
+            "  remctl smart-list-create \"Projects Today\" --private --include-list Projects --date today --date-today-include-past-due\n"
+            "  remctl smart-list-create \"Priority or Today\" --private --match any --priority high,medium --date today\n"
             "  remctl smart-list-create \"Due Before June 1\" --private --date-range 2026-05-16,2026-05-31 --color red --emoji 📆\n"
             "  remctl smart-list-create \"Near Home\" --private --location-title Home --latitude 41.9 --longitude 12.5 --proximity enter\n"
             "\n"
-            "This command never writes SQLite directly. Unknown smart-list filter shapes are rejected."
+            "This command never writes SQLite directly. Known zero-filter shapes are rejected before saving."
         ),
         formatter_class=HelpFormatter,
     )
@@ -5868,7 +5961,7 @@ def main():
             "Examples:\n"
             "  remctl smart-list-edit \"Flagged Review\" --private --priority high\n"
             "  remctl smart-list-edit \"Due Before June 1\" --private --color red --emoji 📆\n"
-            "  remctl smart-list-edit --smart-list-id 170 --private --match any --tags remctl,codex\n"
+            "  remctl smart-list-edit --smart-list-id 170 --private --match any --priority high,medium --date today\n"
         ),
         formatter_class=HelpFormatter,
     )
@@ -5903,6 +5996,18 @@ def main():
     c.add_argument("--symbol", help="Official Reminders list symbol name; run list-symbols")
     c.add_argument("--emoji", help="Private Reminders list emoji badge")
     c.add_argument("--private", action="store_true", help="Required for list appearance writes")
+    js(c)
+
+    c = sub.add_parser("list-pin", help="Pin a list in Reminders.app")
+    c.add_argument("name", nargs="?", help="List name to pin")
+    c.add_argument("--list-id", type=int, help="Pin a list by stable numeric ID")
+    c.add_argument("--private", action="store_true", help="Required for private ReminderKit list pinning")
+    js(c)
+
+    c = sub.add_parser("list-unpin", help="Unpin a list in Reminders.app")
+    c.add_argument("name", nargs="?", help="List name to unpin")
+    c.add_argument("--list-id", type=int, help="Unpin a list by stable numeric ID")
+    c.add_argument("--private", action="store_true", help="Required for private ReminderKit list pinning")
     js(c)
 
     c = sub.add_parser("list-rename", help="Rename a list (bridge only)")
@@ -6083,6 +6188,8 @@ def main():
         "smart-list-edit": cmd_smart_list_edit,
         "smart-list-delete": cmd_smart_list_delete,
         "list-edit": cmd_list_edit,
+        "list-pin": cmd_list_pin,
+        "list-unpin": cmd_list_unpin,
         "list-rename": cmd_list_rename,
         "list-delete": cmd_list_delete,
         "export": cmd_export,

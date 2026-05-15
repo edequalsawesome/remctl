@@ -196,6 +196,51 @@ class CliTests(unittest.TestCase):
             },
         )
 
+    def test_list_pin_and_unpin_use_private_helper(self):
+        db = self._list_db(["🗓️ Weekly 514"])
+        pin_args = SimpleNamespace(name="Weekly 514", list_id=None, private=True, json=True)
+        unpin_args = SimpleNamespace(name=None, list_id=1, private=True, json=True)
+        try:
+            with (
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(self.remctl, "private_call", return_value={"status": "updated", "pinned": True}) as pin_call,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.remctl.cmd_list_pin(pin_args)
+            self.assertEqual(
+                pin_call.call_args.args[0],
+                {"action": "set_list_pinned", "listId": "CK-1", "pinned": True},
+            )
+
+            with (
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(self.remctl, "private_call", return_value={"status": "updated", "pinned": False}) as unpin_call,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.remctl.cmd_list_unpin(unpin_args)
+            self.assertEqual(
+                unpin_call.call_args.args[0],
+                {"action": "set_list_pinned", "listId": "CK-1", "pinned": False},
+            )
+        finally:
+            db.close()
+
+    def test_list_pin_rejects_without_private_before_helper(self):
+        args = SimpleNamespace(name="Weekly 514", list_id=None, private=False, json=True)
+        with (
+            mock.patch.object(self.remctl, "private_available") as private_available,
+            mock.patch.object(self.remctl, "private_call") as private_call,
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            self.assertRaises(SystemExit),
+        ):
+            self.remctl.cmd_list_pin(args)
+
+        private_available.assert_not_called()
+        private_call.assert_not_called()
+        self.assertIn("--private", stderr.getvalue())
+
     def test_list_rename_and_delete_use_resolved_bridge_contract_fields(self):
         db = self._list_db(["Old"])
         rename_args = SimpleNamespace(name="Old", list_id=None, new_name="New", new_name_option=None, json=True)
@@ -371,8 +416,8 @@ class CliTests(unittest.TestCase):
             private=True,
             match="any",
             flagged=False,
-            priority=None,
-            tags="remctl",
+            priority="high,medium",
+            tags=None,
             tag_match="all",
             any_tag=False,
             untagged=False,
@@ -420,7 +465,7 @@ class CliTests(unittest.TestCase):
             decoded,
             {
                 "operation": "or",
-                "hashtags": {"hashtags": ["remctl"]},
+                "priorities": ["high", "medium"],
                 "date": {"today": False},
                 "lists": {"include": ["LIST-1"], "exclude": []},
             },
@@ -479,7 +524,7 @@ class CliTests(unittest.TestCase):
         decoded = json.loads(base64.b64decode(private_call.call_args.args[0]["filterData"]).decode("utf-8"))
         self.assertEqual(decoded, {"lists": {"include": ["LIST-1"], "exclude": []}})
 
-    def test_smart_list_create_defaults_multiple_include_lists_to_any_match(self):
+    def test_smart_list_create_rejects_multiple_include_lists_before_helper(self):
         db = self._smart_list_db()
         args = SimpleNamespace(
             name="List Union Filter",
@@ -523,19 +568,16 @@ class CliTests(unittest.TestCase):
             with (
                 mock.patch.object(self.remctl, "private_available", return_value=True),
                 mock.patch.object(self.remctl, "open_db", return_value=db),
-                mock.patch.object(
-                    self.remctl,
-                    "private_call",
-                    return_value={"status": "created", "id": "SMART-4"},
-                ) as private_call,
-                contextlib.redirect_stdout(io.StringIO()),
+                mock.patch.object(self.remctl, "private_call") as private_call,
+                contextlib.redirect_stderr(io.StringIO()) as stderr,
+                self.assertRaises(SystemExit),
             ):
                 self.remctl.cmd_smart_list_create(args)
         finally:
             db.close()
 
-        decoded = json.loads(base64.b64decode(private_call.call_args.args[0]["filterData"]).decode("utf-8"))
-        self.assertEqual(decoded, {"lists": {"include": ["LIST-1", "LIST-2"], "exclude": [], "operation": "or"}})
+        private_call.assert_not_called()
+        self.assertIn("only materializes one included-list", stderr.getvalue())
 
     def test_smart_list_edit_replaces_filter_for_custom_match(self):
         db = self._smart_list_db()
@@ -550,7 +592,7 @@ class CliTests(unittest.TestCase):
             tag_match="all",
             any_tag=False,
             untagged=False,
-            date="no-date",
+            date="today",
             date_today_include_past_due=False,
             date_on=None,
             date_before=None,
@@ -590,7 +632,7 @@ class CliTests(unittest.TestCase):
         payload = private_call.call_args.args[0]
         self.assertEqual(payload["action"], "update_smart_list")
         self.assertEqual(payload["smartListId"], "CUSTOM-1")
-        self.assertEqual(json.loads(base64.b64decode(payload["filterData"]).decode("utf-8")), {"date": {"noDate": ""}})
+        self.assertEqual(json.loads(base64.b64decode(payload["filterData"]).decode("utf-8")), {"date": {"today": False}})
         self.assertEqual(json.loads(stdout.getvalue())["status"], "updated")
 
     def test_smart_list_edit_can_update_appearance_without_filter(self):

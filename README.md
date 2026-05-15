@@ -58,7 +58,7 @@ Full setup details live in [docs/installation.md](docs/installation.md).
 | See what is due | `today`, `upcoming`, `overdue` |
 | Browse reminders | `lists`, `smart-lists`, `show`, `search`, `flagged`, `urgent`, `info`, `subtasks` |
 | Create and edit | `add`, `edit`, `done`, `undone`, `delete`, `flag`, `unflag` |
-| Organize | `list-symbols`, `list-create`, `smart-list-create`, `smart-list-edit`, `smart-list-delete`, `list-edit`, `list-rename`, `list-delete`, `sections`, `tags` |
+| Organize | `list-symbols`, `list-create`, `list-edit`, `list-pin`, `list-unpin`, `list-rename`, `list-delete`, `smart-list-create`, `smart-list-edit`, `smart-list-delete`, `sections`, `tags` |
 | Share data | `export`, `import`, `link`, `open`, `--json`, `--format table` |
 | Set up the Mac | `onboard`, `permissions`, `doctor`, `setup`, `completion` |
 
@@ -79,11 +79,12 @@ remctl list-create "Research" --color orange --private --symbol education3
 remctl list-create "Cold Ideas" --color cyan --private --emoji 🥶
 remctl smart-lists --json
 remctl smart-list-create "Flagged Review" --private --flagged
-remctl smart-list-create "Tagged or Today" --private --match any --tags remctl --date today
+remctl smart-list-create "Priority or Today" --private --match any --priority high,medium --date today
 remctl smart-list-create "Due Before June 1" --private --date-range 2026-05-16,2026-05-31 --color red --emoji 📆
-remctl smart-list-edit "Tagged or Today" --private --include-list Work --date no-date
+remctl smart-list-edit "Priority or Today" --private --priority high
 remctl smart-list-delete "Flagged Review" --private --force
 remctl list-edit Projects --private --color orange --symbol education3
+remctl list-pin "Weekly 514" --private
 remctl list-rename --list-id 123 --new-name "Project X Archive"
 remctl info 23880 --json
 ```
@@ -94,18 +95,19 @@ Due dates are atomic. If `-d/--due` is present and RemCTL cannot parse it, the c
 
 ## Smart Lists
 
-RemCTL can inspect built-in and custom smart lists with `smart-lists`. It can also create, edit, and delete custom smart lists with the official Reminders filters decoded from Reminders.app: tags, date, time, priority, flag, location, list inclusion/exclusion, and `--match all|any`.
+RemCTL can inspect built-in and custom smart lists with `smart-lists`. It can also create, edit, and delete custom smart lists with the Reminders.app filters that currently materialize reliably through the private ReminderKit write path: any tag, date, time, priority, flag, vehicle-connected, specific location, one included list, and `--match all|any` across those reliable families.
 
 ```bash
 remctl smart-lists --json
-remctl smart-list-create "Tagged or Today" --private --match any --tags remctl --date today
-remctl smart-list-create "Work and Projects" --private --include-list-id 135 --include-list-id 144
+remctl smart-list-create "Any Tag" --private --any-tag
+remctl smart-list-create "Projects Today" --private --include-list Projects --date today --date-today-include-past-due
+remctl smart-list-create "Priority or Today" --private --match any --priority high,medium --date today
 remctl smart-list-create "Due Before June 1" --private --date-range 2026-05-16,2026-05-31 --color red --emoji 📆
 remctl smart-list-edit --smart-list-id 170 --private --priority high
-remctl smart-list-delete "Tagged or Today" --private --force
+remctl smart-list-delete "Priority or Today" --private --force
 ```
 
-Smart-list writes are private ReminderKit writes and always require `--private`; RemCTL rejects unknown filter shapes before saving. Smart lists support the same private appearance flags as lists: `--color`, `--symbol`, and `--emoji`. Reminders supports only one `lists` filter family in a smart list. To filter by multiple lists, add multiple selected lists inside that one filter by repeating `--include-list`, `--exclude-list`, `--include-list-id`, or `--exclude-list-id`; repeated included lists default to union behavior (`--list-match any`) so smart lists can aggregate Work and Projects. Do not model multiple independent list-filter rows for one smart list. Use:
+Smart-list writes are private ReminderKit writes and always require `--private`; RemCTL rejects unknown filter shapes and known zero-filter shapes before saving. Smart lists support the same private appearance flags as lists: `--color`, `--symbol`, and `--emoji`. Reminders.app currently materializes only one included-list filter at a time. Do not create Work+Projects aggregate smart lists through a list filter; use one included list, or a different reliable filter family. Use:
 
 - [docs/commands.md#smart-lists](docs/commands.md#smart-lists) for command syntax and supported filters.
 - [docs/private-metadata.md#smart-list-examples](docs/private-metadata.md#smart-list-examples) for private API behavior, safety notes, and reverse-engineered filter storage details.
@@ -125,15 +127,17 @@ remctl edit 23880 --private --image ~/Desktop/mockup.png --flagged --urgent
 remctl edit 23880 --private --location-title "Apple Park" --latitude 37.3349 --longitude -122.0090 --radius 200
 remctl list-edit Projects --private --color '#FF8D28' --symbol education3
 remctl list-edit Projects --private --emoji 📌
+remctl list-pin "Weekly 514" --private
+remctl list-unpin --list-id 345 --private
 remctl smart-list-create "Flagged Review" --private --flagged
-remctl smart-list-create "Tagged or Today" --private --match any --tags remctl --date today
-remctl smart-list-create "Work No Date" --private --include-list Work --date no-date
+remctl smart-list-create "Priority or Today" --private --match any --priority high,medium --date today
+remctl smart-list-create "Projects Today" --private --include-list Projects --date today --date-today-include-past-due
 remctl smart-list-create "Near Home" --private --location-title Home --latitude 41.9 --longitude 12.5 --proximity enter
-remctl smart-list-edit "Tagged or Today" --private --priority high --color red --emoji 📆
+remctl smart-list-edit "Priority or Today" --private --priority high --color red --emoji 📆
 remctl smart-list-delete "Flagged Review" --private --force
 ```
 
-Supported private metadata includes synced web rich links, synced tags, section assignment and creation, rich subtasks with per-child notes/due/URL/tags/images, image attachments, real flag state, urgent state, location alarms, list and smart-list appearance metadata, and experimental custom smart-list creation/editing/deletion for the official Reminders filters: tags, date, time, priority, flag, location, lists, and all/any matching. `smart-lists` is read-only and safe; `smart-list-create`, `smart-list-edit`, and `smart-list-delete` require `--private`, and filter writes reject unknown shapes before writing. `list-create --color` uses public EventKit for normal color names; `--private` enables exact `#RRGGBB` colors plus official list symbols or emoji badges on both lists and smart lists. `list-symbols` prints the 71 official Reminders emblem names; its terminal glyph column is only an approximation. Use `list-symbols --preview` to generate and open a standalone HTML contact sheet rendered from the native RemindersUICore badge assets with interactive official color swatches, or `list-symbols --html path/to/file.html` to write it without opening. Reminders stores built-in icons as private emblem names such as `education3`; `--symbol` is limited to those official names because arbitrary SF Symbol strings fall back to the default icon in Reminders. Use `--emoji` for custom standard emoji badges. If a section name is duplicated in the same list, RemCTL picks the single non-empty match when there is one; otherwise use `--section-id`.
+Supported private metadata includes synced web rich links, synced tags, section assignment and creation, rich subtasks with per-child notes/due/URL/tags/images, image attachments, real flag state, urgent state, location alarms, list appearance and pin state, smart-list appearance metadata, and experimental custom smart-list creation/editing/deletion for verified materializing Reminders filters. `smart-lists` is read-only and safe; `smart-list-create`, `smart-list-edit`, and `smart-list-delete` require `--private`, and filter writes reject unknown or known non-materializing shapes before writing. `list-create --color` uses public EventKit for normal color names; `--private` enables exact `#RRGGBB` colors plus official list symbols or emoji badges on both lists and smart lists. `list-pin` and `list-unpin` also require `--private` and save through ReminderKit. `list-symbols` prints the 71 official Reminders emblem names; its terminal glyph column is only an approximation. Use `list-symbols --preview` to generate and open a standalone HTML contact sheet rendered from the native RemindersUICore badge assets with interactive official color swatches, or `list-symbols --html path/to/file.html` to write it without opening. Reminders stores built-in icons as private emblem names such as `education3`; `--symbol` is limited to those official names because arbitrary SF Symbol strings fall back to the default icon in Reminders. Use `--emoji` for custom standard emoji badges. If a section name is duplicated in the same list, RemCTL picks the single non-empty match when there is one; otherwise use `--section-id`.
 
 This is the major difference from ordinary EventKit-only Reminders CLIs, but it is still unsupported by Apple. Private-only flags fail before writing unless `--private` is present, generic file/PDF attachments are intentionally rejected, reminder metadata writes should be verified with `remctl info ID --json`, and smart-list writes should be verified with `remctl smart-lists --json` plus a UI/device check when sync behavior matters.
 
@@ -193,11 +197,11 @@ remctl doctor --for-agent --json
 
 For fast agent writes, call `remctl add ... --json`, use the returned `numericId` when present, then verify with `remctl info <numericId> --json`. `info` includes private rich-link URLs, so agents should not need raw SQLite checks for ordinary rich-link verification.
 
-For smart-list automation, use `smart-list-create`, `smart-list-edit`, and `smart-list-delete` with `--private`, prefer `--smart-list-id` when editing or deleting an existing custom smart list, and verify with `remctl smart-lists --json`. Reminders has one `lists` filter slot per smart list; repeat list flags only to add selections to that single slot. The smart-list command surface and examples are documented in [docs/commands.md#smart-lists](docs/commands.md#smart-lists); the private ReminderKit behavior and filter storage details are in [docs/private-metadata.md#smart-list-examples](docs/private-metadata.md#smart-list-examples).
+For smart-list automation, use `smart-list-create`, `smart-list-edit`, and `smart-list-delete` with `--private`, prefer `--smart-list-id` when editing or deleting an existing custom smart list, and verify with `remctl smart-lists --json`. Reminders.app currently materializes only one included-list filter at a time; RemCTL rejects repeated included lists and list exclusions before writing. The smart-list command surface and examples are documented in [docs/commands.md#smart-lists](docs/commands.md#smart-lists); the private ReminderKit behavior and filter storage details are in [docs/private-metadata.md#smart-list-examples](docs/private-metadata.md#smart-list-examples).
 
 Agents should pass deterministic due dates, ideally `YYYY-MM-DD HH:MM` after resolving the user's request in their timezone. If a due date is invalid, RemCTL exits before writing and emits a structured `invalid_due_date` JSON error on stderr with examples. Retry with a corrected date; do not create a reminder first and patch the due date afterward.
 
-List names are resolved conservatively: exact match first, then case-insensitive match, then a normalized fallback that can handle decorative prefixes such as emoji. If more than one list matches, RemCTL fails before writing and asks for `--list-id`. Commands that target lists use the same rule: pass a name, or use `--list-id` for exact agent-safe targeting on `show`, `add`, `link`, `export`, `list-edit`, `list-rename`, `list-delete`, and smart-list list filters.
+List names are resolved conservatively: exact match first, then case-insensitive match, then a normalized fallback that can handle decorative prefixes such as emoji. If more than one list matches, RemCTL fails before writing and asks for `--list-id`. Commands that target lists use the same rule: pass a name, or use `--list-id` for exact agent-safe targeting on `show`, `add`, `link`, `export`, `list-edit`, `list-pin`, `list-unpin`, `list-rename`, `list-delete`, and smart-list list filters.
 
 Do not mutate the Reminders SQLite database. Use RemCTL commands or EventKit.
 
