@@ -197,8 +197,8 @@ class CliTests(unittest.TestCase):
         )
 
     def test_list_pin_and_unpin_use_private_helper(self):
-        db = self._list_db(["🗓️ Weekly 514"])
-        pin_args = SimpleNamespace(name="Weekly 514", list_id=None, private=True, json=True)
+        db = self._list_db(["📌 Project X"])
+        pin_args = SimpleNamespace(name="Project X", list_id=None, private=True, json=True)
         unpin_args = SimpleNamespace(name=None, list_id=1, private=True, json=True)
         try:
             with (
@@ -228,7 +228,7 @@ class CliTests(unittest.TestCase):
             db.close()
 
     def test_list_pin_rejects_without_private_before_helper(self):
-        args = SimpleNamespace(name="Weekly 514", list_id=None, private=False, json=True)
+        args = SimpleNamespace(name="Project X", list_id=None, private=False, json=True)
         with (
             mock.patch.object(self.remctl, "private_available") as private_available,
             mock.patch.object(self.remctl, "private_call") as private_call,
@@ -1873,14 +1873,14 @@ class CliTests(unittest.TestCase):
             mock.patch.object(self.remctl, "q_attachments", return_value=[]),
             mock.patch.object(self.remctl, "q_hashtags", return_value=[]),
             mock.patch.object(self.remctl, "q_section_memberships", return_value={"ABC": "Playground"}),
-            mock.patch.object(self.remctl, "q_rich_link", return_value="https://github.com/viticci/shortcuts-playground-plugin"),
+            mock.patch.object(self.remctl, "q_rich_link", return_value="https://example.com/shortcuts-playground-plugin"),
             mock.patch.object(self.remctl, "q_subtask_count", return_value=0),
             contextlib.redirect_stdout(io.StringIO()) as stdout,
         ):
             self.remctl.cmd_info(SimpleNamespace(id=42, json=True))
 
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["url"], "https://github.com/viticci/shortcuts-playground-plugin")
+        self.assertEqual(payload["url"], "https://example.com/shortcuts-playground-plugin")
         self.assertEqual(payload["section"], "Playground")
 
     def test_reminder_id_uses_list_color_when_database_colors_are_available(self):

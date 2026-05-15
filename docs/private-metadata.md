@@ -27,7 +27,7 @@ Verified on macOS/iCloud sync:
 - urgent state: `edit ID --private --urgent`
 - location alarms: `edit ID --private --location-title "Apple Park" --latitude 37.3349 --longitude -122.0090`
 - list appearance metadata: `list-create "Projects" --private --symbol education3`, `list-edit Projects --private --color '#FF8D28' --emoji 📌`
-- list pin state: `list-pin "Weekly 514" --private`, `list-unpin --list-id 345 --private`
+- list pin state: `list-pin "Project X" --private`, `list-unpin --list-id 144 --private`
 - custom smart lists with verified materializing Reminders filters: `smart-list-create "Flagged Review" --private --flagged`, `smart-list-create "Priority or Today" --private --match any --priority high,medium --date today`, `smart-list-create "Projects Today" --private --include-list Projects --date today --date-today-include-past-due`, and exact custom smart-list cleanup via `smart-list-delete "Flagged Review" --private --force`
 
 Not exposed:
@@ -92,8 +92,8 @@ remctl list-edit Projects --private --color orange --symbol education3
 remctl list-edit --list-id 144 --private --symbol education3
 remctl list-edit Projects --private --emoji 📌
 remctl list-rename --list-id 123 --new-name "Project Archive"
-remctl list-pin "Weekly 514" --private
-remctl list-unpin --list-id 345 --private
+remctl list-pin "Project X" --private
+remctl list-unpin --list-id 144 --private
 ```
 
 List colors and badge emblems were reverse-engineered from `ZREMCDBASELIST`. `ZCOLOR` stores a `REMColor` keyed archive. `ZBADGEEMBLEM` stores either an emoji JSON string or a private Reminders emblem name. `list-symbols` prints the 71 official emblem names bundled in RemindersUICore; the terminal glyph column is approximate. Use `list-symbols --preview` or `list-symbols --html PATH` for a native-asset HTML contact sheet with interactive official color swatches. RemCTL writes those values through ReminderKit change items, not by editing the database.

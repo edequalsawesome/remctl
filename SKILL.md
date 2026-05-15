@@ -71,8 +71,8 @@ remctl list-create "Research" --color orange --private --symbol education3 --jso
 remctl list-create "Cold Ideas" --color cyan --private --emoji 🥶 --json
 remctl list-edit Projects --private --color '#FF8D28' --symbol education3 --json
 remctl list-edit --list-id 144 --private --emoji 📌 --json
-remctl list-pin "Weekly 514" --private --json
-remctl list-unpin --list-id 345 --private --json
+remctl list-pin "Project X" --private --json
+remctl list-unpin --list-id 144 --private --json
 remctl smart-list-create "Flagged Review" --private --flagged --json
 remctl smart-list-create "High Priority" --private --priority high --json
 remctl smart-list-create "Any Tag" --private --any-tag --json
@@ -116,7 +116,7 @@ remctl smart-list-edit --smart-list-id 170 --private --filter-json @filter.json 
 
 Supported materializing filter families are Any Tag (`--any-tag`), date (`--date any|today`, `--date-today-include-past-due`, `--date-on`, `--date-before`, `--date-after`, `--date-range START,END`), time (`morning`, `afternoon`, `evening`, `night`), priority (`high`, `medium`, `low`; comma-separated values mean Priority: Any), flag (`--flagged`), vehicle connected (`--vehicle connected`), specific location (`--location-title`, `--latitude`, `--longitude`, `--radius`, `--proximity enter|leave|arriving|leaving`), one included list (`--include-list` or `--include-list-id`), and top-level matching (`--match all|any`). `smart-list-create` and `smart-list-edit` also accept appearance flags `--color`, `--symbol`, and `--emoji`.
 
-Known non-materializing writes are rejected before saving: selected tag filters (`--tags`, including `--tag-match all|any`), untagged, no-date, relative date, no-time, vehicle disconnected, list exclusions, and more than one included list. Reminders.app currently materializes only one included-list filter at a time, so never try to aggregate Work and Projects with smart-list list filters.
+Known non-materializing writes are rejected before saving: selected tag filters (`--tags`, including `--tag-match all|any`), untagged, no-date, relative date, no-time, vehicle disconnected, list exclusions, and more than one included list. Reminders.app currently materializes only one included-list filter at a time, so never try to aggregate multiple lists with smart-list list filters.
 
 `--filter-json` is an advanced escape hatch for raw official filter JSON or `@path`; unknown or unsupported smart-list filter shapes are rejected before writing. `smart-list-edit` and `smart-list-delete` target custom smart lists by exact name or `--smart-list-id` and never match built-in smart lists.
 

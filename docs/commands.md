@@ -134,8 +134,8 @@ remctl list-create "Project X" --color orange --private --symbol education3
 remctl list-create "Cold Ideas" --color cyan --private --emoji 🥶
 remctl list-edit "Project X" --private --color '#FF8D28' --symbol education3
 remctl list-edit --list-id 144 --private --emoji 📌
-remctl list-pin "Weekly 514" --private
-remctl list-unpin --list-id 345 --private
+remctl list-pin "Project X" --private
+remctl list-unpin --list-id 144 --private
 remctl list-rename "Project X" "Project Y"
 remctl list-rename --list-id 144 --new-name "Project Y"
 remctl list-delete "Project Y" --force
@@ -146,7 +146,7 @@ remctl list-delete --list-id 144 --force
 
 List symbols, emoji badges, and pin state are private Reminders metadata and require `--private`. `list-edit` is the exact-target appearance editor; `list-pin` and `list-unpin` toggle the Reminders.app sidebar pin state. Use `--list-id` when duplicate or normalized names could match more than one list. With `--private`, `--color` also accepts `#RRGGBB`.
 
-`list-symbols` prints the 71 official Reminders emblem names bundled in RemindersUICore. The terminal preview column is an approximate Unicode fallback, not the native icon. Use `list-symbols --preview` to generate and open a standalone HTML contact sheet from the native badge assets with interactive official color swatches, or `list-symbols --html PATH` to write that contact sheet without opening it. Reminders stores picker icons as private emblem names, not public SF Symbol names. For example, the pencil/ruler icon shown by Reminders for Federico's Projects list is stored as `education3`. `--symbol` is intentionally restricted to official names because arbitrary SF Symbol strings can be accepted by ReminderKit but render as the default list icon in Reminders. Use `--emoji` for custom standard emoji badges.
+`list-symbols` prints the 71 official Reminders emblem names bundled in RemindersUICore. The terminal preview column is an approximate Unicode fallback, not the native icon. Use `list-symbols --preview` to generate and open a standalone HTML contact sheet from the native badge assets with interactive official color swatches, or `list-symbols --html PATH` to write that contact sheet without opening it. Reminders stores picker icons as private emblem names, not public SF Symbol names. For example, Reminders stores the pencil/ruler picker icon as `education3`. `--symbol` is intentionally restricted to official names because arbitrary SF Symbol strings can be accepted by ReminderKit but render as the default list icon in Reminders. Use `--emoji` for custom standard emoji badges.
 
 ## Smart Lists
 

@@ -84,7 +84,7 @@ remctl smart-list-create "Due Before June 1" --private --date-range 2026-05-16,2
 remctl smart-list-edit "Priority or Today" --private --priority high
 remctl smart-list-delete "Flagged Review" --private --force
 remctl list-edit Projects --private --color orange --symbol education3
-remctl list-pin "Weekly 514" --private
+remctl list-pin "Project X" --private
 remctl list-rename --list-id 123 --new-name "Project X Archive"
 remctl info 23880 --json
 ```
@@ -107,7 +107,7 @@ remctl smart-list-edit --smart-list-id 170 --private --priority high
 remctl smart-list-delete "Priority or Today" --private --force
 ```
 
-Smart-list writes are private ReminderKit writes and always require `--private`; RemCTL rejects unknown filter shapes and known zero-filter shapes before saving. Smart lists support the same private appearance flags as lists: `--color`, `--symbol`, and `--emoji`. Reminders.app currently materializes only one included-list filter at a time. Do not create Work+Projects aggregate smart lists through a list filter; use one included list, or a different reliable filter family. Use:
+Smart-list writes are private ReminderKit writes and always require `--private`; RemCTL rejects unknown filter shapes and known zero-filter shapes before saving. Smart lists support the same private appearance flags as lists: `--color`, `--symbol`, and `--emoji`. Reminders.app currently materializes only one included-list filter at a time. Do not create multi-list aggregate smart lists through a list filter; use one included list, or a different reliable filter family. Use:
 
 - [docs/commands.md#smart-lists](docs/commands.md#smart-lists) for command syntax and supported filters.
 - [docs/private-metadata.md#smart-list-examples](docs/private-metadata.md#smart-list-examples) for private API behavior, safety notes, and reverse-engineered filter storage details.
@@ -127,8 +127,8 @@ remctl edit 23880 --private --image ~/Desktop/mockup.png --flagged --urgent
 remctl edit 23880 --private --location-title "Apple Park" --latitude 37.3349 --longitude -122.0090 --radius 200
 remctl list-edit Projects --private --color '#FF8D28' --symbol education3
 remctl list-edit Projects --private --emoji 📌
-remctl list-pin "Weekly 514" --private
-remctl list-unpin --list-id 345 --private
+remctl list-pin "Project X" --private
+remctl list-unpin --list-id 144 --private
 remctl smart-list-create "Flagged Review" --private --flagged
 remctl smart-list-create "Priority or Today" --private --match any --priority high,medium --date today
 remctl smart-list-create "Projects Today" --private --include-list Projects --date today --date-today-include-past-due
