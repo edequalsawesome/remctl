@@ -2,7 +2,7 @@
 
 RemCTL's normal write path is EventKit via `remctl-bridge`. Private metadata writes are different: they use Apple's private ReminderKit framework through `remctl-private`.
 
-This mode is unsupported by Apple, optional, and explicit. Use `--private` on `add`, `edit`, or private list appearance commands.
+This mode is unsupported by Apple, optional, and explicit. Use `--private` on `add`, `edit`, private list appearance commands, or custom smart-list creation/editing/deletion.
 
 RemCTL still does not write directly to SQLite.
 
@@ -27,10 +27,12 @@ Verified on macOS/iCloud sync:
 - urgent state: `edit ID --private --urgent`
 - location alarms: `edit ID --private --location-title "Apple Park" --latitude 37.3349 --longitude -122.0090`
 - list appearance metadata: `list-create "Projects" --private --symbol education3`, `list-edit Projects --private --color '#FF8D28' --emoji 📌`
+- custom smart lists with official Reminders filters: `smart-list-create "Flagged Review" --private --flagged`, `smart-list-create "Tagged or Today" --private --match any --tags remctl --date today`, `smart-list-edit "Tagged or Today" --private --priority high`, and exact custom smart-list cleanup via `smart-list-delete "Flagged Review" --private --force`
 
 Not exposed:
 
 - generic file/PDF attachments. They are rejected because Reminders does not reliably display them.
+- guessed or undocumented smart-list filter keys beyond the official Reminders.app samples decoded by `smart-lists`.
 - raw SQLite writes. Earlier experiments proved direct row insertion can stay local-only and fail to sync.
 
 ## Create Examples
@@ -88,6 +90,7 @@ remctl list-create "Focus" --private --color '#34C759' --emoji 🎯
 remctl list-edit Projects --private --color orange --symbol education3
 remctl list-edit --list-id 144 --private --symbol education3
 remctl list-edit Projects --private --emoji 📌
+remctl list-rename --list-id 123 --new-name "Project Archive"
 ```
 
 List colors and badge emblems were reverse-engineered from `ZREMCDBASELIST`. `ZCOLOR` stores a `REMColor` keyed archive. `ZBADGEEMBLEM` stores either an emoji JSON string or a private Reminders emblem name. `list-symbols` prints the 71 official emblem names bundled in RemindersUICore; the terminal glyph column is approximate. Use `list-symbols --preview` or `list-symbols --html PATH` for a native-asset HTML contact sheet with interactive official color swatches. RemCTL writes those values through ReminderKit change items, not by editing the database.
@@ -99,6 +102,30 @@ Important limits:
 - `--symbol` writes one of the official Reminders emblem names printed by `list-symbols`. Reminders' own picker uses private names such as `education3`; arbitrary SF Symbol strings are rejected because they fall back to the default icon in Reminders.
 - `--emoji` writes a Reminders emoji badge for standard emoji such as `🥶` or `📌`.
 - `list-edit` resolves by exact list name, then safe normalized matching; if a duplicate match is ambiguous, use `--list-id`.
+
+## Smart List Examples
+
+```bash
+remctl smart-lists
+remctl smart-lists --json
+remctl smart-list-create "Flagged Review" --private --flagged
+remctl smart-list-create "High Priority" --private --priority high
+remctl smart-list-create "Tagged or Today" --private --match any --tags remctl --date today
+remctl smart-list-create "Work No Date" --private --include-list Work --date no-date
+remctl smart-list-create "Projects No Date" --private --include-list-id 144 --date no-date
+remctl smart-list-edit "Tagged or Today" --private --priority high
+remctl smart-list-delete "Flagged Review" --private --force
+```
+
+`smart-lists` is read-only and safe. It reads `REMCDSmartList` rows from `ZREMCDBASELIST`, including built-in smart lists, and decodes known `ZFILTERDATA` payloads.
+
+`smart-list-create` writes through `REMSaveRequest.addCustomSmartListWithName` and saves through ReminderKit. It requires `--private`, verifies that the active account supports custom smart lists, rejects duplicate exact custom names, and accepts the official Reminders filters decoded from Reminders.app: tags, date, time, priority, flag, location, lists, and all/any matching. It does not write SQLite.
+
+`smart-list-edit` fetches an existing custom smart list by exact name or numeric `--smart-list-id`, replaces its `filterData` through ReminderKit, and requires `--private`. It never edits built-in smart lists.
+
+`smart-list-delete` deletes through ReminderKit and requires `--private`. It only targets custom smart lists by exact name or numeric `--smart-list-id`; built-in smart lists are never matched.
+
+Developer note: on the verified macOS 26 store, `ZFILTERDATA` for custom smart lists is UTF-8 JSON bytes. The decoder also accepts older research samples that wrap the same JSON in an `NSKeyedArchiver` object whose root class is `ReminderKitInternal.REMCustomSmartListFilterDescriptor`, keyed field is `data`, and payload is UTF-8 JSON. Known write keys are `operation`, `hashtags`, `date`, `time`, `priorities`, `flagged`, `location`, and `lists`.
 
 ## Guardrails
 

@@ -26,6 +26,14 @@ from remctl_serialization import (
     serialize_reminder,
     serialize_reminders,
 )
+from remctl_smart_lists import (
+    CUSTOM_SMART_LIST_TYPE,
+    SmartListFilterError,
+    build_supported_filter_payload,
+    decode_smart_list_filter_blob,
+    encode_supported_filter_payload,
+    normalize_match_operation,
+)
 
 try:
     import parsedatetime as _pdt
@@ -139,7 +147,7 @@ def show_splash():
     print(C.dim("    info <id>   Full detail view             done <id>   Complete reminder"))
     print(C.dim("    upcoming    Next 7 days                  flagged     Flagged reminders"))
     print(C.dim("    urgent      Urgent reminders             stats       Statistics"))
-    print(C.dim("    lists       All lists"))
+    print(C.dim("    lists       All lists                    smart-lists Inspect smart lists"))
     print()
     print(C.dim("  remctl --help for full command reference"))
     print()
@@ -403,9 +411,38 @@ def color_by_list(text, list_name=None, db=None):
 
 def q_lists(db):
     return db.execute(
-        "SELECT Z_PK, ZNAME FROM ZREMCDBASELIST "
+        "SELECT Z_PK, ZNAME, ZCKIDENTIFIER FROM ZREMCDBASELIST "
         "WHERE ZMARKEDFORDELETION = 0 AND Z_ENT = 3 AND ZNAME IS NOT NULL AND ZNAME != '' "
         "ORDER BY ZNAME"
+    ).fetchall()
+
+def q_smart_lists(db):
+    return db.execute(
+        "SELECT Z_PK, ZNAME, ZCKIDENTIFIER, ZSMARTLISTTYPE, ZFILTERDATA FROM ZREMCDBASELIST "
+        "WHERE ZMARKEDFORDELETION = 0 AND (Z_ENT = 4 OR ZSMARTLISTTYPE IS NOT NULL) "
+        "ORDER BY COALESCE(ZNAME, ''), Z_PK"
+    ).fetchall()
+
+def q_custom_smart_list_exact_name_count(db, name):
+    row = db.execute(
+        "SELECT COUNT(*) AS count FROM ZREMCDBASELIST "
+        "WHERE ZMARKEDFORDELETION = 0 AND ZSMARTLISTTYPE = ? AND ZNAME = ?",
+        (CUSTOM_SMART_LIST_TYPE, name),
+    ).fetchone()
+    return row["count"] if row else 0
+
+def q_custom_smart_list_delete_matches(db, name=None, smart_list_id=None):
+    if smart_list_id is not None:
+        return db.execute(
+            "SELECT Z_PK, ZNAME, ZCKIDENTIFIER, ZSMARTLISTTYPE, ZFILTERDATA FROM ZREMCDBASELIST "
+            "WHERE ZMARKEDFORDELETION = 0 AND ZSMARTLISTTYPE = ? AND Z_PK = ?",
+            (CUSTOM_SMART_LIST_TYPE, smart_list_id),
+        ).fetchall()
+    return db.execute(
+        "SELECT Z_PK, ZNAME, ZCKIDENTIFIER, ZSMARTLISTTYPE, ZFILTERDATA FROM ZREMCDBASELIST "
+        "WHERE ZMARKEDFORDELETION = 0 AND ZSMARTLISTTYPE = ? AND ZNAME = ? "
+        "ORDER BY Z_PK",
+        (CUSTOM_SMART_LIST_TYPE, name),
     ).fetchall()
 
 def _row_value(row, key):
@@ -416,6 +453,8 @@ def _row_value(row, key):
             return row[0]
         if key == "ZNAME":
             return row[1]
+        if key == "ZCKIDENTIFIER":
+            return row[2] if len(row) > 2 else None
         raise
 
 def normalize_list_lookup_name(name):
@@ -440,6 +479,7 @@ def list_ref_payload(row, *, requested=None, method="exact"):
     return {
         "id": _row_value(row, "Z_PK"),
         "title": _row_value(row, "ZNAME"),
+        "objectUUID": _row_value(row, "ZCKIDENTIFIER"),
         "requested": requested,
         "method": method,
     }
@@ -447,7 +487,7 @@ def list_ref_payload(row, *, requested=None, method="exact"):
 def resolve_list_ref(db, name=None, list_id=None):
     if list_id is not None:
         row = db.execute(
-            "SELECT Z_PK, ZNAME FROM ZREMCDBASELIST "
+            "SELECT Z_PK, ZNAME, ZCKIDENTIFIER FROM ZREMCDBASELIST "
             "WHERE Z_PK = ? AND ZMARKEDFORDELETION = 0 AND Z_ENT = 3 "
             "AND ZNAME IS NOT NULL AND ZNAME != ''",
             (list_id,),
@@ -508,6 +548,15 @@ def resolve_list_or_die(db, name=None, list_id=None):
     requested = f"id {list_id}" if list_id is not None else name
     _print_list_resolution_error(requested, result)
     sys.exit(1)
+
+def resolve_required_list_target_or_die(db, *, name=None, list_id=None):
+    if name and list_id is not None:
+        print("Error: pass either a list name or --list-id, not both.", file=sys.stderr)
+        sys.exit(1)
+    if not name and list_id is None:
+        print("Error: pass a list name or --list-id.", file=sys.stderr)
+        sys.exit(1)
+    return resolve_list_or_die(db, name=name, list_id=list_id)
 
 def q_list_pk(db, name):
     result = resolve_list_ref(db, name=name)
@@ -2685,6 +2734,297 @@ def parse_alarm(spec):
 
 # ── Commands ─────────────────────────────────────────────────────────────────
 
+SMART_LIST_TYPE_NAMES = {
+    "com.apple.reminders.smartlist.all": "All",
+    "com.apple.reminders.smartlist.today": "Today",
+    "com.apple.reminders.smartlist.scheduled": "Scheduled",
+    "com.apple.reminders.smartlist.flagged": "Flagged",
+    "com.apple.reminders.smartlist.completed": "Completed",
+    "com.apple.reminders.smartlist.assigned": "Assigned",
+    "com.apple.reminders.smartlist.urgent": "Urgent",
+}
+
+def smart_list_display_name(row):
+    name = row["ZNAME"]
+    if name:
+        return name
+    smart_type = row["ZSMARTLISTTYPE"] or ""
+    return SMART_LIST_TYPE_NAMES.get(smart_type, smart_type.rsplit(".", 1)[-1] or "(unnamed)")
+
+def smart_list_to_dict(row):
+    filter_data = row["ZFILTERDATA"]
+    decoded = decode_smart_list_filter_blob(filter_data)
+    payload = {
+        "id": row["Z_PK"],
+        "objectUUID": row["ZCKIDENTIFIER"],
+        "name": smart_list_display_name(row),
+        "kind": "custom" if row["ZSMARTLISTTYPE"] == CUSTOM_SMART_LIST_TYPE else "built-in",
+        "smartListType": row["ZSMARTLISTTYPE"],
+        "filterLength": len(filter_data) if filter_data else 0,
+    }
+    if decoded["summary"] is not None:
+        payload["filter"] = decoded["summary"]
+    if decoded["encoding"]:
+        payload["filterEncoding"] = decoded["encoding"]
+        payload["filterJSON"] = decoded["payload"]
+    elif decoded["error"]:
+        payload["filterError"] = decoded["error"]
+    return payload
+
+def cmd_smart_lists(a):
+    db = open_db()
+    rows = q_smart_lists(db)
+    payload = [smart_list_to_dict(row) for row in rows]
+    if a.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    if not payload:
+        print("No smart lists")
+        return
+    print(C.bold("Smart Lists:"))
+    for item in payload:
+        kind = item["kind"]
+        smart_type = item["smartListType"] or "(none)"
+        length = item["filterLength"]
+        summary = item.get("filter", {})
+        desc = summary.get("description") or "No filter data"
+        if summary and not summary.get("supported", True):
+            desc = f"{desc}: {', '.join(summary.get('keys', [])) or 'unknown keys'}"
+        id_details = C.dim(f"(id: {item['id']}, {kind})")
+        print(f"  {item['name']} {id_details}")
+        print(f"    {smart_type} · filter bytes: {length} · {desc}")
+    print(f"\n{len(payload)} smart list{'s' if len(payload) != 1 else ''}")
+
+def _smart_list_csv_values(*values):
+    result = []
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, list):
+            for item in value:
+                result.extend(split_csv(item))
+        else:
+            result.extend(split_csv(value))
+    return result
+
+def _load_smart_list_filter_json(value):
+    if not value:
+        return None
+    source = str(value)
+    if source.startswith("@"):
+        try:
+            source = Path(source[1:]).read_text()
+        except OSError as exc:
+            raise SmartListFilterError(f"Could not read filter JSON file: {exc}") from exc
+    try:
+        payload = json.loads(source)
+    except json.JSONDecodeError as exc:
+        raise SmartListFilterError(f"Invalid filter JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise SmartListFilterError("Smart list filter JSON must be an object.")
+    return payload
+
+def _resolve_smart_list_filter_list_ids(db, names, ids):
+    resolved = []
+    for list_id in ids or []:
+        ref = resolve_list_or_die(db, list_id=list_id)
+        if not ref.get("objectUUID"):
+            print(f"Error: list id {list_id} has no object UUID.", file=sys.stderr)
+            sys.exit(1)
+        resolved.append(ref["objectUUID"])
+    for name in names or []:
+        ref = resolve_list_or_die(db, name=name)
+        if not ref.get("objectUUID"):
+            print(f"Error: list {name!r} has no object UUID.", file=sys.stderr)
+            sys.exit(1)
+        resolved.append(ref["objectUUID"])
+    return resolved
+
+def smart_list_filter_payload_from_args(a, db):
+    raw_payload = _load_smart_list_filter_json(getattr(a, "filter_json", None))
+    if raw_payload is not None:
+        return raw_payload
+    location = None
+    if getattr(a, "location_title", None) or getattr(a, "latitude", None) is not None or getattr(a, "longitude", None) is not None:
+        location = {
+            "title": a.location_title,
+            "latitude": a.latitude,
+            "longitude": a.longitude,
+            "radius": getattr(a, "radius", 100.0),
+            "proximity": getattr(a, "proximity", "enter"),
+        }
+    return build_supported_filter_payload(
+        match=getattr(a, "match", "all"),
+        flagged=bool(getattr(a, "flagged", False)),
+        priorities=_smart_list_csv_values(getattr(a, "priority", None)),
+        tags=_smart_list_csv_values(getattr(a, "tags", None)),
+        tag_match=getattr(a, "tag_match", "all"),
+        any_tag=bool(getattr(a, "any_tag", False)),
+        untagged=bool(getattr(a, "untagged", False)),
+        date_any=getattr(a, "date", None) == "any",
+        date_today=getattr(a, "date", None) == "today",
+        date_today_include_past_due=bool(getattr(a, "date_today_include_past_due", False)),
+        date_no_date=getattr(a, "date", None) == "no-date",
+        date_on=getattr(a, "date_on", None),
+        date_before=getattr(a, "date_before", None),
+        date_after=getattr(a, "date_after", None),
+        date_range=getattr(a, "date_range", None),
+        date_relative=getattr(a, "date_relative", None),
+        time_filter=getattr(a, "time", None),
+        include_list_ids=_resolve_smart_list_filter_list_ids(
+            db,
+            _smart_list_csv_values(getattr(a, "include_list", None)),
+            getattr(a, "include_list_id", None),
+        ),
+        exclude_list_ids=_resolve_smart_list_filter_list_ids(
+            db,
+            _smart_list_csv_values(getattr(a, "exclude_list", None)),
+            getattr(a, "exclude_list_id", None),
+        ),
+        vehicle=getattr(a, "vehicle", None),
+        location=location,
+    )
+
+def cmd_smart_list_create(a):
+    if not private_metadata_enabled(a):
+        print("Error: smart-list-create requires --private.", file=sys.stderr)
+        sys.exit(1)
+    db = open_db()
+    try:
+        filter_payload = smart_list_filter_payload_from_args(a, db)
+        filter_data = encode_supported_filter_payload(filter_payload)
+    except SmartListFilterError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    require_private_metadata(a)
+    if q_custom_smart_list_exact_name_count(db, a.name):
+        print(
+            f"Error: smart list already exists: {a.name}. Choose a unique test name.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    result = private_call({
+        "action": "create_smart_list",
+        "name": a.name,
+        "filterData": base64.b64encode(filter_data).decode("ascii"),
+    })
+    if not result or result.get("status") != "created":
+        message = result.get("message") if isinstance(result, dict) else "private helper failed"
+        print(f"Error: Failed to create smart list '{a.name}': {message}", file=sys.stderr)
+        sys.exit(1)
+    if a.json:
+        print(json.dumps({
+            "status": "created",
+            "name": a.name,
+            "filter": decode_smart_list_filter_blob(filter_data)["summary"],
+            "private": result,
+        }, ensure_ascii=False))
+    else:
+        print(f"Created smart list: {a.name}")
+        summary = decode_smart_list_filter_blob(filter_data)["summary"]
+        if summary:
+            print(f"Filter: {summary['description']}")
+
+def cmd_smart_list_edit(a):
+    if not private_metadata_enabled(a):
+        print("Error: smart-list-edit requires --private.", file=sys.stderr)
+        sys.exit(1)
+    if not a.name and a.smart_list_id is None:
+        print("Error: provide a smart list name or --smart-list-id.", file=sys.stderr)
+        sys.exit(1)
+    require_private_metadata(a)
+    db = open_db()
+    matches = q_custom_smart_list_delete_matches(db, name=a.name, smart_list_id=a.smart_list_id)
+    if not matches:
+        target = f"id {a.smart_list_id}" if a.smart_list_id is not None else a.name
+        print(f"Error: custom smart list not found: {target}", file=sys.stderr)
+        sys.exit(1)
+    if len(matches) > 1:
+        print("Error: multiple custom smart lists match. Use --smart-list-id.", file=sys.stderr)
+        for row in matches:
+            print(f"  {row['Z_PK']}: {smart_list_display_name(row)}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        filter_payload = smart_list_filter_payload_from_args(a, db)
+        filter_data = encode_supported_filter_payload(filter_payload)
+    except SmartListFilterError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    row = matches[0]
+    result = private_call({
+        "action": "update_smart_list",
+        "smartListId": row["ZCKIDENTIFIER"],
+        "filterData": base64.b64encode(filter_data).decode("ascii"),
+    })
+    if not result or result.get("status") != "updated":
+        message = result.get("message") if isinstance(result, dict) else "private helper failed"
+        print(f"Error: Failed to edit smart list '{smart_list_display_name(row)}': {message}", file=sys.stderr)
+        sys.exit(1)
+    if a.json:
+        print(json.dumps({
+            "status": "updated",
+            "id": row["Z_PK"],
+            "objectUUID": row["ZCKIDENTIFIER"],
+            "name": smart_list_display_name(row),
+            "filter": decode_smart_list_filter_blob(filter_data)["summary"],
+            "private": result,
+        }, ensure_ascii=False))
+    else:
+        print(f"Updated smart list: {smart_list_display_name(row)}")
+        summary = decode_smart_list_filter_blob(filter_data)["summary"]
+        if summary:
+            print(f"Filter: {summary['description']}")
+
+def cmd_smart_list_delete(a):
+    if not private_metadata_enabled(a):
+        print("Error: smart-list-delete requires --private.", file=sys.stderr)
+        sys.exit(1)
+    if not a.name and a.smart_list_id is None:
+        print("Error: provide a smart list name or --smart-list-id.", file=sys.stderr)
+        sys.exit(1)
+    require_private_metadata(a)
+    db = open_db()
+    matches = q_custom_smart_list_delete_matches(db, name=a.name, smart_list_id=a.smart_list_id)
+    if not matches:
+        target = f"id {a.smart_list_id}" if a.smart_list_id is not None else a.name
+        print(f"Error: custom smart list not found: {target}", file=sys.stderr)
+        sys.exit(1)
+    if len(matches) > 1:
+        print("Error: multiple custom smart lists match. Use --smart-list-id.", file=sys.stderr)
+        for row in matches:
+            print(f"  {row['Z_PK']}: {smart_list_display_name(row)}", file=sys.stderr)
+        sys.exit(1)
+
+    row = matches[0]
+    name = smart_list_display_name(row)
+    if not a.force:
+        ans = input(f"Delete custom smart list '{name}'? [y/N] ")
+        if ans.strip().lower() not in ("y", "yes"):
+            print("Aborted.")
+            return
+
+    result = private_call({
+        "action": "delete_smart_list",
+        "smartListId": row["ZCKIDENTIFIER"],
+    })
+    if not result or result.get("status") != "deleted":
+        message = result.get("message") if isinstance(result, dict) else "private helper failed"
+        print(f"Error: Failed to delete smart list '{name}': {message}", file=sys.stderr)
+        sys.exit(1)
+    if a.json:
+        print(json.dumps({
+            "status": "deleted",
+            "id": row["Z_PK"],
+            "objectUUID": row["ZCKIDENTIFIER"],
+            "name": name,
+            "private": result,
+        }, ensure_ascii=False))
+    else:
+        print(f"Deleted smart list: {name}")
+
 def cmd_lists(a):
     db = open_db()
     rows = q_lists(db)
@@ -3045,7 +3385,11 @@ def cmd_list_symbols(a):
 
 def cmd_show(a):
     db = open_db()
-    list_ref = resolve_list_or_die(db, name=a.list)
+    list_ref = resolve_required_list_target_or_die(
+        db,
+        name=getattr(a, "list", None),
+        list_id=getattr(a, "list_id", None),
+    )
     pk = list_ref["id"]
     list_name = list_ref["title"]
     items = q_reminders(db, list_pk=pk, completed=a.completed, top_level=True)
@@ -3753,8 +4097,13 @@ def cmd_stats(a):
 def cmd_link(a):
     db = open_db()
     ids = a.ids
-    if a.list:
-        list_ref = resolve_list_or_die(db, name=a.list)
+    list_name = getattr(a, "list", None)
+    list_id = getattr(a, "list_id", None)
+    if ids and (list_name or list_id is not None):
+        print("Error: pass reminder IDs or a list target, not both.", file=sys.stderr)
+        sys.exit(1)
+    if list_name or list_id is not None:
+        list_ref = resolve_required_list_target_or_die(db, name=list_name, list_id=list_id)
         pk = list_ref["id"]
         items = q_reminders(db, list_pk=pk, completed=a.completed, top_level=True)
         ids = [i["Z_PK"] for i in items]
@@ -4003,15 +4352,13 @@ def cmd_list_edit(a):
     if not (getattr(a, "new_name", None) or getattr(a, "color", None) or getattr(a, "symbol", None) or getattr(a, "emoji", None)):
         print("Error: pass at least one of --new-name, --color, --symbol, or --emoji.", file=sys.stderr)
         sys.exit(1)
-    if getattr(a, "name", None) and getattr(a, "list_id", None) is not None:
-        print("Error: pass either a list name or --list-id, not both.", file=sys.stderr)
-        sys.exit(1)
-    if not getattr(a, "name", None) and getattr(a, "list_id", None) is None:
-        print("Error: pass a list name or --list-id.", file=sys.stderr)
-        sys.exit(1)
     require_private_metadata(a)
     db = open_db()
-    list_ref = resolve_list_or_die(db, name=getattr(a, "name", None), list_id=getattr(a, "list_id", None))
+    list_ref = resolve_required_list_target_or_die(
+        db,
+        name=getattr(a, "name", None),
+        list_id=getattr(a, "list_id", None),
+    )
     result = apply_private_list_appearance(db, list_ref["id"], a)
     output_name = getattr(a, "new_name", None) or list_ref["title"]
     if a.json:
@@ -4025,46 +4372,69 @@ def cmd_list_edit(a):
         print(f"Updated list: {output_name}")
 
 def cmd_list_rename(a):
+    new_name = getattr(a, "new_name_option", None) or getattr(a, "new_name", None)
+    if getattr(a, "new_name_option", None) and getattr(a, "new_name", None):
+        print("Error: pass the new list name as an argument or --new-name, not both.", file=sys.stderr)
+        sys.exit(1)
+    if not new_name:
+        print("Error: pass a new list name.", file=sys.stderr)
+        sys.exit(1)
+    db = open_db()
+    list_ref = resolve_required_list_target_or_die(
+        db,
+        name=getattr(a, "name", None),
+        list_id=getattr(a, "list_id", None),
+    )
     if not bridge_available():
         print("Error: remctl-bridge required for list management", file=sys.stderr)
         sys.exit(1)
-    data = {"action": "rename_list", "title": a.name, "newTitle": a.new_name}
+    target_name = list_ref["title"]
+    data = {"action": "rename_list", "title": target_name, "newTitle": new_name}
     result = bridge_call(data)
     if result and result.get("status") == "renamed":
         if a.json:
-            print(json.dumps({"status": "renamed", "old_name": a.name, "new_name": a.new_name}))
+            print(json.dumps({"status": "renamed", "id": list_ref["id"], "old_name": target_name, "new_name": new_name}))
         else:
-            print(f"Renamed: {a.name} -> {a.new_name}")
+            print(f"Renamed: {target_name} -> {new_name}")
     else:
         message = result.get("message") if isinstance(result, dict) else None
-        print(f"Error: Failed to rename list '{a.name}'" + (f": {message}" if message else ""), file=sys.stderr)
+        print(f"Error: Failed to rename list '{target_name}'" + (f": {message}" if message else ""), file=sys.stderr)
         sys.exit(1)
 
 def cmd_list_delete(a):
+    db = open_db()
+    list_ref = resolve_required_list_target_or_die(
+        db,
+        name=getattr(a, "name", None),
+        list_id=getattr(a, "list_id", None),
+    )
     if not bridge_available():
         print("Error: remctl-bridge required for list management", file=sys.stderr)
         sys.exit(1)
+    target_name = list_ref["title"]
     if not a.force:
-        ans = input(f"Delete list '{a.name}'? This cannot be undone. [y/N] ")
+        ans = input(f"Delete list '{target_name}'? This cannot be undone. [y/N] ")
         if not ans.lower().startswith("y"):
             print("Cancelled.")
             return
-    data = {"action": "delete_list", "title": a.name}
+    data = {"action": "delete_list", "title": target_name}
     result = bridge_call(data)
     if result and result.get("status") == "deleted":
         if a.json:
-            print(json.dumps({"status": "deleted", "name": a.name}))
+            print(json.dumps({"status": "deleted", "id": list_ref["id"], "name": target_name}))
         else:
-            print(f"Deleted list: {a.name}")
+            print(f"Deleted list: {target_name}")
     else:
         message = result.get("message") if isinstance(result, dict) else None
-        print(f"Error: Failed to delete list '{a.name}'" + (f": {message}" if message else ""), file=sys.stderr)
+        print(f"Error: Failed to delete list '{target_name}'" + (f": {message}" if message else ""), file=sys.stderr)
         sys.exit(1)
 
 def cmd_export(a):
     db = open_db()
-    if a.list:
-        list_ref = resolve_list_or_die(db, name=a.list)
+    list_name = getattr(a, "list", None)
+    list_id = getattr(a, "list_id", None)
+    if list_name or list_id is not None:
+        list_ref = resolve_required_list_target_or_die(db, name=list_name, list_id=list_id)
         pk = list_ref["id"]
         items = q_reminders(db, list_pk=pk, completed=True, top_level=False, limit=10000)
     else:
@@ -4144,12 +4514,41 @@ def cmd_import(a):
     else:
         print(f"\nImported {created}/{len(data)} reminders ({errors} errors)")
 
+def add_smart_list_filter_arguments(parser):
+    parser.add_argument("--match", choices=["all", "any"], default="all", help="Match all or any supplied filters")
+    parser.add_argument("--filter-json", help="Advanced: raw official smart-list filter JSON or @path")
+    parser.add_argument("--flagged", action="store_true", help="Filter to flagged reminders")
+    parser.add_argument("--priority", help="Priority filter: high, medium, low, or comma-separated values")
+    parser.add_argument("--tags", help="Tag filter, comma-separated; use --tag-match for all/any selected")
+    parser.add_argument("--tag-match", choices=["all", "any"], default="all", help="How --tags should match")
+    parser.add_argument("--any-tag", action="store_true", help="Filter to reminders with any tag")
+    parser.add_argument("--untagged", action="store_true", help="Filter to reminders with no tags")
+    parser.add_argument("--date", choices=["any", "today", "no-date"], help="Date filter")
+    parser.add_argument("--date-today-include-past-due", action="store_true", help="Include past due reminders with --date today")
+    parser.add_argument("--date-on", help="Date filter: on YYYY-MM-DD")
+    parser.add_argument("--date-before", help="Date filter: before YYYY-MM-DD")
+    parser.add_argument("--date-after", help="Date filter: after YYYY-MM-DD")
+    parser.add_argument("--date-range", help="Date filter range: START,END")
+    parser.add_argument("--date-relative", help="Relative date range: in-next:1:hour[:past-due]")
+    parser.add_argument("--time", choices=["morning", "afternoon", "evening", "night", "no-time"], help="Time-of-day filter")
+    parser.add_argument("--include-list", action="append", help="Include reminders from list name (repeatable or comma-separated)")
+    parser.add_argument("--exclude-list", action="append", help="Exclude reminders from list name (repeatable or comma-separated)")
+    parser.add_argument("--include-list-id", action="append", type=int, help="Include reminders from numeric list ID")
+    parser.add_argument("--exclude-list-id", action="append", type=int, help="Exclude reminders from numeric list ID")
+    parser.add_argument("--vehicle", choices=["connected", "disconnected"], help="Location vehicle filter")
+    parser.add_argument("--location-title", help="Specific location title")
+    parser.add_argument("--latitude", type=float, help="Specific location latitude")
+    parser.add_argument("--longitude", type=float, help="Specific location longitude")
+    parser.add_argument("--radius", type=float, default=100.0, help="Specific location radius in meters")
+    parser.add_argument("--proximity", choices=["enter", "leave", "arriving", "leaving"], default="enter", help="Specific location proximity")
+
 # ── Shell Completions ────────────────────────────────────────────────────────
 
 ZSH_COMPLETION = '''#compdef remctl
 _remctl() {
     local -a commands=(
         'lists:List all iCloud reminder lists'
+        'smart-lists:Inspect Reminders smart lists'
         'show:Show reminders in a list'
         'add:Add a reminder'
         'done:Complete a reminder'
@@ -4175,6 +4574,9 @@ _remctl() {
         'import:Import reminders'
         'list-symbols:List official Reminders list symbols'
         'list-create:Create a new list'
+        'smart-list-create:Create a private custom smart list'
+        'smart-list-edit:Edit a private custom smart list'
+        'smart-list-delete:Delete a private custom smart list'
         'list-edit:Edit private list appearance'
         'list-rename:Rename a list'
         'list-delete:Delete a list'
@@ -4185,6 +4587,14 @@ _remctl() {
         'completion:Generate shell completions'
     )
     case "$words[2]" in
+        show)
+            _arguments \
+                '--list-id[Show list by stable numeric ID]:id:' \
+                '--completed[Include completed reminders]' \
+                '(-v --verbose)'{-v,--verbose}'[Verbose output]' \
+                '--json[JSON output]'
+            return
+            ;;
         add)
             _arguments \
                 '--private[Use unsupported private ReminderKit metadata writes]' \
@@ -4196,6 +4606,7 @@ _remctl() {
                 '--url[URL, web rich link with --private]:url:' \
                 '(-t --tags)'{-t,--tags}'[Tags, synced with --private]:tags:' \
                 '(-l --list)'{-l,--list}'[Target list]:list:' \
+                '--list-id[Target list by stable numeric ID]:id:' \
                 '(-d --due)'{-d,--due}'[Due date]:due:' \
                 '(-p --priority)'{-p,--priority}'[Priority]:priority:(high medium low)' \
                 '(-f --flag)'{-f,--flag}'[Flag reminder]' \
@@ -4239,10 +4650,111 @@ _remctl() {
                 '--json[JSON output]'
             return
             ;;
+        link)
+            _arguments \
+                '(-l --list)'{-l,--list}'[Get links for active reminders in list]:list:' \
+                '--list-id[Get links for active reminders in list by stable numeric ID]:id:' \
+                '--completed[Include completed reminders]' \
+                '--json[JSON output]'
+            return
+            ;;
+        export)
+            _arguments \
+                '(-l --list)'{-l,--list}'[Export only this list]:list:' \
+                '--list-id[Export only this list by stable numeric ID]:id:' \
+                '--format[Export format]:format:(json csv)' \
+                '--json[JSON output]'
+            return
+            ;;
         list-symbols)
             _arguments \
                 '--html[Write a standalone HTML preview contact sheet]:path:_files' \
                 '--preview[Generate and open the HTML preview contact sheet]' \
+                '--json[JSON output]'
+            return
+            ;;
+        smart-list-create)
+            _arguments \
+                '--private[Use private ReminderKit smart-list creation]' \
+                '--flagged[Filter to flagged reminders]' \
+                '--priority[Priority filter]:priority:(high medium low)' \
+                '--match[Match all or any filters]:match:(all any)' \
+                '--tags[Tag filter]:tags:' \
+                '--tag-match[Tag match]:tag-match:(all any)' \
+                '--any-tag[Filter to reminders with any tag]' \
+                '--untagged[Filter to reminders with no tags]' \
+                '--date[Date filter]:date:(any today no-date)' \
+                '--date-on[On date]:date:' \
+                '--date-before[Before date]:date:' \
+                '--date-after[After date]:date:' \
+                '--date-range[Date range START,END]:range:' \
+                '--date-relative[Relative date range]:relative:' \
+                '--time[Time filter]:time:(morning afternoon evening night no-time)' \
+                '--include-list[Include list]:list:' \
+                '--exclude-list[Exclude list]:list:' \
+                '--include-list-id[Include numeric list ID]:id:' \
+                '--exclude-list-id[Exclude numeric list ID]:id:' \
+                '--vehicle[Vehicle filter]:vehicle:(connected disconnected)' \
+                '--location-title[Location title]:title:' \
+                '--latitude[Latitude]:latitude:' \
+                '--longitude[Longitude]:longitude:' \
+                '--radius[Radius meters]:radius:' \
+                '--proximity[Location proximity]:proximity:(enter leave arriving leaving)' \
+                '--filter-json[Raw official filter JSON or @path]:json:' \
+                '--json[JSON output]'
+            return
+            ;;
+        smart-list-edit)
+            _arguments \
+                '--private[Use private ReminderKit smart-list editing]' \
+                '--smart-list-id[Edit by numeric smart-list ID]:id:' \
+                '--flagged[Filter to flagged reminders]' \
+                '--priority[Priority filter]:priority:(high medium low)' \
+                '--match[Match all or any filters]:match:(all any)' \
+                '--tags[Tag filter]:tags:' \
+                '--tag-match[Tag match]:tag-match:(all any)' \
+                '--any-tag[Filter to reminders with any tag]' \
+                '--untagged[Filter to reminders with no tags]' \
+                '--date[Date filter]:date:(any today no-date)' \
+                '--date-on[On date]:date:' \
+                '--date-before[Before date]:date:' \
+                '--date-after[After date]:date:' \
+                '--date-range[Date range START,END]:range:' \
+                '--date-relative[Relative date range]:relative:' \
+                '--time[Time filter]:time:(morning afternoon evening night no-time)' \
+                '--include-list[Include list]:list:' \
+                '--exclude-list[Exclude list]:list:' \
+                '--include-list-id[Include numeric list ID]:id:' \
+                '--exclude-list-id[Exclude numeric list ID]:id:' \
+                '--vehicle[Vehicle filter]:vehicle:(connected disconnected)' \
+                '--location-title[Location title]:title:' \
+                '--latitude[Latitude]:latitude:' \
+                '--longitude[Longitude]:longitude:' \
+                '--radius[Radius meters]:radius:' \
+                '--proximity[Location proximity]:proximity:(enter leave arriving leaving)' \
+                '--filter-json[Raw official filter JSON or @path]:json:' \
+                '--json[JSON output]'
+            return
+            ;;
+        smart-list-delete)
+            _arguments \
+                '--private[Use private ReminderKit smart-list deletion]' \
+                '--smart-list-id[Delete by numeric smart-list ID]:id:' \
+                '--force[Skip confirmation prompt]' \
+                '--json[JSON output]'
+            return
+            ;;
+        list-rename)
+            _arguments \
+                '--list-id[Rename list by stable numeric ID]:id:' \
+                '--new-name[New list name, useful with --list-id]:name:' \
+                '--json[JSON output]'
+            return
+            ;;
+        list-delete)
+            _arguments \
+                '--list-id[Delete list by stable numeric ID]:id:' \
+                '--force[Skip confirmation prompt]' \
                 '--json[JSON output]'
             return
             ;;
@@ -4256,11 +4768,11 @@ BASH_COMPLETION = '''_remctl() {
     local cur prev commands
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="lists show add done undone edit delete search today upcoming overdue flagged urgent flag unflag tags subtasks info sections stats link open export import list-symbols list-create list-edit list-rename list-delete onboard doctor setup permissions completion"
+    commands="lists smart-lists show add done undone edit delete search today upcoming overdue flagged urgent flag unflag tags subtasks info sections stats link open export import list-symbols list-create smart-list-create smart-list-edit smart-list-delete list-edit list-rename list-delete onboard doctor setup permissions completion"
 
     local cmd="${COMP_WORDS[1]}"
     if [ "$cmd" = "add" ]; then
-        COMPREPLY=( $(compgen -W "--private --section --section-id --new-section --subtask --image --url --tags -t --list -l --notes -n --due -d --priority -p --flag -f --recurrence --alarm --json" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--private --section --section-id --new-section --subtask --image --url --tags -t --list -l --list-id --notes -n --due -d --priority -p --flag -f --recurrence --alarm --json" -- "$cur") )
         return
     elif [ "$cmd" = "edit" ]; then
         COMPREPLY=( $(compgen -W "--private --section --section-id --new-section --subtask --image --flagged --no-flagged --urgent --no-urgent --location-title --latitude --longitude --radius --proximity --address --title --url --tags -t --notes -n --due -d --priority -p --recurrence --alarm --json" -- "$cur") )
@@ -4268,14 +4780,38 @@ BASH_COMPLETION = '''_remctl() {
     elif [ "$cmd" = "doctor" ]; then
         COMPREPLY=( $(compgen -W "--for-agent --json" -- "$cur") )
         return
+    elif [ "$cmd" = "show" ]; then
+        COMPREPLY=( $(compgen -W "--list-id --completed --verbose -v --json" -- "$cur") )
+        return
+    elif [ "$cmd" = "link" ]; then
+        COMPREPLY=( $(compgen -W "--list -l --list-id --completed --json" -- "$cur") )
+        return
+    elif [ "$cmd" = "export" ]; then
+        COMPREPLY=( $(compgen -W "--list -l --list-id --format --json" -- "$cur") )
+        return
     elif [ "$cmd" = "list-symbols" ]; then
         COMPREPLY=( $(compgen -W "--html --preview --json" -- "$cur") )
         return
     elif [ "$cmd" = "list-create" ]; then
         COMPREPLY=( $(compgen -W "--color --private --symbol --emoji --json" -- "$cur") )
         return
+    elif [ "$cmd" = "smart-list-create" ]; then
+        COMPREPLY=( $(compgen -W "--private --match --filter-json --flagged --priority --tags --tag-match --any-tag --untagged --date --date-today-include-past-due --date-on --date-before --date-after --date-range --date-relative --time --include-list --exclude-list --include-list-id --exclude-list-id --vehicle --location-title --latitude --longitude --radius --proximity --json" -- "$cur") )
+        return
+    elif [ "$cmd" = "smart-list-edit" ]; then
+        COMPREPLY=( $(compgen -W "--private --smart-list-id --match --filter-json --flagged --priority --tags --tag-match --any-tag --untagged --date --date-today-include-past-due --date-on --date-before --date-after --date-range --date-relative --time --include-list --exclude-list --include-list-id --exclude-list-id --vehicle --location-title --latitude --longitude --radius --proximity --json" -- "$cur") )
+        return
+    elif [ "$cmd" = "smart-list-delete" ]; then
+        COMPREPLY=( $(compgen -W "--private --smart-list-id --force --json" -- "$cur") )
+        return
     elif [ "$cmd" = "list-edit" ]; then
         COMPREPLY=( $(compgen -W "--list-id --new-name --color --private --symbol --emoji --json" -- "$cur") )
+        return
+    elif [ "$cmd" = "list-rename" ]; then
+        COMPREPLY=( $(compgen -W "--list-id --new-name --json" -- "$cur") )
+        return
+    elif [ "$cmd" = "list-delete" ]; then
+        COMPREPLY=( $(compgen -W "--list-id --force --json" -- "$cur") )
         return
     elif [ $COMP_CWORD -eq 1 ]; then
         COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -4286,6 +4822,7 @@ complete -F _remctl remctl
 
 FISH_COMPLETION = '''# Fish completion for remctl
 complete -c remctl -n "__fish_use_subcommand" -a lists -d "List all iCloud reminder lists"
+complete -c remctl -n "__fish_use_subcommand" -a smart-lists -d "Inspect Reminders smart lists"
 complete -c remctl -n "__fish_use_subcommand" -a show -d "Show reminders in a list"
 complete -c remctl -n "__fish_use_subcommand" -a add -d "Add a reminder"
 complete -c remctl -n "__fish_use_subcommand" -a done -d "Complete a reminder"
@@ -4311,6 +4848,9 @@ complete -c remctl -n "__fish_use_subcommand" -a export -d "Export reminders"
 complete -c remctl -n "__fish_use_subcommand" -a import -d "Import reminders"
 complete -c remctl -n "__fish_use_subcommand" -a list-symbols -d "List official Reminders list symbols"
 complete -c remctl -n "__fish_use_subcommand" -a list-create -d "Create a new list"
+complete -c remctl -n "__fish_use_subcommand" -a smart-list-create -d "Create a private custom smart list"
+complete -c remctl -n "__fish_use_subcommand" -a smart-list-edit -d "Edit a private custom smart list"
+complete -c remctl -n "__fish_use_subcommand" -a smart-list-delete -d "Delete a private custom smart list"
 complete -c remctl -n "__fish_use_subcommand" -a list-edit -d "Edit private list appearance"
 complete -c remctl -n "__fish_use_subcommand" -a list-rename -d "Rename a list"
 complete -c remctl -n "__fish_use_subcommand" -a list-delete -d "Delete a list"
@@ -4320,18 +4860,68 @@ complete -c remctl -n "__fish_use_subcommand" -a setup -d "Install shell complet
 complete -c remctl -n "__fish_use_subcommand" -a permissions -d "Open guided macOS permission helper"
 complete -c remctl -n "__fish_use_subcommand" -a completion -d "Generate shell completions"
 complete -c remctl -n "__fish_seen_subcommand_from doctor" -l for-agent -d "Print agent-focused context and TCC guidance"
+complete -c remctl -n "__fish_seen_subcommand_from show" -l list-id -d "Show list by stable numeric ID" -r
+complete -c remctl -n "__fish_seen_subcommand_from show" -l completed -d "Include completed reminders"
+complete -c remctl -n "__fish_seen_subcommand_from show" -s v -l verbose -d "Verbose output"
+complete -c remctl -n "__fish_seen_subcommand_from link" -s l -l list -d "Get links for active reminders in list" -r
+complete -c remctl -n "__fish_seen_subcommand_from link" -l list-id -d "Get links for active reminders in list by stable numeric ID" -r
+complete -c remctl -n "__fish_seen_subcommand_from link" -l completed -d "Include completed reminders"
+complete -c remctl -n "__fish_seen_subcommand_from export" -s l -l list -d "Export only this list" -r
+complete -c remctl -n "__fish_seen_subcommand_from export" -l list-id -d "Export only this list by stable numeric ID" -r
+complete -c remctl -n "__fish_seen_subcommand_from export" -l format -d "Export format" -a "json csv"
 complete -c remctl -n "__fish_seen_subcommand_from list-symbols" -l html -d "Write a standalone HTML preview contact sheet" -r
 complete -c remctl -n "__fish_seen_subcommand_from list-symbols" -l preview -d "Generate and open the HTML preview contact sheet"
 complete -c remctl -n "__fish_seen_subcommand_from list-create" -l color -d "List color name; with --private also accepts #RRGGBB" -r
 complete -c remctl -n "__fish_seen_subcommand_from list-create" -l private -d "Use private ReminderKit list appearance writes"
 complete -c remctl -n "__fish_seen_subcommand_from list-create" -l symbol -d "Official Reminders list symbol name" -r
 complete -c remctl -n "__fish_seen_subcommand_from list-create" -l emoji -d "Private Reminders list emoji badge" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create" -l private -d "Use private ReminderKit smart-list creation"
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create" -l flagged -d "Filter to flagged reminders"
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create" -l priority -d "Priority filter" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create" -l json -d "JSON output"
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l match -d "Match all or any filters" -a "all any"
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l filter-json -d "Raw official filter JSON or @path" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l tags -d "Tag filter" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l tag-match -d "Tag match" -a "all any"
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l any-tag -d "Filter to reminders with any tag"
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l untagged -d "Filter to reminders with no tags"
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l date -d "Date filter" -a "any today no-date"
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l date-today-include-past-due -d "Include past due with today"
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l date-on -d "On date" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l date-before -d "Before date" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l date-after -d "After date" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l date-range -d "Date range START,END" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l date-relative -d "Relative date range" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l time -d "Time filter" -a "morning afternoon evening night no-time"
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l include-list -d "Include list" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l exclude-list -d "Exclude list" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l include-list-id -d "Include numeric list ID" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l exclude-list-id -d "Exclude numeric list ID" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l vehicle -d "Vehicle filter" -a "connected disconnected"
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l location-title -d "Location title" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l latitude -d "Latitude" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l longitude -d "Longitude" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l radius -d "Radius meters" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l proximity -d "Location proximity" -a "enter leave arriving leaving"
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-edit" -l private -d "Use private ReminderKit smart-list editing"
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-edit" -l smart-list-id -d "Edit by numeric smart-list ID" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-edit" -l flagged -d "Filter to flagged reminders"
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-edit" -l priority -d "Priority filter" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-edit" -l json -d "JSON output"
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-delete" -l private -d "Use private ReminderKit smart-list deletion"
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-delete" -l smart-list-id -d "Delete by numeric smart-list ID" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-delete" -l force -d "Skip confirmation prompt"
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-delete" -l json -d "JSON output"
 complete -c remctl -n "__fish_seen_subcommand_from list-edit" -l list-id -d "Edit a list by stable numeric ID" -r
 complete -c remctl -n "__fish_seen_subcommand_from list-edit" -l new-name -d "Rename the list through private ReminderKit" -r
 complete -c remctl -n "__fish_seen_subcommand_from list-edit" -l color -d "List color name or #RRGGBB" -r
 complete -c remctl -n "__fish_seen_subcommand_from list-edit" -l private -d "Required for list appearance writes"
 complete -c remctl -n "__fish_seen_subcommand_from list-edit" -l symbol -d "Official Reminders list symbol name" -r
 complete -c remctl -n "__fish_seen_subcommand_from list-edit" -l emoji -d "Private Reminders list emoji badge" -r
+complete -c remctl -n "__fish_seen_subcommand_from list-rename" -l list-id -d "Rename list by stable numeric ID" -r
+complete -c remctl -n "__fish_seen_subcommand_from list-rename" -l new-name -d "New list name" -r
+complete -c remctl -n "__fish_seen_subcommand_from list-delete" -l list-id -d "Delete list by stable numeric ID" -r
+complete -c remctl -n "__fish_seen_subcommand_from list-delete" -l force -d "Skip confirmation prompt"
 complete -c remctl -n "__fish_seen_subcommand_from add" -l private -d "Use unsupported private ReminderKit metadata writes"
 complete -c remctl -n "__fish_seen_subcommand_from add" -l section -d "Assign to existing section" -r
 complete -c remctl -n "__fish_seen_subcommand_from add" -l section-id -d "Assign to section by stable ID" -r
@@ -4340,6 +4930,7 @@ complete -c remctl -n "__fish_seen_subcommand_from add" -l subtask -d "Add priva
 complete -c remctl -n "__fish_seen_subcommand_from add" -l image -d "Add private image attachment" -r
 complete -c remctl -n "__fish_seen_subcommand_from add" -l url -d "URL, web rich link with --private" -r
 complete -c remctl -n "__fish_seen_subcommand_from add" -s t -l tags -d "Tags, synced with --private" -r
+complete -c remctl -n "__fish_seen_subcommand_from add" -l list-id -d "Target list by stable numeric ID" -r
 complete -c remctl -n "__fish_seen_subcommand_from edit" -l private -d "Use unsupported private ReminderKit metadata writes"
 complete -c remctl -n "__fish_seen_subcommand_from edit" -l section -d "Assign to existing section" -r
 complete -c remctl -n "__fish_seen_subcommand_from edit" -l section-id -d "Assign to section by stable ID" -r
@@ -4985,7 +5576,7 @@ def main():
             "Use `remctl onboard --help`, `remctl permissions --help`, `remctl setup --help`, and `remctl doctor --help`\n"
             "for onboarding details.\n"
             "\n"
-            "Private metadata writes are unsupported and opt-in: pass --private on add/edit/list-create/list-edit."
+            "Private metadata writes are unsupported and opt-in: pass --private on add/edit/list-create/list-edit/smart-list-*."
         ),
         formatter_class=HelpFormatter,
     )
@@ -5002,8 +5593,12 @@ def main():
     # --- Existing commands ---
     c = sub.add_parser("lists", help="List all iCloud reminder lists"); js(c)
 
+    c = sub.add_parser("smart-lists", help="Inspect Reminders smart lists"); js(c)
+
     c = sub.add_parser("show", help="Show reminders in a list (grouped by section)")
-    c.add_argument("list"); c.add_argument("--completed", action="store_true", help="Include completed")
+    c.add_argument("list", nargs="?", help="List name")
+    c.add_argument("--list-id", type=int, help="Show a list by stable numeric ID")
+    c.add_argument("--completed", action="store_true", help="Include completed")
     vb(c); js(c)
 
     c = sub.add_parser(
@@ -5123,6 +5718,7 @@ def main():
     c = sub.add_parser("link", help="Get deep link(s) for reminders")
     c.add_argument("ids", type=int, nargs="*", help="Reminder IDs")
     c.add_argument("-l", "--list", help="Get links for all active reminders in a list")
+    c.add_argument("--list-id", type=int, help="Get links for all active reminders in a list by stable numeric ID")
     c.add_argument("--completed", action="store_true"); js(c)
 
     c = sub.add_parser("open", help="Open reminder in Reminders.app (or just open the app)")
@@ -5151,6 +5747,64 @@ def main():
     c.add_argument("--emoji", help="Private Reminders list emoji badge, e.g. 📌")
     js(c)
 
+    c = sub.add_parser(
+        "smart-list-create",
+        help="Create a private custom smart list",
+        description=(
+            "Create a custom Reminders smart list through unsupported private ReminderKit APIs. "
+            "Supports the official Reminders smart-list filters decoded from Reminders.app."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  remctl smart-list-create \"Flagged Review\" --private --flagged\n"
+            "  remctl smart-list-create \"High Priority\" --private --priority high\n"
+            "  remctl smart-list-create \"Tagged or Today\" --private --match any --tags remctl --date today\n"
+            "  remctl smart-list-create \"Work No Date\" --private --include-list Work --date no-date\n"
+            "  remctl smart-list-create \"Near Home\" --private --location-title Home --latitude 41.9 --longitude 12.5 --proximity enter\n"
+            "\n"
+            "This command never writes SQLite directly. Unknown smart-list filter shapes are rejected."
+        ),
+        formatter_class=HelpFormatter,
+    )
+    c.add_argument("name")
+    c.add_argument("--private", action="store_true", help="Required for private ReminderKit smart-list creation")
+    add_smart_list_filter_arguments(c)
+    js(c)
+
+    c = sub.add_parser(
+        "smart-list-edit",
+        help="Edit a private custom smart list filter",
+        description=(
+            "Replace a custom Reminders smart-list filter through unsupported private ReminderKit APIs. "
+            "Only custom smart lists are eligible; built-in smart lists are never matched."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  remctl smart-list-edit \"Flagged Review\" --private --priority high\n"
+            "  remctl smart-list-edit --smart-list-id 170 --private --match any --tags remctl,codex\n"
+        ),
+        formatter_class=HelpFormatter,
+    )
+    c.add_argument("name", nargs="?", help="Custom smart list name")
+    c.add_argument("--smart-list-id", type=int, help="Edit by numeric smart-list ID from smart-lists")
+    c.add_argument("--private", action="store_true", help="Required for private ReminderKit smart-list editing")
+    add_smart_list_filter_arguments(c)
+    js(c)
+
+    c = sub.add_parser(
+        "smart-list-delete",
+        help="Delete a private custom smart list",
+        description=(
+            "Delete a custom Reminders smart list through unsupported private ReminderKit APIs. "
+            "Only custom smart lists are eligible; built-in smart lists are never matched."
+        ),
+    )
+    c.add_argument("name", nargs="?", help="Custom smart list name")
+    c.add_argument("--smart-list-id", type=int, help="Delete by numeric smart-list ID from smart-lists")
+    c.add_argument("--private", action="store_true", help="Required for private ReminderKit smart-list deletion")
+    c.add_argument("--force", action="store_true", help="Skip confirmation prompt")
+    js(c)
+
     c = sub.add_parser("list-edit", help="Edit private list appearance by name or ID")
     c.add_argument("name", nargs="?", help="List name to edit")
     c.add_argument("--list-id", type=int, help="Edit a list by stable numeric ID")
@@ -5162,13 +5816,20 @@ def main():
     js(c)
 
     c = sub.add_parser("list-rename", help="Rename a list (bridge only)")
-    c.add_argument("name"); c.add_argument("new_name"); js(c)
+    c.add_argument("name", nargs="?", help="List name to rename")
+    c.add_argument("new_name", nargs="?", help="New list name")
+    c.add_argument("--list-id", type=int, help="Rename a list by stable numeric ID")
+    c.add_argument("--new-name", dest="new_name_option", help="New list name, useful with --list-id")
+    js(c)
 
     c = sub.add_parser("list-delete", help="Delete a list (bridge only)")
-    c.add_argument("name"); c.add_argument("--force", action="store_true"); js(c)
+    c.add_argument("name", nargs="?", help="List name to delete")
+    c.add_argument("--list-id", type=int, help="Delete a list by stable numeric ID")
+    c.add_argument("--force", action="store_true"); js(c)
 
     c = sub.add_parser("export", help="Export reminders")
     c.add_argument("-l", "--list", help="Export only this list")
+    c.add_argument("--list-id", type=int, help="Export only this list by stable numeric ID")
     c.add_argument("--format", dest="export_format", choices=["json", "csv"], default="json", help="Export format")
     js(c)
 
@@ -5304,6 +5965,7 @@ def main():
     # Route to command handler
     cmds = {
         "lists": cmd_lists,
+        "smart-lists": cmd_smart_lists,
         "show": cmd_show,
         "add": cmd_add,
         "done": cmd_done,
@@ -5327,6 +5989,9 @@ def main():
         "overdue": cmd_overdue,
         "list-symbols": cmd_list_symbols,
         "list-create": cmd_list_create,
+        "smart-list-create": cmd_smart_list_create,
+        "smart-list-edit": cmd_smart_list_edit,
+        "smart-list-delete": cmd_smart_list_delete,
         "list-edit": cmd_list_edit,
         "list-rename": cmd_list_rename,
         "list-delete": cmd_list_delete,

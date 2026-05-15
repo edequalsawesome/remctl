@@ -11,15 +11,43 @@
 - (id)fetchReminderWithObjectID:(id)objectID error:(NSError **)error;
 - (id)fetchListWithObjectID:(id)objectID error:(NSError **)error;
 - (id)fetchListSectionWithObjectID:(id)objectID error:(NSError **)error;
+- (id)fetchCustomSmartListWithObjectID:(id)objectID error:(NSError **)error;
+- (id)fetchPrimaryActiveCloudKitAccountWithError:(NSError **)error;
+- (id)fetchDefaultAccountWithError:(NSError **)error;
 @end
 
 @interface REMSaveRequest : NSObject
 - (instancetype)initWithStore:(REMStore *)store;
+- (id)updateAccount:(id)account;
 - (id)updateReminder:(id)reminder;
 - (id)updateList:(id)list;
+- (id)updateSmartList:(id)smartList;
 - (id)addReminderWithTitle:(NSString *)title toReminderSubtaskContextChangeItem:(id)context;
 - (id)addListSectionWithDisplayName:(NSString *)name toListSectionContextChangeItem:(id)context;
+- (id)addCustomSmartListWithName:(NSString *)name toAccountChangeItem:(id)accountChangeItem smartListObjectID:(id)objectID;
 - (BOOL)saveSynchronouslyWithError:(NSError **)error;
+@end
+
+@interface REMAccount : NSObject
+- (id)capabilities;
+- (id)remObjectID;
+@end
+
+@interface REMAccountCapabilities : NSObject
+- (BOOL)supportsCustomSmartLists;
+@end
+
+@interface REMSmartListChangeItem : NSObject
+- (id)remObjectID;
+- (void)setFilterData:(NSData *)filterData;
+- (void)setName:(NSString *)name;
+- (void)setSmartListType:(NSString *)smartListType;
+- (void)removeFromParentWithAccountChangeItem:(id)accountChangeItem;
+@end
+
+@interface REMSmartList : NSObject
+- (id)account;
+- (id)remObjectID;
 @end
 
 @interface REMReminderChangeItem : NSObject
@@ -154,6 +182,10 @@ static NSURL *listURL(NSString *ckIdentifier) {
     return [NSURL URLWithString:[NSString stringWithFormat:@"x-apple-reminderkit://REMCDList/%@", ckIdentifier]];
 }
 
+static NSURL *smartListURL(NSString *ckIdentifier) {
+    return [NSURL URLWithString:[NSString stringWithFormat:@"x-apple-reminderkit://REMCDSmartList/%@", ckIdentifier]];
+}
+
 static BOOL looksLikeWebURL(NSString *value) {
     NSURL *url = [NSURL URLWithString:value];
     if (!url || url.host.length == 0) {
@@ -161,6 +193,20 @@ static BOOL looksLikeWebURL(NSString *value) {
     }
     NSString *scheme = [url.scheme lowercaseString];
     return [scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"];
+}
+
+static NSData *decodedBase64Data(NSString *value, NSString *field) {
+    if (![value isKindOfClass:[NSString class]] || value.length == 0) {
+        fail([NSString stringWithFormat:@"%@ is required", field]);
+    }
+    NSData *data = [[NSData alloc] initWithBase64EncodedString:value options:0];
+    if (!data || data.length == 0) {
+        fail([NSString stringWithFormat:@"%@ must be base64-encoded data", field]);
+    }
+    if (data.length > 65536) {
+        fail([NSString stringWithFormat:@"%@ is too large", field]);
+    }
+    return data;
 }
 
 static NSString *normalizedColorName(NSString *value) {
@@ -372,9 +418,158 @@ int main(int argc, const char * argv[]) {
             @"set_urgent",
             @"add_location_alarm",
             @"set_list_appearance",
+            @"create_smart_list",
+            @"update_smart_list",
+            @"delete_smart_list",
         ]];
         if (![action isKindOfClass:[NSString class]] || ![allowedActions containsObject:action]) {
             fail(@"Unknown action");
+        }
+        if ([action isEqualToString:@"create_smart_list"]) {
+            NSString *name = cmd[@"name"];
+            if (![name isKindOfClass:[NSString class]] || name.length == 0) {
+                fail(@"name is required");
+            }
+            NSData *filterData = decodedBase64Data(cmd[@"filterData"], @"filterData");
+            NSError *error = nil;
+            REMStore *store = [REMStore new];
+            REMAccount *account = [store fetchPrimaryActiveCloudKitAccountWithError:&error];
+            if (!account) {
+                account = [store fetchDefaultAccountWithError:&error];
+            }
+            if (!account) {
+                fail(error.localizedDescription ?: @"No active Reminders account found");
+            }
+            REMAccountCapabilities *capabilities = [account capabilities];
+            if (!capabilities || ![capabilities supportsCustomSmartLists]) {
+                fail(@"The selected Reminders account does not support custom smart lists");
+            }
+
+            REMSaveRequest *save = [[REMSaveRequest alloc] initWithStore:store];
+            id accountChange = [save updateAccount:account];
+            if (!accountChange) {
+                fail(@"Could not create ReminderKit account change item");
+            }
+            REMSmartListChangeItem *change = [save
+                addCustomSmartListWithName:name
+                toAccountChangeItem:accountChange
+                smartListObjectID:nil];
+            if (!change) {
+                fail(@"Could not create ReminderKit smart list change item");
+            }
+            [change setSmartListType:@"com.apple.reminders.smartlist.custom"];
+            [change setFilterData:filterData];
+
+            if (![save saveSynchronouslyWithError:&error]) {
+                fail(error.localizedDescription ?: @"ReminderKit smart list save failed");
+            }
+            id objectID = [change remObjectID];
+            NSString *uuid = objectID && [objectID respondsToSelector:@selector(uuid)] ? [[objectID uuid] UUIDString] : @"";
+            NSString *url = objectID && [objectID respondsToSelector:@selector(urlRepresentation)] ? [[objectID urlRepresentation] absoluteString] : @"";
+            output(@{
+                @"status": @"created",
+                @"action": action,
+                @"name": name,
+                @"id": uuid ?: @"",
+                @"url": url ?: @"",
+            });
+            return 0;
+        }
+        if ([action isEqualToString:@"update_smart_list"]) {
+            NSString *smartListID = cmd[@"smartListId"];
+            if (![smartListID isKindOfClass:[NSString class]] || smartListID.length == 0) {
+                fail(@"smartListId is required");
+            }
+            NSData *filterData = nil;
+            if (cmd[@"filterData"] && cmd[@"filterData"] != [NSNull null]) {
+                filterData = decodedBase64Data(cmd[@"filterData"], @"filterData");
+            }
+            NSString *name = cmd[@"name"];
+            if (name && ![name isKindOfClass:[NSString class]]) {
+                fail(@"name must be a string");
+            }
+            if (!filterData && (!name || name.length == 0)) {
+                fail(@"name or filterData is required");
+            }
+            NSURL *objectURL = smartListURL(smartListID);
+            id objectID = [REMObjectID objectIDWithURL:objectURL];
+            if (!objectID) {
+                fail(@"Could not build ReminderKit smart list object ID");
+            }
+            NSError *error = nil;
+            REMStore *store = [REMStore new];
+            REMSmartList *smartList = [store fetchCustomSmartListWithObjectID:objectID error:&error];
+            if (!smartList) {
+                fail(error.localizedDescription ?: @"Custom smart list not found");
+            }
+            REMSaveRequest *save = [[REMSaveRequest alloc] initWithStore:store];
+            REMSmartListChangeItem *change = [save updateSmartList:smartList];
+            if (!change) {
+                fail(@"Could not create ReminderKit smart list change item");
+            }
+            [change setSmartListType:@"com.apple.reminders.smartlist.custom"];
+            if (filterData) {
+                [change setFilterData:filterData];
+            }
+            if (name.length > 0) {
+                [change setName:name];
+            }
+            if (![save saveSynchronouslyWithError:&error]) {
+                fail(error.localizedDescription ?: @"ReminderKit smart list update failed");
+            }
+            output(@{
+                @"status": @"updated",
+                @"action": action,
+                @"id": smartListID,
+            });
+            return 0;
+        }
+        if ([action isEqualToString:@"delete_smart_list"]) {
+            NSString *smartListID = cmd[@"smartListId"];
+            if (![smartListID isKindOfClass:[NSString class]] || smartListID.length == 0) {
+                fail(@"smartListId is required");
+            }
+            NSURL *objectURL = smartListURL(smartListID);
+            id objectID = [REMObjectID objectIDWithURL:objectURL];
+            if (!objectID) {
+                fail(@"Could not build ReminderKit smart list object ID");
+            }
+            NSError *error = nil;
+            REMStore *store = [REMStore new];
+            REMSmartList *smartList = [store fetchCustomSmartListWithObjectID:objectID error:&error];
+            if (!smartList) {
+                fail(error.localizedDescription ?: @"Custom smart list not found");
+            }
+            REMAccount *account = [smartList account];
+            if (!account) {
+                account = [store fetchPrimaryActiveCloudKitAccountWithError:&error];
+            }
+            if (!account) {
+                account = [store fetchDefaultAccountWithError:&error];
+            }
+            if (!account) {
+                fail(error.localizedDescription ?: @"No active Reminders account found");
+            }
+
+            REMSaveRequest *save = [[REMSaveRequest alloc] initWithStore:store];
+            id accountChange = [save updateAccount:account];
+            if (!accountChange) {
+                fail(@"Could not create ReminderKit account change item");
+            }
+            REMSmartListChangeItem *change = [save updateSmartList:smartList];
+            if (!change) {
+                fail(@"Could not create ReminderKit smart list change item");
+            }
+            [change removeFromParentWithAccountChangeItem:accountChange];
+            if (![save saveSynchronouslyWithError:&error]) {
+                fail(error.localizedDescription ?: @"ReminderKit smart list delete failed");
+            }
+            output(@{
+                @"status": @"deleted",
+                @"action": action,
+                @"id": smartListID,
+            });
+            return 0;
         }
         if ([action isEqualToString:@"set_list_appearance"]) {
             NSString *listID = cmd[@"listId"];

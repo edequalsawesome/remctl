@@ -97,6 +97,11 @@ cp "$SCRIPT_DIR/remctl_serialization.py" "$BIN_DIR/remctl_serialization.py"
 chmod 644 "$BIN_DIR/remctl_serialization.py"
 echo -e "  ${GREEN}✓${RESET} remctl_serialization.py → $BIN_DIR/remctl_serialization.py"
 
+echo -e "${BLUE}→${RESET} Installing smart list helpers..."
+cp "$SCRIPT_DIR/remctl_smart_lists.py" "$BIN_DIR/remctl_smart_lists.py"
+chmod 644 "$BIN_DIR/remctl_smart_lists.py"
+echo -e "  ${GREEN}✓${RESET} remctl_smart_lists.py → $BIN_DIR/remctl_smart_lists.py"
+
 echo -e "${BLUE}→${RESET} Installing zsh completion source..."
 mkdir -p "$BIN_DIR/completions"
 completion_tmp="$BIN_DIR/completions/_remctl.tmp"

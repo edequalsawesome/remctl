@@ -56,9 +56,9 @@ Full setup details live in [docs/installation.md](docs/installation.md).
 | Task | Commands |
 | --- | --- |
 | See what is due | `today`, `upcoming`, `overdue` |
-| Browse reminders | `lists`, `show`, `search`, `flagged`, `urgent`, `info`, `subtasks` |
+| Browse reminders | `lists`, `smart-lists`, `show`, `search`, `flagged`, `urgent`, `info`, `subtasks` |
 | Create and edit | `add`, `edit`, `done`, `undone`, `delete`, `flag`, `unflag` |
-| Organize | `list-symbols`, `list-create`, `list-edit`, `list-rename`, `list-delete`, `sections`, `tags` |
+| Organize | `list-symbols`, `list-create`, `smart-list-create`, `smart-list-edit`, `smart-list-delete`, `list-edit`, `list-rename`, `list-delete`, `sections`, `tags` |
 | Share data | `export`, `import`, `link`, `open`, `--json`, `--format table` |
 | Set up the Mac | `onboard`, `permissions`, `doctor`, `setup`, `completion` |
 
@@ -67,6 +67,7 @@ Common examples:
 ```bash
 remctl today
 remctl show Work --format table
+remctl show --list-id 153 --json
 remctl add "Review PR" -l Work -d "tomorrow 10:00" -p high
 remctl add "Pay rent" -d "2026-06-01" --recurrence monthly
 remctl edit 23880 -d clear
@@ -76,7 +77,13 @@ remctl list-symbols
 remctl list-symbols --preview
 remctl list-create "Research" --color orange --private --symbol education3
 remctl list-create "Cold Ideas" --color cyan --private --emoji 🥶
+remctl smart-lists --json
+remctl smart-list-create "Flagged Review" --private --flagged
+remctl smart-list-create "Tagged or Today" --private --match any --tags remctl --date today
+remctl smart-list-edit "Tagged or Today" --private --include-list Work --date no-date
+remctl smart-list-delete "Flagged Review" --private --force
 remctl list-edit Projects --private --color orange --symbol education3
+remctl list-rename --list-id 123 --new-name "Project X Archive"
 remctl info 23880 --json
 ```
 
@@ -98,9 +105,15 @@ remctl edit 23880 --private --image ~/Desktop/mockup.png --flagged --urgent
 remctl edit 23880 --private --location-title "Apple Park" --latitude 37.3349 --longitude -122.0090 --radius 200
 remctl list-edit Projects --private --color '#FF8D28' --symbol education3
 remctl list-edit Projects --private --emoji 📌
+remctl smart-list-create "Flagged Review" --private --flagged
+remctl smart-list-create "Tagged or Today" --private --match any --tags remctl --date today
+remctl smart-list-create "Work No Date" --private --include-list Work --date no-date
+remctl smart-list-create "Near Home" --private --location-title Home --latitude 41.9 --longitude 12.5 --proximity enter
+remctl smart-list-edit "Tagged or Today" --private --priority high
+remctl smart-list-delete "Flagged Review" --private --force
 ```
 
-Supported private metadata includes synced web rich links, synced tags, section assignment and creation, rich subtasks with per-child notes/due/URL/tags/images, image attachments, real flag state, urgent state, location alarms, and list appearance metadata. `list-create --color` uses public EventKit for normal color names; `--private` enables exact `#RRGGBB` colors plus official list symbols or emoji badges. `list-symbols` prints the 71 official Reminders emblem names; its terminal glyph column is only an approximation. Use `list-symbols --preview` to generate and open a standalone HTML contact sheet rendered from the native RemindersUICore badge assets with interactive official color swatches, or `list-symbols --html path/to/file.html` to write it without opening. Reminders stores built-in icons as private emblem names such as `education3`; `--symbol` is limited to those official names because arbitrary SF Symbol strings fall back to the default icon in Reminders. Use `--emoji` for custom standard emoji badges. If a section name is duplicated in the same list, RemCTL picks the single non-empty match when there is one; otherwise use `--section-id`.
+Supported private metadata includes synced web rich links, synced tags, section assignment and creation, rich subtasks with per-child notes/due/URL/tags/images, image attachments, real flag state, urgent state, location alarms, list appearance metadata, and experimental custom smart-list creation/editing/deletion for the official Reminders filters: tags, date, time, priority, flag, location, lists, and all/any matching. `smart-lists` is read-only and safe; `smart-list-create`, `smart-list-edit`, and `smart-list-delete` require `--private`, and filter writes reject unknown shapes before writing. `list-create --color` uses public EventKit for normal color names; `--private` enables exact `#RRGGBB` colors plus official list symbols or emoji badges. `list-symbols` prints the 71 official Reminders emblem names; its terminal glyph column is only an approximation. Use `list-symbols --preview` to generate and open a standalone HTML contact sheet rendered from the native RemindersUICore badge assets with interactive official color swatches, or `list-symbols --html path/to/file.html` to write it without opening. Reminders stores built-in icons as private emblem names such as `education3`; `--symbol` is limited to those official names because arbitrary SF Symbol strings fall back to the default icon in Reminders. Use `--emoji` for custom standard emoji badges. If a section name is duplicated in the same list, RemCTL picks the single non-empty match when there is one; otherwise use `--section-id`.
 
 This is the major difference from ordinary EventKit-only Reminders CLIs, but it is still unsupported by Apple. Private-only flags fail before writing unless `--private` is present, generic file/PDF attachments are intentionally rejected, and agents should verify writes with `remctl info ID --json` plus a UI/device check when sync behavior matters.
 
@@ -162,7 +175,7 @@ For fast agent writes, call `remctl add ... --json`, use the returned `numericId
 
 Agents should pass deterministic due dates, ideally `YYYY-MM-DD HH:MM` after resolving the user's request in their timezone. If a due date is invalid, RemCTL exits before writing and emits a structured `invalid_due_date` JSON error on stderr with examples. Retry with a corrected date; do not create a reminder first and patch the due date afterward.
 
-List names are resolved conservatively: exact match first, then case-insensitive match, then a normalized fallback that can handle decorative prefixes such as emoji. If more than one list matches, RemCTL fails before writing and asks for `--list-id`.
+List names are resolved conservatively: exact match first, then case-insensitive match, then a normalized fallback that can handle decorative prefixes such as emoji. If more than one list matches, RemCTL fails before writing and asks for `--list-id`. Commands that target lists use the same rule: pass a name, or use `--list-id` for exact agent-safe targeting on `show`, `add`, `link`, `export`, `list-edit`, `list-rename`, `list-delete`, and smart-list list filters.
 
 Do not mutate the Reminders SQLite database. Use RemCTL commands or EventKit.
 
@@ -195,6 +208,7 @@ remctl doctor
 | `remctl-permissions.swift` | Swift/AppKit guided Full Disk Access helper source |
 | `remctl_runtime.py` | Shared paths, config, date windows, safety helpers |
 | `remctl_serialization.py` | Shared reminder JSON serialization |
+| `remctl_smart_lists.py` | Smart-list filter decoding and safe v1 encoding |
 | `install.sh` | Copy-based installer and bootstrap script |
 
 ## License

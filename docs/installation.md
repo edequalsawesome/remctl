@@ -157,6 +157,7 @@ mkdir -p ~/bin
 cp remctl ~/bin/remctl && chmod +x ~/bin/remctl
 cp remctl_runtime.py ~/bin/remctl_runtime.py
 cp remctl_serialization.py ~/bin/remctl_serialization.py
+cp remctl_smart_lists.py ~/bin/remctl_smart_lists.py
 swiftc -O -framework EventKit -framework Foundation -o ~/bin/remctl-bridge remctl-bridge.swift
 swiftc -O -framework AppKit -framework Foundation -o ~/bin/remctl-permissions remctl-permissions.swift
 clang -fobjc-arc -O -F/System/Library/PrivateFrameworks -framework Foundation -framework AppKit -framework ReminderKit -o ~/bin/remctl-private remctl-private.m

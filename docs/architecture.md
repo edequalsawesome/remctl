@@ -53,7 +53,7 @@ Writes go through Apple-supported APIs:
 
 There is also an explicitly unsupported opt-in helper:
 
-3. `remctl-private` writes selected private metadata through Apple's private ReminderKit framework. It is gated by `--private`, never writes SQLite directly, and is intentionally excluded from normal write behavior. Verified private writes include web rich URL attachments, hashtag labels, section assignment/creation, rich subtasks, image attachments, real flag state, urgent state, location alarms, and list appearance metadata such as exact colors, private emblem names, and emoji badges. For rich subtasks, `remctl-private` creates the child and applies private child metadata, then `remctl-bridge` applies public child fields such as notes and due dates. Generic file/PDF attachments are rejected because Reminders does not reliably show them even when private rows sync.
+3. `remctl-private` writes selected private metadata through Apple's private ReminderKit framework. It is gated by `--private`, never writes SQLite directly, and is intentionally excluded from normal write behavior. Verified private writes include web rich URL attachments, hashtag labels, section assignment/creation, rich subtasks, image attachments, real flag state, urgent state, location alarms, list appearance metadata such as exact colors, private emblem names, and emoji badges, and experimental custom smart-list creation/editing/deletion for official Reminders filters. For rich subtasks, `remctl-private` creates the child and applies private child metadata, then `remctl-bridge` applies public child fields such as notes and due dates. Generic file/PDF attachments are rejected because Reminders does not reliably show them even when private rows sync.
 
 The bridge is detected next to the installed CLI. Override it with:
 
@@ -77,6 +77,14 @@ Reminders stores list appearance on `ZREMCDBASELIST`:
 - `ZBADGEEMBLEM` is text. Emoji badges are stored as JSON such as `{"Emoji":"📌"}`; Reminders picker icons are stored as private emblem names such as `education3`.
 
 RemCTL reads these fields directly for display. `list-symbols` exposes the 71 official bundled emblem names discovered from RemindersUICore's `ListBadge*` assets. Its terminal glyphs are approximate Unicode fallbacks; `list-symbols --preview` and `list-symbols --html PATH` load the native badge assets from RemindersUICore and write a standalone HTML contact sheet with interactive official color swatches. Normal `list-create --color NAME` still writes through EventKit. Private list appearance writes use `REMStore.fetchListWithObjectID`, `REMSaveRequest.updateList`, `REMListChangeItem.setColor`, and `REMListChangeItem.appearanceContext.setBadgeEmblem` / `setBadge`, then save through ReminderKit. `--symbol` is restricted to official emblem names because arbitrary SF Symbol strings are accepted by the private API but render as the default icon in Reminders. Custom icons should use `--emoji`.
+
+## Smart Lists
+
+Smart lists are stored in `ZREMCDBASELIST` as `REMCDSmartList` rows (`Z_ENT = 4`) with `ZSMARTLISTTYPE` and optional `ZFILTERDATA`.
+
+`smart-lists` is read-only. It reports built-in and custom smart lists with numeric row ID, object UUID, smart-list type, filter length, and decoded filter summaries where possible. Current custom smart-list filters on macOS 26 store `ZFILTERDATA` as UTF-8 JSON bytes. The decoder also accepts keyed-archive research samples shaped as `ReminderKitInternal.REMCustomSmartListFilterDescriptor` with a `data` field containing the same JSON bytes.
+
+`smart-list-create` is private and experimental. Python validates and encodes the official Reminders filter payloads decoded from Reminders.app: top-level `operation` (`and`/`or`), `hashtags`, `date`, `time`, `priorities`, `flagged`, `location`, and `lists`. It base64-encodes the raw JSON bytes and sends them to `remctl-private`. The helper resolves the active CloudKit account, verifies `supportsCustomSmartLists`, creates the smart list with `REMSaveRequest.addCustomSmartListWithName`, sets `smartListType` and `filterData`, and saves through ReminderKit. `smart-list-edit` fetches a custom smart list by object ID and replaces `filterData` through `REMSaveRequest.updateSmartList`. `smart-list-delete` fetches a custom smart list by object ID, removes it from the parent account through ReminderKit, and never matches built-in smart lists.
 
 ## Recurrence
 

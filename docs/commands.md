@@ -12,7 +12,9 @@ remctl overdue
 remctl flagged
 remctl urgent
 remctl lists
+remctl smart-lists
 remctl show Shopping
+remctl show --list-id 153
 remctl show Work --completed
 remctl show Family -v
 remctl search "milk"
@@ -70,17 +72,28 @@ remctl edit 23880 --private --section-id DCD255E2-7CF5-4B45-9566-3F9A5D84AFA8
 remctl edit 23880 --private --subtask '{"title":"Follow up","notes":"Bring latest numbers","due":"next friday at 3pm","url":"https://example.com","tags":["work"]}'
 remctl edit 23880 --private --flagged --urgent
 remctl edit 23880 --private --location-title "Apple Park" --latitude 37.3349 --longitude -122.0090 --radius 200
+remctl smart-list-create "Flagged Review" --private --flagged
+remctl smart-list-create "High Priority" --private --priority high
+remctl smart-list-delete "Flagged Review" --private --force
 ```
 
 `search` matches reminder titles and notes. By default it searches active reminders; add `--completed` to include completed reminders.
 
-List names are resolved conservatively for writes: exact match first, then case-insensitive match, then a normalized fallback that ignores decorative punctuation and emoji. If more than one list matches, RemCTL fails before writing and prints the candidate IDs; pass `--list-id` to target one explicitly.
+## CLI Syntax Rules
+
+RemCTL uses nouns for read-only inspectors (`lists`, `smart-lists`, `today`, `stats`) and verb-style commands for writes (`add`, `edit`, `delete`, `list-create`, `smart-list-edit`). List-management commands keep the `list-*` prefix; custom smart-list writes keep the `smart-list-*` prefix.
+
+Use `--json` on subcommands when scripting. The global `--format json` is equivalent for commands with JSON output; `--format table` is for human-readable tabular views. Export keeps its own `--format json|csv` because that chooses a file format, not display style.
+
+List targets are consistent across commands that can safely resolve them: pass a list name positionally or with `-l/--list`, or pass `--list-id` when an exact numeric target matters. If both a name and `--list-id` are provided, RemCTL fails before writing or exporting. This applies to `show`, `add`, `link`, `export`, `list-edit`, `list-rename`, `list-delete`, and the smart-list `--include-list-id` / `--exclude-list-id` filters.
+
+List names are resolved conservatively: exact match first, then case-insensitive match, then a normalized fallback that ignores decorative punctuation and emoji. If more than one list matches, RemCTL fails before writing and prints the candidate IDs; pass `--list-id` to target one explicitly.
 
 `--section` resolves by name inside the target list. If duplicate section names exist, RemCTL uses the only non-empty matching section when there is exactly one. If the duplicate is still ambiguous, use `--section-id`.
 
 `--subtask` accepts either a plain child title or a JSON object with child metadata. Rich subtask fields include `notes`, `due`, `priority`, `alarm`, `recurrence`, `url`/`urls`, `tags`, `image`/`images`, `flagged`, `urgent`, and location alarm fields.
 
-`--private` uses Apple's private ReminderKit framework through `remctl-private`. It does not write SQLite directly. Verified private writes include synced web rich links, tags, sections, rich subtasks, image attachments, real flag state, urgent state, location alarms, and list appearance metadata. Generic file/PDF attachments are intentionally rejected because Reminders does not reliably show them even when private rows sync.
+`--private` uses Apple's private ReminderKit framework through `remctl-private`. It does not write SQLite directly. Verified private writes include synced web rich links, tags, sections, rich subtasks, image attachments, real flag state, urgent state, location alarms, list appearance metadata, and custom smart-list creation/editing/deletion for official Reminders filters. Generic file/PDF attachments are intentionally rejected because Reminders does not reliably show them even when private rows sync.
 
 See [private-metadata.md](private-metadata.md) for risks, guardrails, and verification notes.
 
@@ -122,7 +135,9 @@ remctl list-create "Cold Ideas" --color cyan --private --emoji 🥶
 remctl list-edit "Project X" --private --color '#FF8D28' --symbol education3
 remctl list-edit --list-id 144 --private --emoji 📌
 remctl list-rename "Project X" "Project Y"
+remctl list-rename --list-id 144 --new-name "Project Y"
 remctl list-delete "Project Y" --force
+remctl list-delete --list-id 144 --force
 ```
 
 `list-create --color NAME` uses EventKit and supports Reminders color names such as `red`, `orange`, `yellow`, `green`, `blue`, `purple`, `brown`, `gray`, and `cyan`.
@@ -131,10 +146,31 @@ List symbols and emoji badges are private Reminders metadata and require `--priv
 
 `list-symbols` prints the 71 official Reminders emblem names bundled in RemindersUICore. The terminal preview column is an approximate Unicode fallback, not the native icon. Use `list-symbols --preview` to generate and open a standalone HTML contact sheet from the native badge assets with interactive official color swatches, or `list-symbols --html PATH` to write that contact sheet without opening it. Reminders stores picker icons as private emblem names, not public SF Symbol names. For example, the pencil/ruler icon shown by Reminders for Federico's Projects list is stored as `education3`. `--symbol` is intentionally restricted to official names because arbitrary SF Symbol strings can be accepted by ReminderKit but render as the default list icon in Reminders. Use `--emoji` for custom standard emoji badges.
 
+## Smart Lists
+
+```bash
+remctl smart-lists
+remctl smart-lists --json
+remctl smart-list-create "Flagged Review" --private --flagged
+remctl smart-list-create "High Priority" --private --priority high
+remctl smart-list-create "Tagged or Today" --private --match any --tags remctl --date today
+remctl smart-list-create "Work No Date" --private --include-list Work --date no-date
+remctl smart-list-create "Projects No Date" --private --include-list-id 144 --date no-date
+remctl smart-list-edit "Tagged or Today" --private --priority high
+remctl smart-list-delete "Flagged Review" --private --force
+```
+
+`smart-lists` is a read-only inspector. It reports built-in and custom smart lists with numeric ID, object UUID, smart-list type, filter byte length, and a decoded summary when RemCTL recognizes the filter payload.
+
+`smart-list-create` and `smart-list-edit` are private ReminderKit support and always require `--private`. They support the official Reminders smart-list filters decoded from Reminders.app: `--tags`, `--any-tag`, `--untagged`, `--date`, `--date-on`, `--date-before`, `--date-after`, `--date-range`, `--date-relative`, `--time`, `--priority`, `--flagged`, `--vehicle`, specific `--location-title`/coordinates, `--include-list`, `--exclude-list`, `--include-list-id`, `--exclude-list-id`, and top-level `--match all|any`.
+
+`smart-list-edit` replaces the filter for an existing custom smart list by exact name or `--smart-list-id`. `smart-list-delete` only matches custom smart lists by exact name or `--smart-list-id`, never built-in smart lists, and requires `--private`.
+
 ## Import and Export
 
 ```bash
 remctl export --list Shopping --format json > shopping.json
+remctl export --list-id 153 --format json > shopping.json
 remctl export --format csv > all-reminders.csv
 remctl import shopping.json
 ```
@@ -144,6 +180,7 @@ remctl import shopping.json
 ```bash
 remctl link 23880
 remctl link -l Shopping
+remctl link --list-id 153
 remctl open 23880
 remctl open
 ```

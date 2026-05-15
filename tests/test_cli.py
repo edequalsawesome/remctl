@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import base64
 import io
 import json
 import sqlite3
@@ -77,6 +78,18 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(result["error"], "ambiguous")
             self.assertEqual(sorted(candidate["title"] for candidate in result["candidates"]), ["Weekly-513", "🗓️ Weekly 513"])
+        finally:
+            db.close()
+
+    def test_list_resolution_by_id_includes_object_uuid(self):
+        db = self._list_db(["Projects"])
+        try:
+            result = self.remctl.resolve_list_ref(db, list_id=1)
+
+            self.assertEqual(result["id"], 1)
+            self.assertEqual(result["title"], "Projects")
+            self.assertEqual(result["objectUUID"], "CK-1")
+            self.assertEqual(result["method"], "id")
         finally:
             db.close()
 
@@ -183,30 +196,361 @@ class CliTests(unittest.TestCase):
             },
         )
 
-    def test_list_rename_and_delete_use_bridge_contract_fields(self):
-        rename_args = SimpleNamespace(name="Old", new_name="New", json=True)
-        delete_args = SimpleNamespace(name="Old", force=True, json=True)
-        with (
-            mock.patch.object(self.remctl, "bridge_available", return_value=True),
-            mock.patch.object(self.remctl, "bridge_call", return_value={"status": "renamed"}) as rename_call,
-            contextlib.redirect_stdout(io.StringIO()),
-        ):
-            self.remctl.cmd_list_rename(rename_args)
-        self.assertEqual(
-            rename_call.call_args.args[0],
-            {"action": "rename_list", "title": "Old", "newTitle": "New"},
-        )
+    def test_list_rename_and_delete_use_resolved_bridge_contract_fields(self):
+        db = self._list_db(["Old"])
+        rename_args = SimpleNamespace(name="Old", list_id=None, new_name="New", new_name_option=None, json=True)
+        delete_args = SimpleNamespace(name=None, list_id=1, force=True, json=True)
+        try:
+            with (
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(self.remctl, "bridge_available", return_value=True),
+                mock.patch.object(self.remctl, "bridge_call", return_value={"status": "renamed"}) as rename_call,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.remctl.cmd_list_rename(rename_args)
+            self.assertEqual(
+                rename_call.call_args.args[0],
+                {"action": "rename_list", "title": "Old", "newTitle": "New"},
+            )
 
-        with (
-            mock.patch.object(self.remctl, "bridge_available", return_value=True),
-            mock.patch.object(self.remctl, "bridge_call", return_value={"status": "deleted"}) as delete_call,
-            contextlib.redirect_stdout(io.StringIO()),
-        ):
-            self.remctl.cmd_list_delete(delete_args)
-        self.assertEqual(
-            delete_call.call_args.args[0],
-            {"action": "delete_list", "title": "Old"},
+            with (
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(self.remctl, "bridge_available", return_value=True),
+                mock.patch.object(self.remctl, "bridge_call", return_value={"status": "deleted"}) as delete_call,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.remctl.cmd_list_delete(delete_args)
+            self.assertEqual(
+                delete_call.call_args.args[0],
+                {"action": "delete_list", "title": "Old"},
+            )
+        finally:
+            db.close()
+
+    def _smart_list_db(self):
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        db.execute(
+            "CREATE TABLE ZREMCDBASELIST ("
+            "Z_PK INTEGER PRIMARY KEY, ZNAME TEXT, ZCKIDENTIFIER TEXT, ZMARKEDFORDELETION INTEGER, "
+            "Z_ENT INTEGER, ZSMARTLISTTYPE TEXT, ZFILTERDATA BLOB)"
         )
+        db.execute(
+            "INSERT INTO ZREMCDBASELIST "
+            "(Z_PK, ZNAME, ZCKIDENTIFIER, ZMARKEDFORDELETION, Z_ENT, ZSMARTLISTTYPE, ZFILTERDATA) "
+            "VALUES (?, ?, ?, 0, 4, ?, ?)",
+            (1, None, "BUILTIN-1", "com.apple.reminders.smartlist.flagged", None),
+        )
+        db.execute(
+            "INSERT INTO ZREMCDBASELIST "
+            "(Z_PK, ZNAME, ZCKIDENTIFIER, ZMARKEDFORDELETION, Z_ENT, ZSMARTLISTTYPE, ZFILTERDATA) "
+            "VALUES (?, ?, ?, 0, 4, ?, ?)",
+            (2, "High Priority", "CUSTOM-1", self.remctl.CUSTOM_SMART_LIST_TYPE, b'{"priorities":["high"]}'),
+        )
+        db.execute(
+            "INSERT INTO ZREMCDBASELIST "
+            "(Z_PK, ZNAME, ZCKIDENTIFIER, ZMARKEDFORDELETION, Z_ENT, ZSMARTLISTTYPE, ZFILTERDATA) "
+            "VALUES (?, ?, ?, 0, 3, NULL, NULL)",
+            (10, "Reminders", "LIST-1"),
+        )
+        return db
+
+    def test_smart_lists_json_decodes_builtin_and_custom_rows(self):
+        db = self._smart_list_db()
+        try:
+            with (
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.remctl.cmd_smart_lists(SimpleNamespace(json=True))
+        finally:
+            db.close()
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload[0]["kind"], "built-in")
+        self.assertEqual(payload[0]["name"], "Flagged")
+        self.assertEqual(payload[0]["filterLength"], 0)
+        self.assertEqual(payload[1]["kind"], "custom")
+        self.assertEqual(payload[1]["filter"]["kind"], "priority")
+        self.assertEqual(payload[1]["filterJSON"], {"priorities": ["high"]})
+
+    def test_smart_list_create_rejects_without_private_before_helper(self):
+        args = SimpleNamespace(name="Nope", private=False, flagged=True, priority=None, json=True)
+        with (
+            mock.patch.object(self.remctl, "private_available") as private_available,
+            mock.patch.object(self.remctl, "private_call") as private_call,
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            self.assertRaises(SystemExit),
+        ):
+            self.remctl.cmd_smart_list_create(args)
+
+        private_available.assert_not_called()
+        private_call.assert_not_called()
+        self.assertIn("requires --private", stderr.getvalue())
+
+    def test_smart_list_create_rejects_unsupported_filter_before_helper(self):
+        args = SimpleNamespace(name="Nope", private=True, flagged=False, priority="none", json=True)
+        with (
+            mock.patch.object(self.remctl, "private_available") as private_available,
+            mock.patch.object(self.remctl, "private_call") as private_call,
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            self.assertRaises(SystemExit),
+        ):
+            self.remctl.cmd_smart_list_create(args)
+
+        private_available.assert_not_called()
+        private_call.assert_not_called()
+        self.assertIn("Unsupported smart list priority", stderr.getvalue())
+
+    def test_smart_list_create_calls_private_helper_with_encoded_filter(self):
+        db = self._smart_list_db()
+        args = SimpleNamespace(name="Flagged Review", private=True, flagged=True, priority=None, json=True)
+        try:
+            with (
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(
+                    self.remctl,
+                    "private_call",
+                    return_value={"status": "created", "id": "SMART-1"},
+                ) as private_call,
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.remctl.cmd_smart_list_create(args)
+        finally:
+            db.close()
+
+        payload = private_call.call_args.args[0]
+        self.assertEqual(payload["action"], "create_smart_list")
+        self.assertEqual(payload["name"], "Flagged Review")
+        self.assertEqual(payload["filterData"], "eyJmbGFnZ2VkIjp0cnVlfQ==")
+        self.assertEqual(json.loads(stdout.getvalue())["filter"]["kind"], "flagged")
+
+    def test_smart_list_create_builds_official_multi_filter_payload(self):
+        db = self._smart_list_db()
+        args = SimpleNamespace(
+            name="Any Reminders Today",
+            private=True,
+            match="any",
+            flagged=False,
+            priority=None,
+            tags="remctl",
+            tag_match="all",
+            any_tag=False,
+            untagged=False,
+            date="today",
+            date_today_include_past_due=False,
+            date_on=None,
+            date_before=None,
+            date_after=None,
+            date_range=None,
+            date_relative=None,
+            time=None,
+            include_list=["Reminders"],
+            exclude_list=None,
+            include_list_id=None,
+            exclude_list_id=None,
+            vehicle=None,
+            location_title=None,
+            latitude=None,
+            longitude=None,
+            radius=100.0,
+            proximity="enter",
+            filter_json=None,
+            json=True,
+        )
+        try:
+            with (
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(
+                    self.remctl,
+                    "private_call",
+                    return_value={"status": "created", "id": "SMART-2"},
+                ) as private_call,
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.remctl.cmd_smart_list_create(args)
+        finally:
+            db.close()
+
+        payload = private_call.call_args.args[0]
+        encoded = payload["filterData"]
+        decoded = json.loads(base64.b64decode(encoded).decode("utf-8"))
+        self.assertEqual(
+            decoded,
+            {
+                "operation": "or",
+                "hashtags": {"hashtags": ["remctl"]},
+                "date": {"today": False},
+                "lists": {"include": ["LIST-1"], "exclude": []},
+            },
+        )
+        self.assertEqual(json.loads(stdout.getvalue())["filter"]["match"], "any")
+
+    def test_smart_list_create_resolves_include_list_id_to_object_uuid(self):
+        db = self._smart_list_db()
+        args = SimpleNamespace(
+            name="List ID Filter",
+            private=True,
+            match="all",
+            flagged=False,
+            priority=None,
+            tags=None,
+            tag_match="all",
+            any_tag=False,
+            untagged=False,
+            date=None,
+            date_today_include_past_due=False,
+            date_on=None,
+            date_before=None,
+            date_after=None,
+            date_range=None,
+            date_relative=None,
+            time=None,
+            include_list=None,
+            exclude_list=None,
+            include_list_id=[10],
+            exclude_list_id=None,
+            vehicle=None,
+            location_title=None,
+            latitude=None,
+            longitude=None,
+            radius=100.0,
+            proximity="enter",
+            filter_json=None,
+            json=True,
+        )
+        try:
+            with (
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(
+                    self.remctl,
+                    "private_call",
+                    return_value={"status": "created", "id": "SMART-3"},
+                ) as private_call,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.remctl.cmd_smart_list_create(args)
+        finally:
+            db.close()
+
+        decoded = json.loads(base64.b64decode(private_call.call_args.args[0]["filterData"]).decode("utf-8"))
+        self.assertEqual(decoded, {"lists": {"include": ["LIST-1"], "exclude": []}})
+
+    def test_smart_list_edit_replaces_filter_for_custom_match(self):
+        db = self._smart_list_db()
+        args = SimpleNamespace(
+            name="High Priority",
+            smart_list_id=None,
+            private=True,
+            match="all",
+            flagged=False,
+            priority=None,
+            tags=None,
+            tag_match="all",
+            any_tag=False,
+            untagged=False,
+            date="no-date",
+            date_today_include_past_due=False,
+            date_on=None,
+            date_before=None,
+            date_after=None,
+            date_range=None,
+            date_relative=None,
+            time=None,
+            include_list=None,
+            exclude_list=None,
+            include_list_id=None,
+            exclude_list_id=None,
+            vehicle=None,
+            location_title=None,
+            latitude=None,
+            longitude=None,
+            radius=100.0,
+            proximity="enter",
+            filter_json=None,
+            json=True,
+        )
+        try:
+            with (
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(
+                    self.remctl,
+                    "private_call",
+                    return_value={"status": "updated", "id": "CUSTOM-1"},
+                ) as private_call,
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.remctl.cmd_smart_list_edit(args)
+        finally:
+            db.close()
+
+        payload = private_call.call_args.args[0]
+        self.assertEqual(payload["action"], "update_smart_list")
+        self.assertEqual(payload["smartListId"], "CUSTOM-1")
+        self.assertEqual(json.loads(base64.b64decode(payload["filterData"]).decode("utf-8")), {"date": {"noDate": ""}})
+        self.assertEqual(json.loads(stdout.getvalue())["status"], "updated")
+
+    def test_smart_list_delete_rejects_without_private_before_helper(self):
+        args = SimpleNamespace(name="High Priority", smart_list_id=None, private=False, force=True, json=True)
+        with (
+            mock.patch.object(self.remctl, "private_available") as private_available,
+            mock.patch.object(self.remctl, "private_call") as private_call,
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            self.assertRaises(SystemExit),
+        ):
+            self.remctl.cmd_smart_list_delete(args)
+
+        private_available.assert_not_called()
+        private_call.assert_not_called()
+        self.assertIn("requires --private", stderr.getvalue())
+
+    def test_smart_list_delete_calls_private_helper_for_custom_match(self):
+        db = self._smart_list_db()
+        args = SimpleNamespace(name="High Priority", smart_list_id=None, private=True, force=True, json=True)
+        try:
+            with (
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(
+                    self.remctl,
+                    "private_call",
+                    return_value={"status": "deleted", "id": "CUSTOM-1"},
+                ) as private_call,
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.remctl.cmd_smart_list_delete(args)
+        finally:
+            db.close()
+
+        self.assertEqual(
+            private_call.call_args.args[0],
+            {"action": "delete_smart_list", "smartListId": "CUSTOM-1"},
+        )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["status"], "deleted")
+        self.assertEqual(payload["name"], "High Priority")
+
+    def test_smart_list_delete_does_not_match_builtin_smart_lists(self):
+        db = self._smart_list_db()
+        args = SimpleNamespace(name="Flagged", smart_list_id=None, private=True, force=True, json=True)
+        try:
+            with (
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(self.remctl, "private_call") as private_call,
+                contextlib.redirect_stderr(io.StringIO()) as stderr,
+                self.assertRaises(SystemExit),
+            ):
+                self.remctl.cmd_smart_list_delete(args)
+        finally:
+            db.close()
+
+        private_call.assert_not_called()
+        self.assertIn("custom smart list not found", stderr.getvalue())
 
     def test_import_accepts_due_date_from_exported_json(self):
         created_args = []

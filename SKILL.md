@@ -24,10 +24,12 @@ remctl upcoming 7 --json
 remctl overdue --json
 remctl lists --json
 remctl show Work --json
+remctl show --list-id 153 --json
 remctl search "query" --json
 remctl search "query" --completed --json
 remctl info 23880 --json
 remctl add "Review PR" -l Work -d "tomorrow 10:00" -p high --json
+remctl smart-lists --json
 remctl list-symbols --json
 remctl edit 23880 -d clear --json
 remctl done 23880 --json
@@ -53,6 +55,12 @@ remctl list-create "Research" --color orange --private --symbol education3 --jso
 remctl list-create "Cold Ideas" --color cyan --private --emoji 🥶 --json
 remctl list-edit Projects --private --color '#FF8D28' --symbol education3 --json
 remctl list-edit --list-id 144 --private --emoji 📌 --json
+remctl list-rename --list-id 123 --new-name "Project Archive" --json
+remctl smart-list-create "Flagged Review" --private --flagged --json
+remctl smart-list-create "High Priority" --private --priority high --json
+remctl smart-list-create "Tagged or Today" --private --match any --tags remctl --date today --json
+remctl smart-list-edit "Tagged or Today" --private --include-list Work --date no-date --json
+remctl smart-list-delete "Flagged Review" --private --force --json
 ```
 
 Private metadata rules:
@@ -64,7 +72,8 @@ Private metadata rules:
 - `--section`, `--new-section`, `--subtask`, `--image`, `--flagged`, `--urgent`, and location alarm fields require `--private` and should fail before writing if omitted.
 - `add --private -f` writes the real private flag instead of the EventKit priority proxy.
 - `list-symbols` prints the 71 official Reminders emblem names; its terminal glyph column is only an approximation. Use `list-symbols --preview` to open a native-asset HTML contact sheet with interactive official color swatches, or `list-symbols --html PATH` to write one. `list-create --color NAME` uses public EventKit for normal colors. `list-create --private` and `list-edit --private` can write exact `#RRGGBB` colors, official list symbols, and emoji badges. Reminders' picker icons use private emblem names such as `education3`; `--symbol` only accepts official names because arbitrary SF Symbol strings render as the default icon in Reminders. Use `--emoji` for custom standard emoji badges.
-- List names resolve exact first, then case-insensitive, then normalized names such as `Weekly 513` for `🗓️ Weekly 513`. If multiple lists match, RemCTL fails before writing; use `--list-id`.
+- `smart-lists` is read-only and safe. `smart-list-create`, `smart-list-edit`, and `smart-list-delete` are experimental and require `--private`; filter writes support the official Reminders filters decoded from Reminders.app: tags, date, time, priority, flag, location, lists, and all/any matching.
+- List names resolve exact first, then case-insensitive, then normalized names such as `Weekly 513` for `🗓️ Weekly 513`. If multiple lists match, RemCTL fails before writing; use `--list-id`. List-targeting commands consistently support `--list-id` where the underlying Reminders path can safely resolve a numeric list target (`show`, `add`, `link`, `export`, `list-edit`, `list-rename`, `list-delete`, and smart-list list filters).
 - Generic file/PDF attachments are rejected because Reminders does not reliably show them.
 - Verify private writes with `remctl info <numeric-id> --json`; if cross-device sync matters, ask the user to check iPhone/iPad.
 
@@ -109,7 +118,7 @@ macOS TCC permissions are scoped to the process context. Terminal can pass `remc
 ## Development Checks
 
 ```bash
-python3 -m py_compile remctl remctl_runtime.py remctl_serialization.py
+python3 -m py_compile remctl remctl_runtime.py remctl_serialization.py remctl_smart_lists.py
 swiftc -O -framework EventKit -framework Foundation -o /tmp/remctl-bridge-check remctl-bridge.swift
 swiftc -O -framework AppKit -framework Foundation -o /tmp/remctl-permissions-check remctl-permissions.swift
 clang -fobjc-arc -O -F/System/Library/PrivateFrameworks -framework Foundation -framework AppKit -framework ReminderKit -o /tmp/remctl-private-check remctl-private.m
