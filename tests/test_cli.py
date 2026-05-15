@@ -87,8 +87,31 @@ class CliTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         names = [symbol["name"] for symbol in payload["symbols"]]
         self.assertEqual(payload["count"], 71)
+        self.assertIn("approximate Unicode text fallback", payload["note"])
         self.assertIn("education3", names)
         self.assertIn("fitness", names)
+
+    def test_list_symbols_tui_labels_approximate_preview_column(self):
+        with contextlib.redirect_stdout(io.StringIO()) as stdout:
+            self.remctl.cmd_list_symbols(SimpleNamespace(json=False, html=None, preview=False))
+
+        output = stdout.getvalue()
+        self.assertIn("approximate text fallback", output)
+        self.assertIn("approx", output)
+        self.assertIn("education3", output)
+
+    def test_list_symbols_html_contact_sheet_embeds_badge_assets(self):
+        rows = [
+            {"name": "education3", "asset": "ListBadgeEducation3", "preview": "✎"},
+            {"name": "fitness", "asset": "ListBadgeFitness", "preview": "🏋"},
+        ]
+
+        html = self.remctl.build_list_symbols_html(rows, {"ListBadgeEducation3": "ZmFrZQ=="})
+
+        self.assertIn("Official Reminders List Symbols", html)
+        self.assertIn("data:image/png;base64,ZmFrZQ==", html)
+        self.assertIn("education3", html)
+        self.assertIn("ListBadgeFitness", html)
 
     def test_list_create_uses_bridge_contract_fields(self):
         args = SimpleNamespace(name="Project X", color="blue", private=False, symbol=None, emoji=None, json=True)

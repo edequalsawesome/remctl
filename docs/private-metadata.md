@@ -82,6 +82,7 @@ Subtask due dates use the same parser as parent reminders. Invalid parent or sub
 
 ```bash
 remctl list-symbols
+remctl list-symbols --preview
 remctl list-create "Research" --color orange --private --symbol education3
 remctl list-create "Focus" --private --color '#34C759' --emoji 🎯
 remctl list-edit Projects --private --color orange --symbol education3
@@ -89,7 +90,7 @@ remctl list-edit --list-id 144 --private --symbol education3
 remctl list-edit Projects --private --emoji 📌
 ```
 
-List colors and badge emblems were reverse-engineered from `ZREMCDBASELIST`. `ZCOLOR` stores a `REMColor` keyed archive. `ZBADGEEMBLEM` stores either an emoji JSON string or a private Reminders emblem name. `list-symbols` prints the 71 official emblem names bundled in RemindersUICore. RemCTL writes those values through ReminderKit change items, not by editing the database.
+List colors and badge emblems were reverse-engineered from `ZREMCDBASELIST`. `ZCOLOR` stores a `REMColor` keyed archive. `ZBADGEEMBLEM` stores either an emoji JSON string or a private Reminders emblem name. `list-symbols` prints the 71 official emblem names bundled in RemindersUICore; the terminal glyph column is approximate. Use `list-symbols --preview` or `list-symbols --html PATH` for a native-asset HTML contact sheet. RemCTL writes those values through ReminderKit change items, not by editing the database.
 
 Important limits:
 

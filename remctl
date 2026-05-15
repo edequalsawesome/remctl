@@ -6,7 +6,7 @@ attachments, completion status, list colors). Writes via remctl-bridge (EventKit
 with AppleScript fallback. Zero Python dependencies with small shared helpers.
 """
 
-import argparse, csv, io, json, os, platform, plistlib, re, shlex, shutil, sqlite3, subprocess, sys, time, unicodedata
+import argparse, base64, csv, html as html_lib, io, json, os, platform, plistlib, re, shlex, shutil, sqlite3, subprocess, sys, tempfile, time, unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -2689,22 +2689,258 @@ def cmd_lists(a):
         print(f"  {list_name} {id_dim}{sec_info}")
     print(f"\n{len(rows)} list{'s' if len(rows) != 1 else ''}")
 
-def cmd_list_symbols(a):
-    rows = [
+REMINDERS_UI_CORE_BUNDLE = Path("/System/Library/PrivateFrameworks/RemindersUICore.framework")
+
+def list_symbol_rows():
+    return [
         {"name": name, "asset": asset, "preview": preview}
         for name, asset, preview in OFFICIAL_LIST_SYMBOLS
     ]
+
+def default_list_symbols_html_path():
+    return CONFIG_DIR / "list-symbols.html"
+
+def export_list_symbol_asset_data(rows):
+    swift = shutil.which("swift") or "/usr/bin/swift"
+    if not Path(swift).exists():
+        raise RuntimeError("Swift is required to export Reminders badge assets for the HTML preview.")
+    if not REMINDERS_UI_CORE_BUNDLE.exists():
+        raise RuntimeError(f"RemindersUICore framework not found at {REMINDERS_UI_CORE_BUNDLE}.")
+
+    source = r'''
+import AppKit
+import Foundation
+
+let args = CommandLine.arguments
+guard args.count >= 4 else {
+    fputs("usage: swift - <bundle-path> <output-dir> <asset>...\n", stderr)
+    exit(64)
+}
+let bundlePath = args[1]
+let outputURL = URL(fileURLWithPath: args[2], isDirectory: true)
+let assets = Array(args.dropFirst(3))
+guard let bundle = Bundle(path: bundlePath) else {
+    fputs("Cannot load bundle: \(bundlePath)\n", stderr)
+    exit(65)
+}
+try FileManager.default.createDirectory(at: outputURL, withIntermediateDirectories: true)
+var missing: [String] = []
+for asset in assets {
+    guard let image = bundle.image(forResource: asset), let tiff = image.tiffRepresentation,
+          let rep = NSBitmapImageRep(data: tiff),
+          let png = rep.representation(using: .png, properties: [:]) else {
+        missing.append(asset)
+        continue
+    }
+    try png.write(to: outputURL.appendingPathComponent(asset + ".png"))
+}
+if !missing.isEmpty {
+    fputs("Missing badge assets: \(missing.joined(separator: ", "))\n", stderr)
+    exit(66)
+}
+'''
+    assets = [row["asset"] for row in rows]
+    with tempfile.TemporaryDirectory(prefix="remctl-list-symbols-") as tmpdir:
+        result = subprocess.run(
+            [swift, "-", str(REMINDERS_UI_CORE_BUNDLE), tmpdir, *assets],
+            input=source,
+            text=True,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "asset export failed").strip()
+            raise RuntimeError(detail)
+        data = {}
+        for asset in assets:
+            png_path = Path(tmpdir) / f"{asset}.png"
+            data[asset] = base64.b64encode(png_path.read_bytes()).decode("ascii")
+        return data
+
+def build_list_symbols_html(rows, image_data_by_asset):
+    cards = []
+    for row in rows:
+        asset = html_lib.escape(row["asset"])
+        name = html_lib.escape(row["name"])
+        preview = html_lib.escape(row["preview"])
+        encoded = image_data_by_asset.get(row["asset"])
+        if encoded:
+            icon = f'<img alt="" src="data:image/png;base64,{encoded}">'
+        else:
+            icon = f'<span class="fallback">{preview}</span>'
+        cards.append(
+            f'''<article class="symbol">
+  <div class="badge">{icon}</div>
+  <div class="meta">
+    <code>{name}</code>
+    <span>{asset}</span>
+  </div>
+</article>'''
+        )
+
+    return f'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RemCTL Official Reminders List Symbols</title>
+<style>
+:root {{
+  color-scheme: light dark;
+  --bg: #f5f5f7;
+  --text: #1d1d1f;
+  --muted: #6e6e73;
+  --card: rgba(255, 255, 255, .82);
+  --line: rgba(0, 0, 0, .08);
+  --badge: #ff9f0a;
+}}
+@media (prefers-color-scheme: dark) {{
+  :root {{
+    --bg: #101012;
+    --text: #f5f5f7;
+    --muted: #a1a1a6;
+    --card: rgba(34, 34, 38, .78);
+    --line: rgba(255, 255, 255, .11);
+  }}
+}}
+* {{ box-sizing: border-box; }}
+body {{
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+}}
+main {{
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 34px 24px 44px;
+}}
+header {{
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: end;
+  margin-bottom: 22px;
+}}
+h1 {{
+  margin: 0 0 6px;
+  font-size: 28px;
+  line-height: 1.1;
+  letter-spacing: 0;
+}}
+p {{
+  margin: 0;
+  color: var(--muted);
+  max-width: 780px;
+}}
+.count {{
+  color: var(--muted);
+  white-space: nowrap;
+}}
+.grid {{
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 10px;
+}}
+.symbol {{
+  min-height: 84px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+}}
+.badge {{
+  width: 54px;
+  height: 54px;
+  flex: 0 0 54px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 28%, #ffc466, var(--badge) 68%);
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, .12), 0 3px 10px rgba(0, 0, 0, .12);
+}}
+.badge img {{
+  width: 31px;
+  height: 31px;
+  object-fit: contain;
+  filter: brightness(0) invert(1);
+}}
+.fallback {{
+  color: white;
+  font-size: 24px;
+  line-height: 1;
+}}
+.meta {{
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}}
+code {{
+  font: 600 14px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}}
+.meta span {{
+  color: var(--muted);
+  font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Official Reminders List Symbols</h1>
+      <p>These are the native badge assets bundled with RemindersUICore. Use the symbol name with <code>remctl list-create "Name" --private --symbol &lt;name&gt;</code>.</p>
+    </div>
+    <div class="count">{len(rows)} symbols</div>
+  </header>
+  <section class="grid">
+{''.join(cards)}
+  </section>
+</main>
+</body>
+</html>
+'''
+
+def write_list_symbols_html(path=None):
+    rows = list_symbol_rows()
+    output_path = Path(path).expanduser() if path else default_list_symbols_html_path()
+    image_data = export_list_symbol_asset_data(rows)
+    html = build_list_symbols_html(rows, image_data)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(html, encoding="utf-8")
+    return output_path
+
+def cmd_list_symbols(a):
+    rows = list_symbol_rows()
+    if getattr(a, "html", None) is not None or getattr(a, "preview", False):
+        if a.json:
+            print("Error: --json cannot be combined with --html or --preview.", file=sys.stderr)
+            sys.exit(1)
+        try:
+            output_path = write_list_symbols_html(a.html or None)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if a.preview:
+            subprocess.run(["open", str(output_path)], check=False)
+        print(f"HTML preview: {output_path}")
+        return
     if a.json:
         print(json.dumps({
             "count": len(rows),
-            "note": "These are Reminders' bundled list badge emblems; emoji badges are separate.",
+            "note": "These are Reminders' bundled list badge emblems; emoji badges are separate. The preview field is an approximate Unicode text fallback, not the native Reminders/SF Symbol rendering.",
             "symbols": rows,
         }, indent=2, ensure_ascii=False))
         return
     print(C.bold(f"Official Reminders list symbols ({len(rows)}):"))
     print(C.dim("Use these with: remctl list-create \"Name\" --private --symbol <name>"))
-    print(C.dim("Preview glyphs are text approximations; Reminders renders the bundled badge assets."))
+    print(C.dim("The left column is an approximate text fallback, not native Reminders/SF Symbol rendering."))
     width = max(len(row["name"]) for row in rows)
+    print(f"  {C.dim('approx'):<2}  {C.dim('name'):<{width}}  {C.dim('asset')}")
     for row in rows:
         print(f"  {row['preview']:<2}  {row['name']:<{width}}  {C.dim(row['asset'])}")
 
@@ -3904,6 +4140,13 @@ _remctl() {
                 '--json[JSON output]'
             return
             ;;
+        list-symbols)
+            _arguments \
+                '--html[Write a standalone HTML preview contact sheet]:path:_files' \
+                '--preview[Generate and open the HTML preview contact sheet]' \
+                '--json[JSON output]'
+            return
+            ;;
     esac
     _describe 'command' commands
 }
@@ -3925,6 +4168,9 @@ BASH_COMPLETION = '''_remctl() {
         return
     elif [ "$cmd" = "doctor" ]; then
         COMPREPLY=( $(compgen -W "--for-agent --json" -- "$cur") )
+        return
+    elif [ "$cmd" = "list-symbols" ]; then
+        COMPREPLY=( $(compgen -W "--html --preview --json" -- "$cur") )
         return
     elif [ "$cmd" = "list-create" ]; then
         COMPREPLY=( $(compgen -W "--color --private --symbol --emoji --json" -- "$cur") )
@@ -3975,6 +4221,8 @@ complete -c remctl -n "__fish_use_subcommand" -a setup -d "Install shell complet
 complete -c remctl -n "__fish_use_subcommand" -a permissions -d "Open guided macOS permission helper"
 complete -c remctl -n "__fish_use_subcommand" -a completion -d "Generate shell completions"
 complete -c remctl -n "__fish_seen_subcommand_from doctor" -l for-agent -d "Print agent-focused context and TCC guidance"
+complete -c remctl -n "__fish_seen_subcommand_from list-symbols" -l html -d "Write a standalone HTML preview contact sheet" -r
+complete -c remctl -n "__fish_seen_subcommand_from list-symbols" -l preview -d "Generate and open the HTML preview contact sheet"
 complete -c remctl -n "__fish_seen_subcommand_from list-create" -l color -d "List color name; with --private also accepts #RRGGBB" -r
 complete -c remctl -n "__fish_seen_subcommand_from list-create" -l private -d "Use private ReminderKit list appearance writes"
 complete -c remctl -n "__fish_seen_subcommand_from list-create" -l symbol -d "Official Reminders list symbol name" -r
@@ -4792,6 +5040,8 @@ def main():
     c = sub.add_parser("overdue", help="Show all overdue reminders"); vb(c); js(c)
 
     c = sub.add_parser("list-symbols", help="List official Reminders list symbols")
+    c.add_argument("--html", nargs="?", const="", metavar="PATH", help="Write a standalone HTML preview contact sheet")
+    c.add_argument("--preview", action="store_true", help="Generate and open the HTML preview contact sheet")
     js(c)
 
     c = sub.add_parser("list-create", help="Create a new list")
