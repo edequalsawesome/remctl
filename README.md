@@ -98,12 +98,12 @@ RemCTL can inspect built-in and custom smart lists with `smart-lists`. It can al
 ```bash
 remctl smart-lists --json
 remctl smart-list-create "Tagged or Today" --private --match any --tags remctl --date today
-remctl smart-list-create "Projects No Date" --private --include-list-id 144 --date no-date
+remctl smart-list-create "Work and Projects" --private --include-list-id 135 --include-list-id 144
 remctl smart-list-edit --smart-list-id 170 --private --priority high
 remctl smart-list-delete "Tagged or Today" --private --force
 ```
 
-Smart-list writes are private ReminderKit writes and always require `--private`; RemCTL rejects unknown filter shapes before saving. Use:
+Smart-list writes are private ReminderKit writes and always require `--private`; RemCTL rejects unknown filter shapes before saving. Repeated included lists default to union behavior (`--list-match any`) so smart lists can aggregate Work and Projects. Use:
 
 - [docs/commands.md#smart-lists](docs/commands.md#smart-lists) for command syntax and supported filters.
 - [docs/private-metadata.md#smart-list-examples](docs/private-metadata.md#smart-list-examples) for private API behavior, safety notes, and reverse-engineered filter storage details.

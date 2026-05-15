@@ -27,7 +27,7 @@ Verified on macOS/iCloud sync:
 - urgent state: `edit ID --private --urgent`
 - location alarms: `edit ID --private --location-title "Apple Park" --latitude 37.3349 --longitude -122.0090`
 - list appearance metadata: `list-create "Projects" --private --symbol education3`, `list-edit Projects --private --color '#FF8D28' --emoji 📌`
-- custom smart lists with official Reminders filters: `smart-list-create "Flagged Review" --private --flagged`, `smart-list-create "Tagged or Today" --private --match any --tags remctl --date today`, `smart-list-edit "Tagged or Today" --private --priority high`, and exact custom smart-list cleanup via `smart-list-delete "Flagged Review" --private --force`
+- custom smart lists with official Reminders filters: `smart-list-create "Flagged Review" --private --flagged`, `smart-list-create "Tagged or Today" --private --match any --tags remctl --date today`, `smart-list-create "Work and Projects" --private --include-list-id 135 --include-list-id 144`, `smart-list-edit "Tagged or Today" --private --priority high`, and exact custom smart-list cleanup via `smart-list-delete "Flagged Review" --private --force`
 
 Not exposed:
 
@@ -112,14 +112,15 @@ remctl smart-list-create "Flagged Review" --private --flagged
 remctl smart-list-create "High Priority" --private --priority high
 remctl smart-list-create "Tagged or Today" --private --match any --tags remctl --date today
 remctl smart-list-create "Work No Date" --private --include-list Work --date no-date
-remctl smart-list-create "Projects No Date" --private --include-list-id 144 --date no-date
+remctl smart-list-create "Work and Projects" --private --include-list-id 135 --include-list-id 144
+remctl smart-list-create "Work and Projects (All)" --private --include-list-id 135 --include-list-id 144 --list-match all
 remctl smart-list-edit "Tagged or Today" --private --priority high
 remctl smart-list-delete "Flagged Review" --private --force
 ```
 
 `smart-lists` is read-only and safe. It reads `REMCDSmartList` rows from `ZREMCDBASELIST`, including built-in smart lists, and decodes known `ZFILTERDATA` payloads.
 
-`smart-list-create` writes through `REMSaveRequest.addCustomSmartListWithName` and saves through ReminderKit. It requires `--private`, verifies that the active account supports custom smart lists, rejects duplicate exact custom names, and accepts the official Reminders filters decoded from Reminders.app: tags, date, time, priority, flag, location, lists, and all/any matching. It does not write SQLite.
+`smart-list-create` writes through `REMSaveRequest.addCustomSmartListWithName` and saves through ReminderKit. It requires `--private`, verifies that the active account supports custom smart lists, rejects duplicate exact custom names, and accepts the official Reminders filters decoded from Reminders.app: tags, date, time, priority, flag, location, lists, and all/any matching. Repeated included lists default to union behavior with `--list-match any`; pass `--list-match all` only when you intentionally want the stricter list operation. It does not write SQLite.
 
 `smart-list-edit` fetches an existing custom smart list by exact name or numeric `--smart-list-id`, replaces its `filterData` through ReminderKit, and requires `--private`. It never edits built-in smart lists.
 

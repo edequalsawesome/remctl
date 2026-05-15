@@ -81,6 +81,7 @@ class SmartListFilterTests(unittest.TestCase):
             {"location": {"vehicle": "connected"}},
             {"location": {"location": {"title": "Home", "latitude": 41.9, "radius": 100, "longitude": 12.5, "proximity": "enter"}}},
             {"operation": "and", "lists": {"include": ["46EBCB36-C7CB-4983-937A-A5137895473F"], "exclude": []}},
+            {"operation": "and", "lists": {"operation": "or", "include": ["WORK", "PROJECTS"], "exclude": []}},
             {"operation": "or", "date": {"today": False}, "lists": {"include": ["46EBCB36-C7CB-4983-937A-A5137895473F"], "exclude": []}},
         ]
 
@@ -127,6 +128,14 @@ class SmartListFilterTests(unittest.TestCase):
                 "date": {"today": False},
                 "lists": {"include": ["LIST-1"], "exclude": []},
             },
+        )
+        self.assertEqual(
+            build_supported_filter_payload(include_list_ids=["WORK", "PROJECTS"]),
+            {"lists": {"include": ["WORK", "PROJECTS"], "exclude": [], "operation": "or"}},
+        )
+        self.assertEqual(
+            build_supported_filter_payload(include_list_ids=["WORK", "PROJECTS"], list_match="all"),
+            {"lists": {"include": ["WORK", "PROJECTS"], "exclude": [], "operation": "and"}},
         )
 
     def test_build_supported_filter_payload_rejects_unknown_filters(self):

@@ -2881,6 +2881,7 @@ def smart_list_filter_payload_from_args(a, db):
             _smart_list_csv_values(getattr(a, "exclude_list", None)),
             getattr(a, "exclude_list_id", None),
         ),
+        list_match=getattr(a, "list_match", None),
         vehicle=getattr(a, "vehicle", None),
         location=location,
     )
@@ -4535,6 +4536,7 @@ def add_smart_list_filter_arguments(parser):
     parser.add_argument("--exclude-list", action="append", help="Exclude reminders from list name (repeatable or comma-separated)")
     parser.add_argument("--include-list-id", action="append", type=int, help="Include reminders from numeric list ID")
     parser.add_argument("--exclude-list-id", action="append", type=int, help="Exclude reminders from numeric list ID")
+    parser.add_argument("--list-match", choices=["all", "any"], help="How multiple included/excluded lists should match")
     parser.add_argument("--vehicle", choices=["connected", "disconnected"], help="Location vehicle filter")
     parser.add_argument("--location-title", help="Specific location title")
     parser.add_argument("--latitude", type=float, help="Specific location latitude")
@@ -4694,6 +4696,7 @@ _remctl() {
                 '--exclude-list[Exclude list]:list:' \
                 '--include-list-id[Include numeric list ID]:id:' \
                 '--exclude-list-id[Exclude numeric list ID]:id:' \
+                '--list-match[Match all or any selected lists]:list-match:(all any)' \
                 '--vehicle[Vehicle filter]:vehicle:(connected disconnected)' \
                 '--location-title[Location title]:title:' \
                 '--latitude[Latitude]:latitude:' \
@@ -4726,6 +4729,7 @@ _remctl() {
                 '--exclude-list[Exclude list]:list:' \
                 '--include-list-id[Include numeric list ID]:id:' \
                 '--exclude-list-id[Exclude numeric list ID]:id:' \
+                '--list-match[Match all or any selected lists]:list-match:(all any)' \
                 '--vehicle[Vehicle filter]:vehicle:(connected disconnected)' \
                 '--location-title[Location title]:title:' \
                 '--latitude[Latitude]:latitude:' \
@@ -4796,10 +4800,10 @@ BASH_COMPLETION = '''_remctl() {
         COMPREPLY=( $(compgen -W "--color --private --symbol --emoji --json" -- "$cur") )
         return
     elif [ "$cmd" = "smart-list-create" ]; then
-        COMPREPLY=( $(compgen -W "--private --match --filter-json --flagged --priority --tags --tag-match --any-tag --untagged --date --date-today-include-past-due --date-on --date-before --date-after --date-range --date-relative --time --include-list --exclude-list --include-list-id --exclude-list-id --vehicle --location-title --latitude --longitude --radius --proximity --json" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--private --match --filter-json --flagged --priority --tags --tag-match --any-tag --untagged --date --date-today-include-past-due --date-on --date-before --date-after --date-range --date-relative --time --include-list --exclude-list --include-list-id --exclude-list-id --list-match --vehicle --location-title --latitude --longitude --radius --proximity --json" -- "$cur") )
         return
     elif [ "$cmd" = "smart-list-edit" ]; then
-        COMPREPLY=( $(compgen -W "--private --smart-list-id --match --filter-json --flagged --priority --tags --tag-match --any-tag --untagged --date --date-today-include-past-due --date-on --date-before --date-after --date-range --date-relative --time --include-list --exclude-list --include-list-id --exclude-list-id --vehicle --location-title --latitude --longitude --radius --proximity --json" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--private --smart-list-id --match --filter-json --flagged --priority --tags --tag-match --any-tag --untagged --date --date-today-include-past-due --date-on --date-before --date-after --date-range --date-relative --time --include-list --exclude-list --include-list-id --exclude-list-id --list-match --vehicle --location-title --latitude --longitude --radius --proximity --json" -- "$cur") )
         return
     elif [ "$cmd" = "smart-list-delete" ]; then
         COMPREPLY=( $(compgen -W "--private --smart-list-id --force --json" -- "$cur") )
@@ -4897,6 +4901,7 @@ complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l exclude-list -d "Exclude list" -r
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l include-list-id -d "Include numeric list ID" -r
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l exclude-list-id -d "Exclude numeric list ID" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l list-match -d "Match all or any selected lists" -a "all any"
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l vehicle -d "Vehicle filter" -a "connected disconnected"
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l location-title -d "Location title" -r
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l latitude -d "Latitude" -r
@@ -5759,7 +5764,8 @@ def main():
             "  remctl smart-list-create \"Flagged Review\" --private --flagged\n"
             "  remctl smart-list-create \"High Priority\" --private --priority high\n"
             "  remctl smart-list-create \"Tagged or Today\" --private --match any --tags remctl --date today\n"
-            "  remctl smart-list-create \"Work No Date\" --private --include-list Work --date no-date\n"
+            "  remctl smart-list-create \"Work and Projects\" --private --include-list-id 135 --include-list-id 144\n"
+            "  remctl smart-list-create \"Work and Projects (All)\" --private --include-list-id 135 --include-list-id 144 --list-match all\n"
             "  remctl smart-list-create \"Near Home\" --private --location-title Home --latitude 41.9 --longitude 12.5 --proximity enter\n"
             "\n"
             "This command never writes SQLite directly. Unknown smart-list filter shapes are rejected."

@@ -74,7 +74,7 @@ remctl list-edit --list-id 144 --private --emoji 📌 --json
 remctl smart-list-create "Flagged Review" --private --flagged --json
 remctl smart-list-create "High Priority" --private --priority high --json
 remctl smart-list-create "Tagged or Today" --private --match any --tags remctl --date today --json
-remctl smart-list-create "Projects No Date" --private --include-list-id 144 --date no-date --json
+remctl smart-list-create "Work and Projects" --private --include-list-id 135 --include-list-id 144 --json
 remctl smart-list-edit "Tagged or Today" --private --include-list Work --date no-date --json
 remctl smart-list-edit --smart-list-id 170 --private --match any --tags remctl,codex --json
 remctl smart-list-delete "Flagged Review" --private --force --json
@@ -107,11 +107,12 @@ remctl smart-list-create "High or Medium" --private --priority high,medium --jso
 remctl smart-list-create "Morning" --private --time morning --json
 remctl smart-list-create "Next Hour" --private --date-relative in-next:1:hour:past-due --json
 remctl smart-list-create "Near Home" --private --location-title Home --latitude 41.9 --longitude 12.5 --radius 100 --proximity enter --json
-remctl smart-list-create "Projects No Date" --private --include-list-id 144 --date no-date --json
+remctl smart-list-create "Work and Projects" --private --include-list-id 135 --include-list-id 144 --json
+remctl smart-list-create "Work and Projects (All)" --private --include-list-id 135 --include-list-id 144 --list-match all --json
 remctl smart-list-edit --smart-list-id 170 --private --filter-json @filter.json --json
 ```
 
-Supported filter families are tags (`--tags`, `--tag-match all|any`, `--any-tag`, `--untagged`), date (`--date any|today|no-date`, `--date-today-include-past-due`, `--date-on`, `--date-before`, `--date-after`, `--date-range START,END`, `--date-relative in-next:1:hour[:past-due]`), time (`morning`, `afternoon`, `evening`, `night`, `no-time`), priority (`high`, `medium`, `low`), flag (`--flagged`), vehicle location (`--vehicle connected|disconnected`), specific location (`--location-title`, `--latitude`, `--longitude`, `--radius`, `--proximity enter|leave|arriving|leaving`), list inclusion/exclusion (`--include-list`, `--exclude-list`, `--include-list-id`, `--exclude-list-id`), and top-level matching (`--match all|any`).
+Supported filter families are tags (`--tags`, `--tag-match all|any`, `--any-tag`, `--untagged`), date (`--date any|today|no-date`, `--date-today-include-past-due`, `--date-on`, `--date-before`, `--date-after`, `--date-range START,END`, `--date-relative in-next:1:hour[:past-due]`), time (`morning`, `afternoon`, `evening`, `night`, `no-time`), priority (`high`, `medium`, `low`), flag (`--flagged`), vehicle location (`--vehicle connected|disconnected`), specific location (`--location-title`, `--latitude`, `--longitude`, `--radius`, `--proximity enter|leave|arriving|leaving`), list inclusion/exclusion (`--include-list`, `--exclude-list`, `--include-list-id`, `--exclude-list-id`, `--list-match all|any`), and top-level matching (`--match all|any`). Repeated included lists default to `--list-match any` so aggregating Work and Projects creates a union, not an impossible all-lists intersection.
 
 `--filter-json` is an advanced escape hatch for raw official filter JSON or `@path`; unknown or unsupported smart-list filter shapes are rejected before writing. `smart-list-edit` and `smart-list-delete` target custom smart lists by exact name or `--smart-list-id` and never match built-in smart lists.
 

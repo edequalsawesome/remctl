@@ -277,11 +277,14 @@ def _summarize_filter_family(key, value):
     if key == "lists" and isinstance(value, dict):
         include = value.get("include", [])
         exclude = value.get("exclude", [])
+        operation = value.get("operation")
         if (
             isinstance(include, list)
             and isinstance(exclude, list)
             and all(isinstance(item, str) for item in include + exclude)
+            and (operation is None or operation in {"and", "or"})
         ):
+            match = {"and": "all", "or": "any"}.get(operation, "all")
             bits = []
             if include:
                 bits.append(f"include {len(include)} list(s)")
@@ -289,10 +292,11 @@ def _summarize_filter_family(key, value):
                 bits.append(f"exclude {len(exclude)} list(s)")
             return {
                 "kind": "lists",
-                "description": "Lists: " + ", ".join(bits),
+                "description": f"Lists {match}: " + ", ".join(bits),
                 "supported": True,
                 "include": include,
                 "exclude": exclude,
+                "listMatch": match,
             }
     return {
         "kind": str(key),
@@ -431,6 +435,7 @@ def build_supported_filter_payload(
     time_filter=None,
     include_list_ids=None,
     exclude_list_ids=None,
+    list_match=None,
     vehicle=None,
     location=None,
 ):
@@ -469,7 +474,7 @@ def build_supported_filter_payload(
     if time_payload is not None:
         filters.append(("time", time_payload))
 
-    list_payload = _build_lists_filter(include_list_ids, exclude_list_ids)
+    list_payload = _build_lists_filter(include_list_ids, exclude_list_ids, list_match=list_match)
     if list_payload is not None:
         filters.append(("lists", list_payload))
 
@@ -570,11 +575,18 @@ def _build_time_filter(value):
     return {normalized: ""}
 
 
-def _build_lists_filter(include_list_ids=None, exclude_list_ids=None):
+def _build_lists_filter(include_list_ids=None, exclude_list_ids=None, *, list_match=None):
     include = [str(item).strip() for item in (include_list_ids or []) if str(item).strip()]
     exclude = [str(item).strip() for item in (exclude_list_ids or []) if str(item).strip()]
     if include or exclude:
-        return {"include": include, "exclude": exclude}
+        payload = {"include": include, "exclude": exclude}
+        if list_match is None:
+            operation = "or" if len(include) > 1 and not exclude else "and"
+        else:
+            operation = normalize_match_operation(list_match)
+        if operation == "or" or len(include) > 1 or exclude:
+            payload["operation"] = operation
+        return payload
     return None
 
 

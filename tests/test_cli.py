@@ -350,6 +350,7 @@ class CliTests(unittest.TestCase):
             exclude_list=None,
             include_list_id=None,
             exclude_list_id=None,
+            list_match=None,
             vehicle=None,
             location_title=None,
             latitude=None,
@@ -412,6 +413,7 @@ class CliTests(unittest.TestCase):
             exclude_list=None,
             include_list_id=[10],
             exclude_list_id=None,
+            list_match=None,
             vehicle=None,
             location_title=None,
             latitude=None,
@@ -439,6 +441,64 @@ class CliTests(unittest.TestCase):
         decoded = json.loads(base64.b64decode(private_call.call_args.args[0]["filterData"]).decode("utf-8"))
         self.assertEqual(decoded, {"lists": {"include": ["LIST-1"], "exclude": []}})
 
+    def test_smart_list_create_defaults_multiple_include_lists_to_any_match(self):
+        db = self._smart_list_db()
+        args = SimpleNamespace(
+            name="List Union Filter",
+            private=True,
+            match="all",
+            flagged=False,
+            priority=None,
+            tags=None,
+            tag_match="all",
+            any_tag=False,
+            untagged=False,
+            date=None,
+            date_today_include_past_due=False,
+            date_on=None,
+            date_before=None,
+            date_after=None,
+            date_range=None,
+            date_relative=None,
+            time=None,
+            include_list=None,
+            exclude_list=None,
+            include_list_id=[10, 11],
+            exclude_list_id=None,
+            list_match=None,
+            vehicle=None,
+            location_title=None,
+            latitude=None,
+            longitude=None,
+            radius=100.0,
+            proximity="enter",
+            filter_json=None,
+            json=True,
+        )
+        db.execute(
+            "INSERT INTO ZREMCDBASELIST "
+            "(Z_PK, ZNAME, ZCKIDENTIFIER, ZMARKEDFORDELETION, Z_ENT, ZSMARTLISTTYPE, ZFILTERDATA) "
+            "VALUES (?, ?, ?, 0, 3, NULL, NULL)",
+            (11, "Work", "LIST-2"),
+        )
+        try:
+            with (
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(
+                    self.remctl,
+                    "private_call",
+                    return_value={"status": "created", "id": "SMART-4"},
+                ) as private_call,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.remctl.cmd_smart_list_create(args)
+        finally:
+            db.close()
+
+        decoded = json.loads(base64.b64decode(private_call.call_args.args[0]["filterData"]).decode("utf-8"))
+        self.assertEqual(decoded, {"lists": {"include": ["LIST-1", "LIST-2"], "exclude": [], "operation": "or"}})
+
     def test_smart_list_edit_replaces_filter_for_custom_match(self):
         db = self._smart_list_db()
         args = SimpleNamespace(
@@ -464,6 +524,7 @@ class CliTests(unittest.TestCase):
             exclude_list=None,
             include_list_id=None,
             exclude_list_id=None,
+            list_match=None,
             vehicle=None,
             location_title=None,
             latitude=None,
