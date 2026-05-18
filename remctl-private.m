@@ -87,11 +87,22 @@
 
 @interface REMReminderChangeItem : NSObject
 - (id)attachmentContext;
+- (id)dueDateDeltaAlertContext;
 - (id)flaggedContext;
 - (id)hashtagContext;
 - (id)subtaskContext;
 - (id)urgentAlarmContext;
 - (void)addAlarm:(id)alarm;
+@end
+
+@interface REMReminderDueDateDeltaAlertContextChangeItem : NSObject
+- (id)addDueDateDeltaAlertWithDueDateDelta:(id)dueDateDelta;
+- (void)removeAllFetchedDueDateDeltaAlerts;
+- (void)removeDueDateDeltaAlertsWithIdentifiers:(NSArray *)identifiers;
+@end
+
+@interface REMDueDateDeltaInterval : NSObject
+- (instancetype)initWithUnit:(NSInteger)unit count:(NSInteger)count;
 @end
 
 @interface REMReminderAttachmentContextChangeItem : NSObject
@@ -571,6 +582,7 @@ int main(int argc, const char * argv[]) {
             @"add_attachments",
             @"set_flagged",
             @"set_urgent",
+            @"set_early_reminder",
             @"add_location_alarm",
             @"create_list",
             @"set_list_appearance",
@@ -1248,6 +1260,35 @@ int main(int argc, const char * argv[]) {
         } else if ([action isEqualToString:@"set_urgent"]) {
             [[change urgentAlarmContext] setIsUrgentStateEnabledForCurrentUser:[cmd[@"urgent"] boolValue]];
             details[@"urgent"] = @([cmd[@"urgent"] boolValue]);
+        } else if ([action isEqualToString:@"set_early_reminder"]) {
+            id context = [change dueDateDeltaAlertContext];
+            if (!context) fail(@"Reminder does not support Early Reminder changes");
+            NSArray *existingIdentifiers = cmd[@"existingIdentifiers"];
+            if ([existingIdentifiers isKindOfClass:[NSArray class]] && existingIdentifiers.count) {
+                NSMutableArray *uuids = [NSMutableArray array];
+                for (id rawIdentifier in existingIdentifiers) {
+                    if (![rawIdentifier isKindOfClass:[NSString class]]) continue;
+                    NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:(NSString *)rawIdentifier];
+                    if (uuid) [uuids addObject:uuid];
+                }
+                if (uuids.count) {
+                    [context removeDueDateDeltaAlertsWithIdentifiers:uuids];
+                    details[@"earlyReminderRemoved"] = @(uuids.count);
+                }
+            }
+            [context removeAllFetchedDueDateDeltaAlerts];
+            if ([cmd[@"clear"] boolValue]) {
+                details[@"earlyReminderCleared"] = @YES;
+            } else {
+                NSInteger unit = [cmd[@"unit"] integerValue];
+                NSInteger count = [cmd[@"count"] integerValue];
+                if (unit < 0 || unit > 4) fail(@"Early Reminder unit must be between 0 and 4");
+                if (count == 0) fail(@"Early Reminder count cannot be 0");
+                REMDueDateDeltaInterval *delta = [[REMDueDateDeltaInterval alloc] initWithUnit:unit count:count];
+                id alert = [context addDueDateDeltaAlertWithDueDateDelta:delta];
+                if (!alert) fail(@"Could not create Early Reminder delta alert");
+                details[@"earlyReminder"] = @{@"unit": @(unit), @"count": @(count)};
+            }
         } else if ([action isEqualToString:@"add_location_alarm"]) {
             NSString *title = cmd[@"title"] ?: @"Location";
             double lat = [cmd[@"latitude"] doubleValue];

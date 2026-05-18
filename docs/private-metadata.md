@@ -25,6 +25,7 @@ Verified on macOS/iCloud sync:
 - image attachments: `--private --image ~/Desktop/mockup.png`
 - real flag state: `edit ID --private --flagged` or `add ... --private -f`
 - urgent state: `add "Leave now" --private --urgent` or `edit ID --private --urgent`
+- Early Reminders: `add "Leave early" -d "today 14:00" --private --early-reminder 15m`, `edit ID --private --early-reminder 1h`, or `edit ID --private --early-reminder clear`
 - location alarms: `edit ID --private --location-title "Apple Park" --latitude 37.3349 --longitude -122.0090`
 - list appearance metadata: `list-create "Projects" --private --symbol education3`, `list-edit Projects --private --color '#FF8D28' --emoji 📌`
 - list and smart-list pin state: `list-pin "Project X" --private`, `list-pin "Flagged" --private`, `list-unpin --smart-list-id 4 --private`
@@ -57,6 +58,7 @@ remctl add "Launch assets" -l Projects --private \
   --subtask '{"title":"Export PNG","notes":"Use final crop","due":"tomorrow","url":"https://example.com","tags":["media"],"urgent":true}'
 
 remctl add "Flagged private task" -l Work --private -f
+remctl add "Leave early" -l Work -d "today 14:00" --private --early-reminder 15m
 ```
 
 With `--private`, `--url` creates a web rich link attachment and `-t/--tags` creates real synced Reminders tags. Without `--private`, `--url` is appended to notes and `-t/--tags` appends inline hashtags to the title.
@@ -73,13 +75,17 @@ remctl edit 23880 --private --subtask "Follow up"
 remctl edit 23880 --private --subtask '{"title":"Follow up","notes":"Bring latest numbers","due":"next friday at 3pm","url":"https://example.com","tags":["work"],"flagged":true}'
 remctl edit 23880 --private --image ~/Desktop/mockup.png
 remctl edit 23880 --private --flagged --urgent
+remctl edit 23880 --private --early-reminder 1h
+remctl edit 23880 --private --early-reminder clear
 remctl edit 23880 --private --no-flagged --no-urgent
 remctl edit 23880 --private --location-title "Apple Park" --latitude 37.3349 --longitude -122.0090 --radius 200 --proximity arriving
 ```
 
-`--subtask` remains backwards compatible with a plain title string. To set metadata on the child reminder itself, pass a JSON object. Supported subtask fields are `title`, `notes`, `due`, `priority`, `alarm`, `recurrence`, `url`/`urls`, `tags`, `image`/`images`, `flagged`, `urgent`, and location fields (`locationTitle`, `latitude`, `longitude`, `radius`, `proximity`, `address`). Public fields such as notes and due dates are applied through `remctl-bridge`; private fields such as rich links and tags are applied through `remctl-private`.
+`--subtask` remains backwards compatible with a plain title string. To set metadata on the child reminder itself, pass a JSON object. Supported subtask fields are `title`, `notes`, `due`, `priority`, `alarm`, `recurrence`, `earlyReminder`, `url`/`urls`, `tags`, `image`/`images`, `flagged`, `urgent`, and location fields (`locationTitle`, `latitude`, `longitude`, `radius`, `proximity`, `address`). Public fields such as notes and due dates are applied through `remctl-bridge`; private fields such as rich links, tags, and Early Reminders are applied through `remctl-private`.
 
 Subtask due dates use the same parser as parent reminders. Invalid parent or subtask due dates fail before RemCTL creates or edits anything, so private metadata is not silently dropped onto a partially-created reminder.
+
+Early Reminders are stored by Reminders as private `REMDueDateDeltaAlert` metadata and mirrored in `ZDUEDATEDELTAALERTSDATA`. RemCTL writes them with `REMReminderChangeItem.dueDateDeltaAlertContext`, removes existing due-date delta identifiers before replacing the value, and verifies readback through `remctl info ID --json`. Non-clear values require a due date because Reminders anchors the delta to the reminder's due date. The unit mapping is `0 = minutes`, `1 = hours`, `2 = days`, `3 = weeks`, `4 = months`; RemCTL accepts friendly forms such as `15m`, `1h`, `2d`, `1w`, and `1mo`.
 
 `--section` resolves by name inside the target list. If duplicate section names exist, RemCTL automatically uses the only non-empty matching section when there is exactly one. If the duplicate remains ambiguous, the command fails before writing and prints the available stable IDs; pass one with `--section-id`.
 
@@ -189,6 +195,7 @@ Examples of rejected commands:
 remctl add "Research" -l Projects --section "Research"
 remctl edit 23880 -t remctl
 remctl edit 23880 --urgent
+remctl edit 23880 --early-reminder 15m
 remctl add "Milk" -l Groceries --grocery
 remctl list-create "Groceries" --groceries
 remctl template-create "Packing Template" --from-list Packing
@@ -197,7 +204,7 @@ remctl template-apply "Packing Template"
 
 These fail because they would otherwise look successful while silently dropping private metadata.
 
-`--private --url` and subtask `url`/`urls` accept `http` and `https` URLs. Image attachments must point to readable image files. Location alarms validate latitude, longitude, radius, and proximity before saving.
+`--private --url` and subtask `url`/`urls` accept `http` and `https` URLs. Image attachments must point to readable image files. Early Reminders validate their delta syntax and due-date anchor before saving. Location alarms validate latitude, longitude, radius, and proximity before saving.
 
 ## Installation and Doctor
 

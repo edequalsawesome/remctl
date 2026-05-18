@@ -29,6 +29,18 @@ class CliTests(unittest.TestCase):
             "2026-04-15T14:00:00",
         )
 
+    def test_parse_early_reminder_normalizes_due_date_delta(self):
+        self.assertEqual(
+            self.remctl.parse_early_reminder("15 minutes"),
+            {"unit": 0, "unitName": "minutes", "count": -15, "value": 15},
+        )
+        self.assertEqual(
+            self.remctl.parse_early_reminder("1h before"),
+            {"unit": 1, "unitName": "hour", "count": -1, "value": 1},
+        )
+        self.assertEqual(self.remctl.parse_early_reminder("clear"), {"clear": True})
+        self.assertIsNone(self.remctl.parse_early_reminder("eventually"))
+
     def test_parse_due_accepts_today_and_tomorrow_with_times(self):
         today_due = self.remctl.parse_due("today at 3pm")
         tomorrow_due = self.remctl.parse_due("tomorrow 15:30")
@@ -634,6 +646,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, 0)
         self.assertIn("--urgent", stdout.getvalue())
+        self.assertIn("--early-reminder", stdout.getvalue())
 
     def test_add_urgent_rejects_without_private_before_bridge(self):
         args = SimpleNamespace(
@@ -674,6 +687,89 @@ class CliTests(unittest.TestCase):
 
         bridge_call.assert_not_called()
         self.assertIn("--private", stderr.getvalue())
+
+    def test_add_early_reminder_rejects_without_private_before_bridge(self):
+        args = SimpleNamespace(
+            title="Leave early",
+            list="Work",
+            list_id=None,
+            notes=None,
+            due="2026-05-18 14:00",
+            priority=None,
+            flag=False,
+            tags=None,
+            url=None,
+            recurrence=None,
+            alarm=None,
+            private=False,
+            private_metadata=False,
+            grocery=False,
+            section=None,
+            section_id=None,
+            new_section=None,
+            subtask=None,
+            image=None,
+            urgent=None,
+            early_reminder="15m",
+            location_title=None,
+            latitude=None,
+            longitude=None,
+            radius=100,
+            proximity="arriving",
+            address=None,
+            json=True,
+        )
+        with (
+            mock.patch.object(self.remctl, "bridge_call") as bridge_call,
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            self.assertRaises(SystemExit),
+        ):
+            self.remctl.cmd_add(args)
+
+        bridge_call.assert_not_called()
+        self.assertIn("--private", stderr.getvalue())
+
+    def test_add_early_reminder_requires_due_date_before_bridge(self):
+        args = SimpleNamespace(
+            title="Leave early",
+            list="Work",
+            list_id=None,
+            notes=None,
+            due=None,
+            priority=None,
+            flag=False,
+            tags=None,
+            url=None,
+            recurrence=None,
+            alarm=None,
+            private=True,
+            private_metadata=False,
+            grocery=False,
+            section=None,
+            section_id=None,
+            new_section=None,
+            subtask=None,
+            image=None,
+            urgent=None,
+            early_reminder="15m",
+            location_title=None,
+            latitude=None,
+            longitude=None,
+            radius=100,
+            proximity="arriving",
+            address=None,
+            json=True,
+        )
+        with (
+            mock.patch.object(self.remctl, "bridge_call") as bridge_call,
+            mock.patch.object(self.remctl, "private_available", return_value=True),
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            self.assertRaises(SystemExit),
+        ):
+            self.remctl.cmd_add(args)
+
+        bridge_call.assert_not_called()
+        self.assertIn("early_reminder_requires_due_date", stderr.getvalue())
 
     def test_add_grocery_rejects_without_private_before_bridge(self):
         args = SimpleNamespace(
@@ -1807,6 +1903,87 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result[0]["bridgeUpdates"][0]["id"], "CHILD-ID")
         self.assertEqual(result[0]["childPrivateUpdates"][0]["id"], "CHILD-ID")
 
+    def test_apply_private_changes_sets_early_reminder_delta(self):
+        args = SimpleNamespace(
+            private=True,
+            private_metadata=False,
+            tags=None,
+            url=None,
+            section=None,
+            section_id=None,
+            new_section=None,
+            subtask=None,
+            image=None,
+            flag=False,
+            flagged=None,
+            urgent=None,
+            early_reminder="15m",
+            location_title=None,
+            latitude=None,
+            longitude=None,
+        )
+        with (
+            mock.patch.object(self.remctl, "private_available", return_value=True),
+            mock.patch.object(
+                self.remctl,
+                "private_action",
+                return_value={"status": "updated", "action": "set_early_reminder"},
+            ) as private_action,
+        ):
+            result = self.remctl.apply_private_changes("PARENT-ID", args)
+
+        self.assertEqual(private_action.call_args.args[0], {
+            "action": "set_early_reminder",
+            "id": "PARENT-ID",
+            "unit": 0,
+            "count": -15,
+        })
+        self.assertEqual(result[0]["action"], "set_early_reminder")
+
+    def test_apply_private_changes_removes_existing_early_reminder_identifiers(self):
+        args = SimpleNamespace(
+            private=True,
+            private_metadata=False,
+            tags=None,
+            url=None,
+            section=None,
+            section_id=None,
+            new_section=None,
+            subtask=None,
+            image=None,
+            flag=False,
+            flagged=None,
+            urgent=None,
+            early_reminder="1h",
+            location_title=None,
+            latitude=None,
+            longitude=None,
+        )
+        row = {
+            "Z_PK": 1,
+            "ZDUEDATEDELTAALERTSDATA": json.dumps({
+                "dueDateDeltaAlerts": [{"dueDateDeltaUnit": 0, "dueDateDeltaCount": -15, "identifier": "DELTA-1"}]
+            }).encode(),
+        }
+        with (
+            mock.patch.object(self.remctl, "private_available", return_value=True),
+            mock.patch.object(self.remctl, "q_reminder_by_identifier", return_value=row),
+            mock.patch.object(
+                self.remctl,
+                "private_action",
+                return_value={"status": "updated", "action": "set_early_reminder"},
+            ) as private_action,
+        ):
+            self.remctl.apply_private_changes("PARENT-ID", args, db=object())
+
+        self.assertEqual(private_action.call_args.args[0], {
+            "action": "set_early_reminder",
+            "id": "PARENT-ID",
+            "existingIdentifiers": ["DELTA-1"],
+            "unit": 1,
+            "count": -1,
+        })
+
     def test_subtask_rejects_private_url_before_writing(self):
         with (
             contextlib.redirect_stdout(io.StringIO()),
@@ -2629,6 +2806,41 @@ class CliTests(unittest.TestCase):
                 "daysOfWeek": [2, 4],
             },
         )
+
+    def test_early_reminder_due_date_delta_serializes_from_private_blob(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        delta_blob = json.dumps({
+            "dueDateDeltaAlerts": [{
+                "dueDateDeltaUnit": 0,
+                "dueDateDeltaCount": -15,
+                "identifier": "DELTA-1",
+                "creationDate": 800786817.653489,
+                "minimumSupportedAppVersion": 0,
+            }]
+        }).encode()
+        row = conn.execute(
+            "SELECT 42 AS Z_PK, 'Taxes' AS ZTITLE, NULL AS ZNOTES, "
+            "0 AS ZCOMPLETED, 0 AS ZFLAGGED, 0 AS ZPRIORITY, 0 AS ZISURGENTSTATEENABLEDFORCURRENTUSER, "
+            "? AS ZDUEDATEDELTAALERTSDATA, 800798400 AS ZDUEDATE, NULL AS ZALLDAY, NULL AS ZCOMPLETIONDATE, "
+            "NULL AS ZCREATIONDATE, NULL AS ZPARENTREMINDER, 1 AS ZLIST, "
+            "NULL AS ZICSURL, 'ABC' AS ZCKIDENTIFIER, 'Work' AS list_name, "
+            "NULL AS recurrence_frequency, NULL AS recurrence_interval, "
+            "NULL AS recurrence_count, NULL AS recurrence_end_date, "
+            "NULL AS recurrence_days_of_week, NULL AS recurrence_days_of_month, "
+            "NULL AS recurrence_months_of_year, NULL AS recurrence_days_of_year, "
+            "NULL AS recurrence_weeks_of_year, NULL AS recurrence_set_positions",
+            (delta_blob,),
+        ).fetchone()
+        formatted = self.remctl.fmt(row, db=None, verbose=True)
+        payload = self.remctl.to_dict(row, db=None)
+        conn.close()
+
+        self.assertIn("Early: 15 minutes before", self.remctl._strip_ansi(formatted))
+        self.assertEqual(payload["earlyReminder"]["label"], "15 minutes before")
+        self.assertEqual(payload["earlyReminder"]["unitCode"], 0)
+        self.assertEqual(payload["earlyReminder"]["count"], -15)
+        self.assertEqual(payload["earlyReminders"][0]["identifier"], "DELTA-1")
 
 
 if __name__ == "__main__":

@@ -12,6 +12,14 @@ RECURRENCE_FREQUENCIES = {
     3: "yearly",
 }
 
+DUE_DATE_DELTA_UNITS = {
+    0: ("minute", "minutes"),
+    1: ("hour", "hours"),
+    2: ("day", "days"),
+    3: ("week", "weeks"),
+    4: ("month", "months"),
+}
+
 
 def _row_has(row, key):
     keys = getattr(row, "keys", None)
@@ -84,6 +92,52 @@ def recurrence_from_row(row, *, ts=None):
         recurrence["endDate"] = ts(end_date).isoformat()
 
     return recurrence
+
+
+def due_date_delta_alerts_from_row(row, *, ts=None):
+    """Extract Early Reminder due-date delta alerts from a reminder row."""
+    payload = _json_blob(_row_get(row, "ZDUEDATEDELTAALERTSDATA"))
+    if not isinstance(payload, dict):
+        return []
+    alerts = payload.get("dueDateDeltaAlerts")
+    if not isinstance(alerts, list):
+        return []
+
+    result = []
+    for alert in alerts:
+        if not isinstance(alert, dict):
+            continue
+        try:
+            unit_raw = int(alert.get("dueDateDeltaUnit"))
+            count = int(alert.get("dueDateDeltaCount"))
+        except (TypeError, ValueError):
+            continue
+        singular, plural = DUE_DATE_DELTA_UNITS.get(unit_raw, ("unknown", "unknown"))
+        value = abs(count)
+        unit_name = singular if value == 1 else plural
+        direction = "before" if count < 0 else "after"
+        item = {
+            "unit": unit_name,
+            "unitCode": unit_raw,
+            "count": count,
+            "value": value,
+            "direction": direction,
+            "label": f"{value} {unit_name} {direction}",
+        }
+        identifier = alert.get("identifier")
+        if identifier:
+            item["identifier"] = identifier
+        creation_date = alert.get("creationDate")
+        if creation_date and ts is not None:
+            try:
+                item["creationDate"] = ts(float(creation_date)).isoformat()
+            except (TypeError, ValueError):
+                pass
+        min_version = alert.get("minimumSupportedAppVersion")
+        if min_version is not None:
+            item["minimumSupportedAppVersion"] = min_version
+        result.append(item)
+    return result
 
 
 def preload_extras(db, pks):
@@ -176,6 +230,10 @@ def serialize_reminder(
     recurrence = recurrence_from_row(row, ts=ts)
     if recurrence:
         reminder["recurrence"] = recurrence
+    early_reminders = due_date_delta_alerts_from_row(row, ts=ts)
+    if early_reminders:
+        reminder["earlyReminder"] = early_reminders[0]
+        reminder["earlyReminders"] = early_reminders
     if row["ZCKIDENTIFIER"]:
         reminder["deepLink"] = f"x-apple-reminderkit://REMCDReminder/{row['ZCKIDENTIFIER']}"
     return reminder

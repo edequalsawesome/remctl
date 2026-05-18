@@ -21,6 +21,8 @@ from remctl_runtime import (
     upcoming_window,
 )
 from remctl_serialization import (
+    DUE_DATE_DELTA_UNITS,
+    due_date_delta_alerts_from_row,
     preload_extras as shared_preload_extras,
     recurrence_from_row,
     serialize_reminder,
@@ -1150,6 +1152,11 @@ def urgent_where_clause(db, table_alias="r"):
         return f"{table_alias}.ZISURGENTSTATEENABLEDFORCURRENTUSER = 1"
     return "0 = 1"
 
+def due_date_delta_alerts_expr(db, table_alias="r"):
+    if reminder_has_column(db, "ZDUEDATEDELTAALERTSDATA"):
+        return f"{table_alias}.ZDUEDATEDELTAALERTSDATA"
+    return "NULL"
+
 def display_due_expr(db, table_alias="r"):
     if reminder_has_column(db, "ZDISPLAYDATEDATE"):
         return f"COALESCE({table_alias}.ZDISPLAYDATEDATE, {table_alias}.ZDUEDATE)"
@@ -1159,6 +1166,7 @@ def rem_cols(db):
     due_expr = display_due_expr(db)
     return f"""r.Z_PK, r.ZTITLE, r.ZNOTES, r.ZCOMPLETED, r.ZFLAGGED, r.ZPRIORITY,
     {urgent_column_expr(db)} AS ZISURGENTSTATEENABLEDFORCURRENTUSER,
+    {due_date_delta_alerts_expr(db)} AS ZDUEDATEDELTAALERTSDATA,
     {due_expr} AS ZDUEDATE, r.ZALLDAY, r.ZCOMPLETIONDATE, r.ZCREATIONDATE,
     r.ZPARENTREMINDER, r.ZLIST, r.ZICSURL, r.ZCKIDENTIFIER, l.ZNAME as list_name,
     {_RECURRENCE_COLS}"""
@@ -1563,6 +1571,10 @@ def fmt(r, db=None, verbose=False, indent="", _sc=None, _ht=None):
         recurrence = recurrence_summary(_recurrence_from_item(r))
         if recurrence:
             parts.append(f"{indent}    Repeats: {C.magenta(recurrence)}")
+        early_reminders = due_date_delta_alerts_from_row(r, ts=ts)
+        if early_reminders:
+            labels = ", ".join(item["label"] for item in early_reminders)
+            parts.append(f"{indent}    Early: {C.cyan(labels)}")
         if _item_is_flagged(r):
             parts.append(f"{indent}    Flagged: {C.yellow('Yes')}")
         if _item_is_urgent(r):
@@ -1932,6 +1944,20 @@ def parse_subtask_specs(values):
         if spec.get("recurrence"):
             normalized["recurrence"] = parse_recurrence(str(spec["recurrence"]))
 
+        early_value = spec.get("earlyReminder", spec.get("early_reminder"))
+        if early_value is not None:
+            early = parse_early_reminder(str(early_value))
+            if early is None:
+                print(
+                    "Error: subtask earlyReminder must be like 15m, 1h, 2d, 1w, 1mo, or clear.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if not early.get("clear") and "due" not in normalized:
+                print("Error: subtask earlyReminder requires a subtask due date.", file=sys.stderr)
+                sys.exit(1)
+            normalized["earlyReminder"] = early_value
+
         urls = normalize_string_list(spec.get("urls", spec.get("url")), "urls")
         for url in urls:
             if not is_web_url(url):
@@ -2062,6 +2088,18 @@ def apply_subtask_private_metadata(subtask_id, spec):
             "id": subtask_id,
             "urgent": bool(spec["urgent"]),
         }))
+    if "earlyReminder" in spec:
+        early = parse_early_reminder(spec["earlyReminder"])
+        payload = {
+            "action": "set_early_reminder",
+            "id": subtask_id,
+        }
+        if early.get("clear"):
+            payload["clear"] = True
+        else:
+            payload["unit"] = early["unit"]
+            payload["count"] = early["count"]
+        updates.append(private_action(payload))
     if "latitude" in spec or "longitude" in spec:
         updates.append(private_action({
             "action": "add_location_alarm",
@@ -2089,6 +2127,14 @@ def validate_private_args(a):
         print("Error: --private --url requires an http or https URL.", file=sys.stderr)
         sys.exit(1)
 
+    early_reminder = getattr(a, "early_reminder", None)
+    if early_reminder is not None and parse_early_reminder(early_reminder) is None:
+        print(
+            "Error: --early-reminder must be like 15m, 1h, 2d, 1w, 1mo, or clear.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     for image in normalize_image_paths(getattr(a, "image", None)):
         if not os.path.isfile(image) or not os.access(image, os.R_OK):
             print(f"Error: image attachment is not readable: {image}", file=sys.stderr)
@@ -2111,6 +2157,39 @@ def validate_private_args(a):
             sys.exit(1)
 
     parse_subtask_specs(getattr(a, "subtask", None))
+
+
+def early_reminder_requires_due_date(a):
+    early_reminder = getattr(a, "early_reminder", None)
+    if early_reminder is None:
+        return False
+    parsed = parse_early_reminder(early_reminder)
+    return bool(parsed and not parsed.get("clear"))
+
+
+def fail_early_reminder_without_due(json_mode=False):
+    message = "Early Reminder requires a reminder due date."
+    if json_mode:
+        print(json.dumps({"status": "error", "code": "early_reminder_requires_due_date", "message": message}), file=sys.stderr)
+    else:
+        print(f"Error: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def early_reminder_identifiers_for_reminder(db, reminder_ckid):
+    if db is None or not reminder_ckid:
+        return []
+    try:
+        row = q_reminder_by_identifier(db, reminder_ckid)
+    except (RemindersDBUnavailable, sqlite3.Error):
+        row = None
+    if not row:
+        return []
+    return [
+        item["identifier"]
+        for item in due_date_delta_alerts_from_row(row, ts=ts)
+        if item.get("identifier")
+    ]
 
 
 def private_action(data):
@@ -2350,6 +2429,7 @@ def private_changes_from_args(a):
         getattr(a, "flag", False),
         getattr(a, "flagged", None) is not None,
         getattr(a, "urgent", None) is not None,
+        getattr(a, "early_reminder", None) is not None,
         getattr(a, "location_title", None),
         getattr(a, "latitude", None) is not None,
         getattr(a, "longitude", None) is not None,
@@ -2366,6 +2446,7 @@ def private_only_changes_from_args(a):
         getattr(a, "image", None),
         getattr(a, "flagged", None) is not None,
         getattr(a, "urgent", None) is not None,
+        getattr(a, "early_reminder", None) is not None,
         getattr(a, "location_title", None),
         getattr(a, "latitude", None) is not None,
         getattr(a, "longitude", None) is not None,
@@ -2375,7 +2456,7 @@ def private_only_changes_from_args(a):
 def refuse_private_args_without_opt_in(a):
     if private_only_changes_from_args(a) and not private_metadata_enabled(a):
         print(
-            "Error: grocery, section, subtask, image, urgent, flagged, and location writes require --private. "
+            "Error: grocery, section, subtask, image, urgent, early-reminder, flagged, and location writes require --private. "
             "Example: remctl add \"Milk\" -l Groceries --private --grocery",
             file=sys.stderr,
         )
@@ -2563,6 +2644,23 @@ def apply_private_changes(reminder_ckid, a, db=None, list_pk=None):
             "id": reminder_ckid,
             "urgent": bool(a.urgent),
         }))
+
+    early_reminder = getattr(a, "early_reminder", None)
+    if early_reminder is not None:
+        early = parse_early_reminder(early_reminder)
+        payload = {
+            "action": "set_early_reminder",
+            "id": reminder_ckid,
+        }
+        existing_identifiers = early_reminder_identifiers_for_reminder(db, reminder_ckid)
+        if existing_identifiers:
+            payload["existingIdentifiers"] = existing_identifiers
+        if early.get("clear"):
+            payload["clear"] = True
+        else:
+            payload["unit"] = early["unit"]
+            payload["count"] = early["count"]
+        results.append(private_action(payload))
 
     if getattr(a, "latitude", None) is not None or getattr(a, "longitude", None) is not None:
         if getattr(a, "latitude", None) is None or getattr(a, "longitude", None) is None:
@@ -3474,6 +3572,55 @@ def parse_alarm(spec):
         except ValueError:
             pass
     return None
+
+EARLY_REMINDER_CLEAR_VALUES = {"clear", "none", "off", "never", "0", "0m", "0min"}
+EARLY_REMINDER_UNIT_CODES = {
+    "m": 0,
+    "min": 0,
+    "mins": 0,
+    "minute": 0,
+    "minutes": 0,
+    "h": 1,
+    "hr": 1,
+    "hrs": 1,
+    "hour": 1,
+    "hours": 1,
+    "d": 2,
+    "day": 2,
+    "days": 2,
+    "w": 3,
+    "wk": 3,
+    "wks": 3,
+    "week": 3,
+    "weeks": 3,
+    "mo": 4,
+    "mon": 4,
+    "month": 4,
+    "months": 4,
+}
+
+def parse_early_reminder(spec):
+    """Parse Early Reminder delta specs like 15m, 1h, 2d, 1w, 1mo, or clear."""
+    if spec is None:
+        return None
+    value = str(spec).strip().lower()
+    if value in EARLY_REMINDER_CLEAR_VALUES:
+        return {"clear": True}
+    value = re.sub(r"\s+before$", "", value).strip()
+    m = re.match(r"^(\d+)\s*([a-z]+)$", value)
+    if not m:
+        return None
+    amount = int(m.group(1))
+    unit_code = EARLY_REMINDER_UNIT_CODES.get(m.group(2))
+    if amount <= 0 or unit_code is None:
+        return None
+    singular, plural = DUE_DATE_DELTA_UNITS[unit_code]
+    return {
+        "unit": unit_code,
+        "unitName": singular if amount == 1 else plural,
+        "count": -amount,
+        "value": amount,
+    }
 
 # ── Commands ─────────────────────────────────────────────────────────────────
 
@@ -4484,6 +4631,8 @@ def cmd_add(a):
     dt = parse_due(a.due)
     if a.due and not dt:
         fail_invalid_due_date(a.due, json_mode=getattr(a, "json", False))
+    if early_reminder_requires_due_date(a) and dt is None:
+        fail_early_reminder_without_due(json_mode=getattr(a, "json", False))
     if wants_private and not bridge_available():
         print("Error: private metadata creation requires remctl-bridge so the reminder has a stable ID.", file=sys.stderr)
         sys.exit(1)
@@ -4773,6 +4922,10 @@ def cmd_edit(a):
         dt = parse_due(a.due)
         if dt is None:
             fail_invalid_due_date(a.due, json_mode=getattr(a, "json", False))
+    if early_reminder_requires_due_date(a) and a.due == "clear":
+        fail_early_reminder_without_due(json_mode=getattr(a, "json", False))
+    if early_reminder_requires_due_date(a) and dt is None and not r["ZDUEDATE"]:
+        fail_early_reminder_without_due(json_mode=getattr(a, "json", False))
 
     # Auto double-tap: if Reminders' displayed due date already equals the
     # requested target, AppleScript treats it as a no-op and pushes only
@@ -5063,6 +5216,10 @@ def cmd_info(a):
     print(f"  Urgent:    {urgent_str}")
     if r["ZDUEDATE"]:
         print(f"  Due:       {ts(r['ZDUEDATE']).strftime('%b %d, %Y at %I:%M %p')}")
+    early_reminders = due_date_delta_alerts_from_row(r, ts=ts)
+    if early_reminders:
+        labels = ", ".join(item["label"] for item in early_reminders)
+        print(f"  Early:     {C.cyan(labels)}")
     recurrence = recurrence_summary(_recurrence_from_item(r))
     if recurrence:
         print(f"  Repeats:   {C.magenta(recurrence)}")
@@ -5725,6 +5882,7 @@ _remctl() {
                 '--grocery[Auto-categorize in a Groceries list]' \
                 '--urgent[Set private urgent state]' \
                 '--no-urgent[Clear private urgent state]' \
+                '--early-reminder[Set Early Reminder delta, e.g. 15m, 1h, clear]:delta:' \
                 '--url[URL, web rich link with --private]:url:' \
                 '(-t --tags)'{-t,--tags}'[Tags, synced with --private]:tags:' \
                 '(-l --list)'{-l,--list}'[Target list]:list:' \
@@ -5750,6 +5908,7 @@ _remctl() {
                 '--no-flagged[Clear real private flag]' \
                 '--urgent[Set private urgent state]' \
                 '--no-urgent[Clear private urgent state]' \
+                '--early-reminder[Set Early Reminder delta, e.g. 15m, 1h, clear]:delta:' \
                 '--location-title[Location alarm title]:title:' \
                 '--latitude[Location alarm latitude]:latitude:' \
                 '--longitude[Location alarm longitude]:longitude:' \
@@ -5946,10 +6105,10 @@ BASH_COMPLETION = '''_remctl() {
 
     local cmd="${COMP_WORDS[1]}"
     if [ "$cmd" = "add" ]; then
-        COMPREPLY=( $(compgen -W "--private --grocery --section --section-id --new-section --subtask --image --urgent --no-urgent --url --tags -t --list -l --list-id --notes -n --due -d --priority -p --flag -f --recurrence --alarm --json" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--private --grocery --section --section-id --new-section --subtask --image --urgent --no-urgent --early-reminder --url --tags -t --list -l --list-id --notes -n --due -d --priority -p --flag -f --recurrence --alarm --json" -- "$cur") )
         return
     elif [ "$cmd" = "edit" ]; then
-        COMPREPLY=( $(compgen -W "--private --grocery --section --section-id --new-section --subtask --image --flagged --no-flagged --urgent --no-urgent --location-title --latitude --longitude --radius --proximity --address --title --url --tags -t --notes -n --due -d --priority -p --recurrence --alarm --json" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--private --grocery --section --section-id --new-section --subtask --image --flagged --no-flagged --urgent --no-urgent --early-reminder --location-title --latitude --longitude --radius --proximity --address --title --url --tags -t --notes -n --due -d --priority -p --recurrence --alarm --json" -- "$cur") )
         return
     elif [ "$cmd" = "doctor" ]; then
         COMPREPLY=( $(compgen -W "--for-agent --json" -- "$cur") )
@@ -6151,6 +6310,7 @@ complete -c remctl -n "__fish_seen_subcommand_from add" -l image -d "Add private
 complete -c remctl -n "__fish_seen_subcommand_from add" -l grocery -d "Auto-categorize in a Groceries list"
 complete -c remctl -n "__fish_seen_subcommand_from add" -l urgent -d "Set private urgent state"
 complete -c remctl -n "__fish_seen_subcommand_from add" -l no-urgent -d "Clear private urgent state"
+complete -c remctl -n "__fish_seen_subcommand_from add" -l early-reminder -d "Set Early Reminder delta, e.g. 15m, 1h, clear" -r
 complete -c remctl -n "__fish_seen_subcommand_from add" -l url -d "URL, web rich link with --private" -r
 complete -c remctl -n "__fish_seen_subcommand_from add" -s t -l tags -d "Tags, synced with --private" -r
 complete -c remctl -n "__fish_seen_subcommand_from add" -l list-id -d "Target list by stable numeric ID" -r
@@ -6165,6 +6325,7 @@ complete -c remctl -n "__fish_seen_subcommand_from edit" -l flagged -d "Set real
 complete -c remctl -n "__fish_seen_subcommand_from edit" -l no-flagged -d "Clear real private flag"
 complete -c remctl -n "__fish_seen_subcommand_from edit" -l urgent -d "Set private urgent state"
 complete -c remctl -n "__fish_seen_subcommand_from edit" -l no-urgent -d "Clear private urgent state"
+complete -c remctl -n "__fish_seen_subcommand_from edit" -l early-reminder -d "Set Early Reminder delta, e.g. 15m, 1h, clear" -r
 complete -c remctl -n "__fish_seen_subcommand_from edit" -l location-title -d "Location alarm title" -r
 complete -c remctl -n "__fish_seen_subcommand_from edit" -l latitude -d "Location alarm latitude" -r
 complete -c remctl -n "__fish_seen_subcommand_from edit" -l longitude -d "Location alarm longitude" -r
@@ -6860,6 +7021,7 @@ def main():
             "  remctl add \"Research\" -l Projects --private --section-id DCD255E2-7CF5-4B45-9566-3F9A5D84AFA8\n"
             "  remctl add \"Prepare screenshots\" -l Projects --private --image ~/Desktop/mockup.png --subtask \"Export PNG\"\n"
             "  remctl add \"Leave now\" -l Work --private --urgent\n"
+            "  remctl add \"Leave early\" -l Work -d \"today 14:00\" --private --early-reminder 15m\n"
             "  remctl add \"Launch assets\" -l Projects --private --subtask '{\"title\":\"Export PNG\",\"notes\":\"Use final crop\",\"due\":\"tomorrow\",\"url\":\"https://example.com\",\"tags\":[\"media\"]}'\n"
             "\n"
             "Without --private, --url is appended to notes and -t/--tags appends inline #hashtags to the title.\n"
@@ -6887,6 +7049,7 @@ def main():
     c.add_argument("--subtask", action="append", help="Private metadata: add a subtask title or JSON object (repeatable)")
     c.add_argument("--image", action="append", help="Private metadata: add an image attachment path (repeatable)")
     c.add_argument("--urgent", action=argparse.BooleanOptionalAction, default=None, help="Private metadata: set urgent state")
+    c.add_argument("--early-reminder", help="Private metadata: Early Reminder before due date, e.g. 15m, 1h, 2d, 1w, 1mo, or clear")
     js(c)
 
     c = sub.add_parser("done", help="Complete a reminder"); c.add_argument("id", type=int); js(c)
@@ -6907,6 +7070,7 @@ def main():
             "  remctl edit 23880 --private --section-id DCD255E2-7CF5-4B45-9566-3F9A5D84AFA8\n"
             "  remctl edit 23880 --private --subtask '{\"title\":\"Follow up\",\"notes\":\"Bring latest numbers\",\"due\":\"next friday at 3pm\",\"url\":\"https://example.com\",\"tags\":[\"work\"]}'\n"
             "  remctl edit 23880 --private --flagged --urgent\n"
+            "  remctl edit 23880 --private --early-reminder 15m\n"
             "  remctl edit 23880 --private --location-title \"Apple Park\" --latitude 37.3349 --longitude -122.0090 --radius 200\n"
             "\n"
             "Without --private, --url is appended to notes. Synced tags, web rich links, sections, subtasks, images, "
@@ -6931,6 +7095,7 @@ def main():
     c.add_argument("--image", action="append", help="Private metadata: add an image attachment path (repeatable)")
     c.add_argument("--flagged", action=argparse.BooleanOptionalAction, default=None, help="Private metadata: set the real flagged state")
     c.add_argument("--urgent", action=argparse.BooleanOptionalAction, default=None, help="Private metadata: set urgent state")
+    c.add_argument("--early-reminder", help="Private metadata: Early Reminder before due date, e.g. 15m, 1h, 2d, 1w, 1mo, or clear")
     c.add_argument("--location-title", help="Private metadata: location alarm title")
     c.add_argument("--latitude", type=float, help="Private metadata: location alarm latitude")
     c.add_argument("--longitude", type=float, help="Private metadata: location alarm longitude")

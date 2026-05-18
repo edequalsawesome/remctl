@@ -101,9 +101,9 @@ List names are resolved conservatively: exact match first, then case-insensitive
 
 `--section` resolves by name inside the target list. If duplicate section names exist, RemCTL uses the only non-empty matching section when there is exactly one. If the duplicate is still ambiguous, use `--section-id`.
 
-`--subtask` accepts either a plain child title or a JSON object with child metadata. Rich subtask fields include `notes`, `due`, `priority`, `alarm`, `recurrence`, `url`/`urls`, `tags`, `image`/`images`, `flagged`, `urgent`, and location alarm fields.
+`--subtask` accepts either a plain child title or a JSON object with child metadata. Rich subtask fields include `notes`, `due`, `priority`, `alarm`, `recurrence`, `earlyReminder`, `url`/`urls`, `tags`, `image`/`images`, `flagged`, `urgent`, and location alarm fields.
 
-`--private` uses Apple's private ReminderKit framework through `remctl-private`. It does not write SQLite directly. Verified private writes include synced web rich links, tags, sections, rich subtasks, image attachments, real flag state, urgent state, location alarms, list appearance metadata, list and smart-list pin state, Groceries list metadata and categorization verification, custom smart-list creation/editing/deletion for verified materializing Reminders filters, and Reminders template create/apply/delete. Generic file/PDF attachments are intentionally rejected because Reminders does not reliably show them even when private rows sync.
+`--private` uses Apple's private ReminderKit framework through `remctl-private`. It does not write SQLite directly. Verified private writes include synced web rich links, tags, sections, rich subtasks, image attachments, real flag state, urgent state, Early Reminders, location alarms, list appearance metadata, list and smart-list pin state, Groceries list metadata and categorization verification, custom smart-list creation/editing/deletion for verified materializing Reminders filters, and Reminders template create/apply/delete. Generic file/PDF attachments are intentionally rejected because Reminders does not reliably show them even when private rows sync.
 
 See [private-metadata.md](private-metadata.md) for risks, guardrails, and verification notes.
 
@@ -116,6 +116,18 @@ remctl add "Standup" --recurrence "weekly mon,wed,fri" --alarm 15m
 remctl add "Pay rent" --recurrence monthly
 remctl add "Annual review" --recurrence yearly
 ```
+
+Recurring schedules use EventKit and work on both `add` and `edit`. `info --json`, `show --json`, and other read commands decode the stored recurrence rows back into a stable `recurrence` object.
+
+Early Reminders:
+
+```bash
+remctl add "Leave early" -l Work -d "today 14:00" --private --early-reminder 15m
+remctl edit 23880 --private --early-reminder 1h
+remctl edit 23880 --private --early-reminder clear
+```
+
+Early Reminders are private ReminderKit due-date delta alerts, not EventKit alarms. They require `--private`; setting one requires an existing or newly supplied due date. Accepted values are `15m`, `1h`, `2d`, `1w`, `1mo`, and equivalent words such as `15 minutes`; `clear`, `none`, `off`, or `never` removes existing Early Reminders. JSON readback includes `earlyReminder` and `earlyReminders` with fields such as `unit`, `count`, `value`, `direction`, and `label`.
 
 ## Editing
 
@@ -262,6 +274,14 @@ JSON output preserves machine-readable fields:
   "flagged": false,
   "urgent": false,
   "dueDate": "2026-05-05T09:00:00",
+  "earlyReminder": {
+    "unit": "minutes",
+    "unitCode": 0,
+    "count": -15,
+    "value": 15,
+    "direction": "before",
+    "label": "15 minutes before"
+  },
   "recurrence": {
     "frequency": "weekly",
     "interval": 1,
