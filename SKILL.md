@@ -30,11 +30,13 @@ remctl search "query" --completed --json
 remctl info 23880 --json
 remctl add "Review PR" -l Work -d "tomorrow 10:00" -p high --json
 remctl add "Write column" --list-id 156 -d "2026-05-20 15:00" --json
+remctl add "Weekly report" -l Work --recurrence "weekly mon,wed,fri" --alarm 15m --json
 remctl smart-lists --json
 remctl templates --json
 remctl template-info "Rome: Things To See" --json
 remctl list-symbols --json
 remctl edit 23880 -d clear --json
+remctl edit 23880 --recurrence monthly --json
 remctl done 23880 --json
 remctl link --list-id 153 --json
 remctl export --list-id 153 --format json
@@ -53,6 +55,21 @@ remctl list-delete --list-id 123 --force --json
 - List targets resolve exact name first, then case-insensitive, then normalized names such as `Weekly 513` for `🗓️ Weekly 513`. If multiple lists match, RemCTL fails before writing; use `--list-id`.
 - Commands that target lists consistently support exact numeric targeting where the underlying write/read path is safe: `show --list-id`, `add --list-id`, `link --list-id`, `export --list-id`, `list-edit --list-id`, `list-pin --list-id`, `list-unpin --list-id`, `list-rename --list-id --new-name`, `list-delete --list-id`, plus smart-list `--include-list-id`. `list-pin` and `list-unpin` also accept smart-list names or `--smart-list-id`.
 - If a command accepts both a list name and `--list-id`, passing both is an error.
+
+## Recurring Schedules
+
+Recurring schedules are normal EventKit writes and do not require `--private`.
+
+```bash
+remctl add "Daily journal" --recurrence daily --json
+remctl add "Weekly report" --recurrence weekly --json
+remctl add "Standup" --recurrence "weekly mon,wed,fri" --alarm 15m --json
+remctl add "Pay rent" --recurrence monthly --json
+remctl add "Annual review" --recurrence yearly --json
+remctl edit 23880 --recurrence "weekly mon,wed" --json
+```
+
+Use `info --json`, `show --json`, `today --json`, or `upcoming --json` to verify recurrence readback. Recurring reminders include a stable `recurrence` object in JSON and a repeat badge in human/table output. Relative alarms such as `--alarm 15m` are EventKit alarms; Early Reminders are separate private due-date delta alerts and require `--private --early-reminder`.
 
 ## Private Metadata
 
