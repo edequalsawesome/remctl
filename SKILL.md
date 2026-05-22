@@ -91,7 +91,7 @@ remctl add "Annual review" --recurrence yearly --json
 remctl edit 23880 --recurrence "weekly mon,wed" --json
 ```
 
-Use `info --json`, `show --json`, `today --json`, or `upcoming --json` to verify recurrence readback. Recurring reminders include a stable `recurrence` object in JSON and a repeat badge in human/table output. Relative alarms such as `--alarm 15m` are EventKit alarms; Early Reminders are separate private due-date delta alerts and require `--private --early-reminder`.
+Use `info --json`, `show --json`, `today --json`, or `upcoming --json` to verify recurrence readback. Recurring reminders include a stable `recurrence` object in JSON and a repeat badge in human/table output. Relative alarms such as `--alarm 15m` are EventKit alarms and verify in `info --json` under `alarms`; Early Reminders are separate private due-date delta alerts and require `--private --early-reminder`.
 
 ## Private Metadata
 
@@ -208,8 +208,8 @@ remctl template-delete "Packing Template" --private --force --json
 - Prefer deterministic due-date strings. If the user says "today at 3pm", either pass `today at 3pm` or normalize it to `YYYY-MM-DD HH:MM` in the user's timezone before calling `remctl`; do not invent broader natural-language phrases.
 - `add` and `edit` are atomic for due dates: if `-d/--due` is present and cannot be parsed, RemCTL exits before writing. With `--json`, parse failures are structured `invalid_due_date` errors on stderr with accepted examples. Retry with a corrected date instead of creating first and patching later.
 - Accepted dependency-free due-date forms include `YYYY-MM-DD`, `YYYY-MM-DD HH:MM`, `today at 3pm`, `tomorrow 09:30`, `tonight at 11`, `Friday at 15:00`, `next friday at 3pm`, `+3d`, `eod`, and `eow`.
-- Date output should match Reminders.app's displayed date. RemCTL reads `ZDISPLAYDATEDATE` first and falls back to `ZDUEDATE`.
-- When debugging due-date mismatches, compare both fields in the Reminders database before assuming the CLI or UI is wrong.
+- `dueDate` in JSON is the actual Reminders due date from `ZDUEDATE`. If Reminders stores a separate UI/alert display date, RemCTL reports it separately as `displayDate`.
+- When debugging due-date or alarm mismatches, compare `dueDate`, `displayDate`, and `alarms` before assuming the CLI or UI is wrong.
 
 Fast create path for agents:
 
@@ -218,7 +218,7 @@ remctl add "Title" -l Projects --private --section "Section" -d "YYYY-MM-DD HH:M
 remctl info <numericId> --json
 ```
 
-`info --json` includes section, due date, tags, subtasks, attachments, deep link, and private rich-link `url` when present. Avoid raw SQLite checks unless the CLI output lacks a field you need.
+`info --json` includes section, actual due date, optional display/alert date, tags, subtasks, parent and subtask attachments, EventKit alarms, private location alarms, Early Reminders, deep link, and private rich-link `url` when present. Avoid raw SQLite checks unless the CLI output lacks a field you need.
 
 ## Permissions
 

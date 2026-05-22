@@ -117,6 +117,12 @@ EventKit writes recurrence rules. Direct reads resolve those rules from `ZREMCDO
 
 Human output summarizes the same data with badges such as `↻ weekly Mon, Wed`.
 
+## Due Dates and Alarms
+
+Reminder JSON keeps due dates and alarm/display dates separate for agents. `dueDate` is serialized from `ZREMCDREMINDER.ZDUEDATE`, the actual due date. When Reminders also stores `ZDISPLAYDATEDATE`, for example after adding an EventKit alarm 15 minutes before the due date, RemCTL exposes that value as `displayDate` instead of overwriting `dueDate`.
+
+Normal alarms are `ZREMCDOBJECT` rows linked from the reminder through alarm rows (`Z_ENT = 15`) and trigger rows. Relative triggers serialize as `alarms` entries with `type: "relative"`, `relativeOffset`, `relativeOffsetMinutes`, and a human label. Absolute/date-component triggers serialize with `type: "absolute"`, `dateComponents`, and a best-effort local `date` string. Private ReminderKit location alarms use the same alarm relationship with location trigger rows and serialize as `type: "location"` plus a `location` object.
+
 ## Flags, Urgent, and Early Reminders
 
 Flags are read from `ZFLAGGED` and shown as `⚑`.

@@ -2739,6 +2739,7 @@ class CliTests(unittest.TestCase):
             mock.patch.object(self.remctl, "q_reminder", return_value=reminder),
             mock.patch.object(self.remctl, "q_reminders", return_value=[]),
             mock.patch.object(self.remctl, "q_attachments", return_value=[]),
+            mock.patch.object(self.remctl, "q_alarms", return_value=[]),
             mock.patch.object(self.remctl, "q_hashtags", return_value=[]),
             mock.patch.object(self.remctl, "q_section_memberships", return_value={"ABC": "Playground"}),
             mock.patch.object(self.remctl, "q_rich_link", return_value="https://example.com/shortcuts-playground-plugin"),
@@ -2750,6 +2751,165 @@ class CliTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["url"], "https://example.com/shortcuts-playground-plugin")
         self.assertEqual(payload["section"], "Playground")
+
+    def test_info_json_keeps_due_date_separate_from_display_alarm_date(self):
+        row = {
+            "Z_PK": 42,
+            "ZTITLE": "Review",
+            "ZNOTES": None,
+            "ZCOMPLETED": 0,
+            "ZFLAGGED": 0,
+            "ZPRIORITY": 0,
+            "ZISURGENTSTATEENABLEDFORCURRENTUSER": 0,
+            "ZDUEDATEDELTAALERTSDATA": None,
+            "ZDUEDATE": 801216000,
+            "ZDISPLAYDATEDATE": 801215100,
+            "ZALLDAY": 0,
+            "ZCOMPLETIONDATE": None,
+            "ZCREATIONDATE": None,
+            "ZPARENTREMINDER": None,
+            "ZLIST": 1,
+            "ZICSURL": None,
+            "ZCKIDENTIFIER": "ABC",
+            "list_name": "Work",
+            "recurrence_frequency": None,
+            "recurrence_interval": None,
+            "recurrence_count": None,
+            "recurrence_end_date": None,
+            "recurrence_days_of_week": None,
+            "recurrence_days_of_month": None,
+            "recurrence_months_of_year": None,
+            "recurrence_days_of_year": None,
+            "recurrence_weeks_of_year": None,
+            "recurrence_set_positions": None,
+        }
+
+        payload = self.remctl.to_dict(row, db=None)
+
+        self.assertEqual(payload["dueDate"], "2026-05-23T10:00:00")
+        self.assertEqual(payload["displayDate"], "2026-05-23T09:45:00")
+        self.assertFalse(payload["allDay"])
+
+    def test_alarm_rows_serialize_relative_absolute_and_location_triggers(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "CREATE TABLE ZREMCDOBJECT ("
+            "Z_PK INTEGER, Z_ENT INTEGER, ZREMINDER INTEGER, ZTRIGGER INTEGER, "
+            "ZMARKEDFORDELETION INTEGER, ZTIMEINTERVAL REAL, ZDATECOMPONENTSDATA BLOB, "
+            "ZTITLE TEXT, ZLATITUDE REAL, ZLONGITUDE REAL, ZRADIUS REAL, "
+            "ZADDRESS TEXT, ZPROXIMITY INTEGER)"
+        )
+        date_components = json.dumps({
+            "year": 2026,
+            "month": 5,
+            "day": 23,
+            "hour": 10,
+            "minute": 30,
+            "second": 0,
+            "timeZone": {"identifier": "Europe/Rome"},
+        }).encode()
+        conn.executemany(
+            "INSERT INTO ZREMCDOBJECT VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (1, 15, 42, 2, 0, None, None, None, None, None, None, None, None),
+                (2, 19, None, None, 0, -900, None, None, None, None, None, None, None),
+                (3, 15, 42, 4, 0, None, None, None, None, None, None, None, None),
+                (4, 17, None, None, 0, None, date_components, None, None, None, None, None, None),
+                (5, 15, 42, 6, 0, None, None, None, None, None, None, None, None),
+                (6, 18, None, None, 0, None, None, "Apple Park", 37.3349, -122.009, 200, "One Apple Park Way", 1),
+            ],
+        )
+
+        alarms = self.remctl.alarm_rows_to_json(self.remctl.q_alarms(conn, 42))
+        conn.close()
+
+        self.assertEqual(alarms[0]["type"], "relative")
+        self.assertEqual(alarms[0]["relativeOffset"], -900)
+        self.assertEqual(alarms[0]["relativeOffsetMinutes"], -15)
+        self.assertEqual(alarms[0]["label"], "15 minutes before due date")
+        self.assertEqual(alarms[1]["type"], "absolute")
+        self.assertEqual(alarms[1]["date"], "2026-05-23T10:30:00")
+        self.assertEqual(alarms[1]["timeZone"], "Europe/Rome")
+        self.assertEqual(alarms[2]["type"], "location")
+        self.assertEqual(alarms[2]["location"]["title"], "Apple Park")
+        self.assertEqual(alarms[2]["location"]["proximity"], "arriving")
+
+    def test_cmd_info_json_hydrates_subtask_attachments_and_alarms(self):
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        db.execute(
+            "CREATE TABLE ZREMCDREMINDER ("
+            "Z_PK INTEGER, ZPARENTREMINDER INTEGER, ZMARKEDFORDELETION INTEGER, ZCOMPLETED INTEGER)"
+        )
+        db.execute("CREATE TABLE ZREMCDHASHTAGLABEL (Z_PK INTEGER, ZNAME TEXT)")
+        db.execute(
+            "CREATE TABLE ZREMCDSAVEDATTACHMENT ("
+            "ZFILENAME TEXT, ZUTI TEXT, ZATTACHMENTTYPERAWVALUE TEXT, "
+            "ZREMINDER INTEGER, ZMARKEDFORDELETION INTEGER)"
+        )
+        db.execute(
+            "CREATE TABLE ZREMCDOBJECT ("
+            "Z_PK INTEGER, Z_ENT INTEGER, ZREMINDER INTEGER, ZTRIGGER INTEGER, "
+            "ZREMINDER2 INTEGER, ZREMINDER3 INTEGER, ZHASHTAGLABEL INTEGER, ZMARKEDFORDELETION INTEGER, "
+            "ZFILENAME TEXT, ZUTI TEXT, ZWIDTH INTEGER, ZHEIGHT INTEGER, ZURL TEXT, "
+            "ZTIMEINTERVAL REAL, ZDATECOMPONENTSDATA BLOB, ZTITLE TEXT, ZLATITUDE REAL, "
+            "ZLONGITUDE REAL, ZRADIUS REAL, ZADDRESS TEXT, ZPROXIMITY INTEGER)"
+        )
+        db.executemany(
+            "INSERT INTO ZREMCDOBJECT VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (1, 25, None, None, 43, None, None, 0, "child.png", "public.png", 100, 100, None, None, None, None, None, None, None, None, None),
+                (2, 15, 43, 3, None, None, None, 0, None, None, None, None, None, None, None, None, None, None, None, None, None),
+                (3, 19, None, None, None, None, None, 0, None, None, None, None, None, -600, None, None, None, None, None, None, None),
+            ],
+        )
+        parent = {
+            "Z_PK": 42,
+            "ZTITLE": "Parent",
+            "ZNOTES": None,
+            "ZCOMPLETED": 0,
+            "ZFLAGGED": 0,
+            "ZPRIORITY": 0,
+            "ZISURGENTSTATEENABLEDFORCURRENTUSER": 0,
+            "ZDUEDATEDELTAALERTSDATA": None,
+            "ZDUEDATE": None,
+            "ZDISPLAYDATEDATE": None,
+            "ZALLDAY": 0,
+            "ZCOMPLETIONDATE": None,
+            "ZCREATIONDATE": None,
+            "ZPARENTREMINDER": None,
+            "ZLIST": 1,
+            "ZICSURL": None,
+            "ZCKIDENTIFIER": "PARENT",
+            "list_name": "Projects",
+            "recurrence_frequency": None,
+            "recurrence_interval": None,
+            "recurrence_count": None,
+            "recurrence_end_date": None,
+            "recurrence_days_of_week": None,
+            "recurrence_days_of_month": None,
+            "recurrence_months_of_year": None,
+            "recurrence_days_of_year": None,
+            "recurrence_weeks_of_year": None,
+            "recurrence_set_positions": None,
+        }
+        child = dict(parent, Z_PK=43, ZTITLE="Child", ZPARENTREMINDER=42, ZCKIDENTIFIER="CHILD")
+        try:
+            with (
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(self.remctl, "q_reminder", return_value=parent),
+                mock.patch.object(self.remctl, "q_reminders", return_value=[child]),
+                mock.patch.object(self.remctl, "q_section_memberships", return_value={}),
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.remctl.cmd_info(SimpleNamespace(id=42, json=True))
+        finally:
+            db.close()
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["subtasks"][0]["attachments"][0]["filename"], "child.png")
+        self.assertEqual(payload["subtasks"][0]["alarms"][0]["relativeOffset"], -600)
 
     def test_q_attachments_reads_current_image_attachment_rows(self):
         conn = sqlite3.connect(":memory:")

@@ -21,7 +21,7 @@ remctl
 
 Why this architecture exists:
 
-- **Direct SQLite reads** expose sections, subtasks, tags, attachments, deep links, list colors, recurrence metadata, and Early Reminder metadata in tens of milliseconds.
+- **Direct SQLite reads** expose sections, subtasks, tags, attachments, deep links, list colors, recurrence metadata, normal alarms, private location alarms, and Early Reminder metadata in tens of milliseconds.
 - **EventKit writes** keep Reminders and iCloud in charge of mutations. RemCTL does not write directly to the database.
 - **Private metadata writes** are unsupported and explicitly opt-in with `--private`. They use Apple's private ReminderKit APIs, not direct SQLite mutation, and should be treated as experimental power-user functionality.
 
@@ -199,6 +199,8 @@ RemCTL output is designed for both humans and agents:
 - `#ID` is colored with the reminder list color when RemCTL can read list colors
 - flagged reminders show `⚑`
 - macOS 26 urgent reminders show `⏰`
+- `info --json` reports the actual due date as `dueDate`; if Reminders stores a separate display/alert date, it appears as `displayDate`
+- normal EventKit alarms and private location alarms appear in `info --json` as `alarms`
 - Early Reminders appear in verbose/info JSON as labels such as `15 minutes before`
 - recurring reminders show a repeat badge such as `↻ weekly Mon, Wed`
 - Groceries lists show `🥕` in list headings and list summaries
@@ -247,7 +249,7 @@ remctl doctor --for-agent --json
 
 `search` matches reminder titles and notes. By default it searches active reminders; pass `--completed` to include completed reminders too.
 
-For fast agent writes, call `remctl add ... --json`, use the returned `numericId` when present, then verify with `remctl info <numericId> --json`. `info` includes private rich-link URLs, so agents should not need raw SQLite checks for ordinary rich-link verification.
+For fast agent writes, call `remctl add ... --json`, use the returned `numericId` when present, then verify with `remctl info <numericId> --json`. `info` includes private rich-link URLs, parent and subtask image attachments, EventKit alarms, private location alarms, Early Reminders, and recurrence metadata, so agents should not need raw SQLite checks for ordinary reminder metadata verification.
 
 For smart-list automation, use `smart-list-create`, `smart-list-edit`, and `smart-list-delete` with `--private`, prefer `--smart-list-id` when editing or deleting an existing custom smart list, and verify with `remctl smart-lists --json`. `smart-lists --json` also reports smart-list pin state; on macOS 26, smart-list pinning is verified from `pinnedDate` because the regular-list boolean can stay empty. Reminders.app currently materializes only one included-list filter at a time; RemCTL rejects repeated included lists and list exclusions before writing. The smart-list command surface and examples are documented in [docs/commands.md#smart-lists](docs/commands.md#smart-lists); the private ReminderKit behavior and filter storage details are in [docs/private-metadata.md#smart-list-examples](docs/private-metadata.md#smart-list-examples).
 

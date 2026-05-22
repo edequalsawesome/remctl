@@ -219,6 +219,11 @@ def serialize_reminder(
 
     if row["ZDUEDATE"]:
         reminder["dueDate"] = ts(row["ZDUEDATE"]).isoformat()
+    display_date = _row_get(row, "ZDISPLAYDATEDATE")
+    if display_date and display_date != row["ZDUEDATE"]:
+        reminder["displayDate"] = ts(display_date).isoformat()
+    if _row_get(row, "ZALLDAY") is not None:
+        reminder["allDay"] = bool(_row_get(row, "ZALLDAY"))
     if row["ZCREATIONDATE"]:
         reminder["createdDate"] = ts(row["ZCREATIONDATE"]).isoformat()
     if row["ZCOMPLETIONDATE"]:

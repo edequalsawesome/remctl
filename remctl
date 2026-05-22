@@ -1159,15 +1159,18 @@ def due_date_delta_alerts_expr(db, table_alias="r"):
 
 def display_due_expr(db, table_alias="r"):
     if reminder_has_column(db, "ZDISPLAYDATEDATE"):
-        return f"COALESCE({table_alias}.ZDISPLAYDATEDATE, {table_alias}.ZDUEDATE)"
+        return f"{table_alias}.ZDISPLAYDATEDATE"
+    return "NULL"
+
+def due_expr(table_alias="r"):
     return f"{table_alias}.ZDUEDATE"
 
 def rem_cols(db):
-    due_expr = display_due_expr(db)
     return f"""r.Z_PK, r.ZTITLE, r.ZNOTES, r.ZCOMPLETED, r.ZFLAGGED, r.ZPRIORITY,
     {urgent_column_expr(db)} AS ZISURGENTSTATEENABLEDFORCURRENTUSER,
     {due_date_delta_alerts_expr(db)} AS ZDUEDATEDELTAALERTSDATA,
-    {due_expr} AS ZDUEDATE, r.ZALLDAY, r.ZCOMPLETIONDATE, r.ZCREATIONDATE,
+    {due_expr()} AS ZDUEDATE, {display_due_expr(db)} AS ZDISPLAYDATEDATE,
+    r.ZALLDAY, r.ZCOMPLETIONDATE, r.ZCREATIONDATE,
     r.ZPARENTREMINDER, r.ZLIST, r.ZICSURL, r.ZCKIDENTIFIER, l.ZNAME as list_name,
     {_RECURRENCE_COLS}"""
 
@@ -1274,6 +1277,21 @@ def q_attachments(db, pk):
         "ORDER BY ZFILENAME", (pk, pk)
     ).fetchall()
 
+def q_alarms(db, pk):
+    return db.execute(
+        "SELECT a.Z_PK AS alarm_id, a.ZTRIGGER AS trigger_id, "
+        "t.Z_ENT AS trigger_entity, t.ZTIMEINTERVAL AS time_interval, "
+        "t.ZDATECOMPONENTSDATA AS date_components, t.ZTITLE AS location_title, "
+        "t.ZLATITUDE AS latitude, t.ZLONGITUDE AS longitude, t.ZRADIUS AS radius, "
+        "t.ZADDRESS AS address, t.ZPROXIMITY AS proximity "
+        "FROM ZREMCDOBJECT a "
+        "LEFT JOIN ZREMCDOBJECT t ON a.ZTRIGGER = t.Z_PK "
+        "WHERE a.ZREMINDER = ? AND a.Z_ENT = 15 AND a.ZMARKEDFORDELETION = 0 "
+        "AND (t.Z_PK IS NULL OR t.ZMARKEDFORDELETION = 0) "
+        "ORDER BY a.Z_PK",
+        (pk,),
+    ).fetchall()
+
 def q_rich_links(db, pk):
     return db.execute(
         "SELECT ZURL FROM ZREMCDOBJECT "
@@ -1291,6 +1309,119 @@ def q_hashtags(db, pk):
         "SELECT h.ZNAME FROM ZREMCDOBJECT o JOIN ZREMCDHASHTAGLABEL h "
         "ON o.ZHASHTAGLABEL = h.Z_PK WHERE o.ZREMINDER3 = ?", (pk,)
     ).fetchall()
+
+def attachment_rows_to_json(rows):
+    return [
+        {"filename": row["ZFILENAME"], "type": row["ZATTACHMENTTYPERAWVALUE"]}
+        for row in rows
+    ]
+
+def _date_components_dict(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "replace")
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+def _date_components_iso(components):
+    if not components:
+        return None
+    try:
+        year = int(components["year"])
+        month = int(components["month"])
+        day = int(components["day"])
+        hour = int(components.get("hour", 0))
+        minute = int(components.get("minute", 0))
+        second = int(components.get("second", 0))
+    except (KeyError, TypeError, ValueError):
+        return None
+    return f"{year:04d}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}:{second:02d}"
+
+def _relative_alarm_label(seconds):
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        return None
+    value = abs(seconds)
+    units = (
+        (86400, "day"),
+        (3600, "hour"),
+        (60, "minute"),
+    )
+    for unit_seconds, unit_name in units:
+        if value and value % unit_seconds == 0:
+            amount = value // unit_seconds
+            break
+    else:
+        amount, unit_name = value, "second"
+    plural = "" if amount == 1 else "s"
+    direction = "before due date" if seconds < 0 else "after due date"
+    return f"{amount} {unit_name}{plural} {direction}"
+
+def alarm_rows_to_json(rows):
+    alarms = []
+    for row in rows:
+        alarm = {"id": row["alarm_id"]}
+        interval = _row_get(row, "time_interval")
+        if interval is not None:
+            seconds = int(interval)
+            minutes = seconds / 60
+            if seconds % 60 == 0:
+                minutes = int(minutes)
+            alarm.update({
+                "type": "relative",
+                "relativeOffset": seconds,
+                "relativeOffsetMinutes": minutes,
+            })
+            label = _relative_alarm_label(seconds)
+            if label:
+                alarm["label"] = label
+        elif _row_get(row, "latitude") is not None or _row_get(row, "longitude") is not None:
+            proximity_code = _row_get(row, "proximity")
+            alarm.update({
+                "type": "location",
+                "location": {
+                    "title": _row_get(row, "location_title") or "Location",
+                    "latitude": _row_get(row, "latitude"),
+                    "longitude": _row_get(row, "longitude"),
+                    "radius": _row_get(row, "radius"),
+                    "proximity": "leaving" if proximity_code == 2 else "arriving",
+                    "proximityCode": proximity_code,
+                },
+            })
+            address = _row_get(row, "address")
+            if address:
+                alarm["location"]["address"] = address
+        else:
+            components = _date_components_dict(_row_get(row, "date_components"))
+            if components:
+                alarm.update({
+                    "type": "absolute",
+                    "dateComponents": components,
+                })
+                iso_date = _date_components_iso(components)
+                if iso_date:
+                    alarm["date"] = iso_date
+                timezone = components.get("timeZone")
+                if isinstance(timezone, dict) and timezone.get("identifier"):
+                    alarm["timeZone"] = timezone["identifier"]
+            else:
+                alarm["type"] = "unknown"
+        alarms.append(alarm)
+    return alarms
+
+def hydrate_reminder_detail(db, payload, reminder_id):
+    attachments = attachment_rows_to_json(q_attachments(db, reminder_id))
+    if attachments:
+        payload["attachments"] = attachments
+    alarms = alarm_rows_to_json(q_alarms(db, reminder_id))
+    if alarms:
+        payload["alarms"] = alarms
+    return payload
 
 def q_search(db, query, completed=False):
     # Escape LIKE metacharacters so `%` and `_` in the query match literally;
@@ -1310,54 +1441,54 @@ def q_search(db, query, completed=False):
 
 def q_due_today(db, include_overdue=True):
     sod, eod = due_today_window()
-    due_expr = display_due_expr(db)
+    due_column = due_expr()
     if include_overdue:
-        w = f"{due_expr} < {to_ts(eod)} AND {due_expr} IS NOT NULL"
+        w = f"{due_column} < {to_ts(eod)} AND {due_column} IS NOT NULL"
     else:
-        w = f"{due_expr} >= {to_ts(sod)} AND {due_expr} < {to_ts(eod)}"
+        w = f"{due_column} >= {to_ts(sod)} AND {due_column} < {to_ts(eod)}"
     return db.execute(
         f"SELECT {rem_cols(db)} FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l "
         f"ON r.ZLIST = l.Z_PK WHERE r.ZMARKEDFORDELETION = 0 AND r.ZCOMPLETED = 0 AND r.ZACCOUNT IS NOT NULL "
-        f"AND l.Z_PK IS NOT NULL AND {w} ORDER BY {due_expr}"
+        f"AND l.Z_PK IS NOT NULL AND {w} ORDER BY {due_column}"
     ).fetchall()
 
 def q_flagged(db):
-    due_expr = display_due_expr(db)
+    due_column = due_expr()
     return db.execute(
         f"SELECT {rem_cols(db)} FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l "
         f"ON r.ZLIST = l.Z_PK WHERE r.ZMARKEDFORDELETION = 0 AND r.ZCOMPLETED = 0 AND r.ZACCOUNT IS NOT NULL "
-        f"AND l.Z_PK IS NOT NULL AND r.ZFLAGGED = 1 ORDER BY {due_expr} NULLS LAST"
+        f"AND l.Z_PK IS NOT NULL AND r.ZFLAGGED = 1 ORDER BY {due_column} NULLS LAST"
     ).fetchall()
 
 def q_urgent(db):
-    due_expr = display_due_expr(db)
+    due_column = due_expr()
     return db.execute(
         f"SELECT {rem_cols(db)} FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l "
         f"ON r.ZLIST = l.Z_PK WHERE r.ZMARKEDFORDELETION = 0 AND r.ZCOMPLETED = 0 AND r.ZACCOUNT IS NOT NULL "
-        f"AND l.Z_PK IS NOT NULL AND {urgent_where_clause(db)} ORDER BY {due_expr} NULLS LAST"
+        f"AND l.Z_PK IS NOT NULL AND {urgent_where_clause(db)} ORDER BY {due_column} NULLS LAST"
     ).fetchall()
 
 def q_upcoming(db, days=7):
     """Reminders due within the next N days (not overdue)."""
     sod, future = upcoming_window(days)
-    due_expr = display_due_expr(db)
+    due_column = due_expr()
     return db.execute(
         f"SELECT {rem_cols(db)} FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l "
         f"ON r.ZLIST = l.Z_PK WHERE r.ZMARKEDFORDELETION = 0 AND r.ZCOMPLETED = 0 AND r.ZACCOUNT IS NOT NULL "
-        f"AND l.Z_PK IS NOT NULL AND {due_expr} IS NOT NULL "
-        f"AND {due_expr} >= {to_ts(sod)} AND {due_expr} < {to_ts(future)} "
-        f"ORDER BY {due_expr}"
+        f"AND l.Z_PK IS NOT NULL AND {due_column} IS NOT NULL "
+        f"AND {due_column} >= {to_ts(sod)} AND {due_column} < {to_ts(future)} "
+        f"ORDER BY {due_column}"
     ).fetchall()
 
 def q_overdue(db):
     """All overdue incomplete reminders."""
     sod = start_of_day()
-    due_expr = display_due_expr(db)
+    due_column = due_expr()
     return db.execute(
         f"SELECT {rem_cols(db)} FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l "
         f"ON r.ZLIST = l.Z_PK WHERE r.ZMARKEDFORDELETION = 0 AND r.ZCOMPLETED = 0 AND r.ZACCOUNT IS NOT NULL "
-        f"AND l.Z_PK IS NOT NULL AND {due_expr} IS NOT NULL "
-        f"AND {due_expr} < {to_ts(sod)} ORDER BY {due_expr}"
+        f"AND l.Z_PK IS NOT NULL AND {due_column} IS NOT NULL "
+        f"AND {due_column} < {to_ts(sod)} ORDER BY {due_column}"
     ).fetchall()
 
 # ── Format ───────────────────────────────────────────────────────────────────
@@ -5191,6 +5322,7 @@ def cmd_info(a):
         sys.exit(1)
     subs = q_reminders(db, parent_pk=a.id, completed=True)
     atts = q_attachments(db, a.id)
+    alarms = q_alarms(db, a.id)
     tags = q_hashtags(db, a.id)
     rich_url = q_rich_link(db, a.id)
     sec = None
@@ -5198,10 +5330,12 @@ def cmd_info(a):
         memberships = q_section_memberships(db, r["ZLIST"])
         sec = memberships.get(r["ZCKIDENTIFIER"])
     if a.json:
-        d = to_dict(r, db, section=sec)
+        d = hydrate_reminder_detail(db, to_dict(r, db, section=sec), a.id)
         if subs:
-            d["subtasks"] = reminders_to_dicts(subs, db)
-        if atts: d["attachments"] = [{"filename": a2["ZFILENAME"], "type": a2["ZATTACHMENTTYPERAWVALUE"]} for a2 in atts]
+            subtask_payloads = reminders_to_dicts(subs, db)
+            for subtask_payload in subtask_payloads:
+                hydrate_reminder_detail(db, subtask_payload, subtask_payload["id"])
+            d["subtasks"] = subtask_payloads
         print(json.dumps(d, indent=2))
         return
     print(f"{C.bold('Reminder')} {reminder_id_text(r['Z_PK'], r['list_name'], db)}")
@@ -5252,6 +5386,14 @@ def cmd_info(a):
         print(f"  Attachments ({len(atts)}):")
         for a2 in atts:
             print(f"    - {a2['ZFILENAME'] or 'untitled'} ({a2['ZATTACHMENTTYPERAWVALUE'] or '?'})")
+    if alarms:
+        print(f"  Alarms ({len(alarms)}):")
+        for alarm in alarm_rows_to_json(alarms):
+            label = alarm.get("label") or alarm.get("date") or alarm.get("type")
+            if alarm.get("type") == "location":
+                location = alarm.get("location", {})
+                label = f"{location.get('title', 'Location')} ({location.get('proximity')})"
+            print(f"    - {label}")
     if r["ZCKIDENTIFIER"]:
         link = f"x-apple-reminderkit://REMCDReminder/{r['ZCKIDENTIFIER']}"
         print(f"  Deep link: {C.dim(link)}")
@@ -5280,7 +5422,7 @@ def cmd_sections(a):
 
 def cmd_stats(a):
     db = open_db()
-    due_expr = display_due_expr(db)
+    due_column = due_expr()
     total = db.execute("SELECT COUNT(*) FROM ZREMCDREMINDER WHERE ZMARKEDFORDELETION = 0 AND ZACCOUNT IS NOT NULL").fetchone()[0]
     active = db.execute("SELECT COUNT(*) FROM ZREMCDREMINDER WHERE ZMARKEDFORDELETION = 0 AND ZCOMPLETED = 0 AND ZACCOUNT IS NOT NULL").fetchone()[0]
     flagged = db.execute("SELECT COUNT(*) FROM ZREMCDREMINDER WHERE ZMARKEDFORDELETION = 0 AND ZCOMPLETED = 0 AND ZFLAGGED = 1 AND ZACCOUNT IS NOT NULL").fetchone()[0]
@@ -5290,7 +5432,7 @@ def cmd_stats(a):
     ).fetchone()[0]
     overdue = db.execute(
         f"SELECT COUNT(*) FROM ZREMCDREMINDER r WHERE r.ZMARKEDFORDELETION = 0 AND r.ZCOMPLETED = 0 AND r.ZACCOUNT IS NOT NULL "
-        f"AND {due_expr} IS NOT NULL AND {due_expr} < {to_ts(datetime.now())}"
+        f"AND {due_column} IS NOT NULL AND {due_column} < {to_ts(datetime.now())}"
     ).fetchone()[0]
     lists_count = len(q_lists(db))
     sections_count = len(q_sections(db))

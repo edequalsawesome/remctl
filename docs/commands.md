@@ -117,7 +117,7 @@ remctl add "Pay rent" --recurrence monthly
 remctl add "Annual review" --recurrence yearly
 ```
 
-Recurring schedules use EventKit and work on both `add` and `edit`. `info --json`, `show --json`, and other read commands decode the stored recurrence rows back into a stable `recurrence` object.
+Recurring schedules and normal alarms use EventKit and work on both `add` and `edit`. `info --json`, `show --json`, and other read commands decode the stored recurrence rows back into a stable `recurrence` object. Normal alarms appear in `info --json` as `alarms` entries; relative alarms include `relativeOffset`, `relativeOffsetMinutes`, and a label such as `15 minutes before due date`.
 
 Early Reminders:
 
@@ -128,6 +128,8 @@ remctl edit 23880 --private --early-reminder clear
 ```
 
 Early Reminders are private ReminderKit due-date delta alerts, not EventKit alarms. They require `--private`; setting one requires an existing or newly supplied due date. Accepted values are `15m`, `1h`, `2d`, `1w`, `1mo`, and equivalent words such as `15 minutes`; `clear`, `none`, `off`, or `never` removes existing Early Reminders. JSON readback includes `earlyReminder` and `earlyReminders` with fields such as `unit`, `count`, `value`, `direction`, and `label`.
+
+Location alarms are normal reminder alarms with private ReminderKit location triggers. `edit --private --location-title ... --latitude ... --longitude ...` verifies through `info --json` in the same `alarms` array with `type: "location"` and a `location` object containing title, coordinates, radius, address when present, and `proximity`.
 
 ## Editing
 
@@ -274,6 +276,15 @@ JSON output preserves machine-readable fields:
   "flagged": false,
   "urgent": false,
   "dueDate": "2026-05-05T09:00:00",
+  "displayDate": "2026-05-05T08:45:00",
+  "alarms": [
+    {
+      "type": "relative",
+      "relativeOffset": -900,
+      "relativeOffsetMinutes": -15,
+      "label": "15 minutes before due date"
+    }
+  ],
   "earlyReminder": {
     "unit": "minutes",
     "unitCode": 0,
@@ -289,6 +300,8 @@ JSON output preserves machine-readable fields:
   }
 }
 ```
+
+`dueDate` is the actual Reminders due date. When Reminders stores a separate display/alert date, such as a normal alarm 15 minutes before the due date, JSON also includes `displayDate`; agents should not treat `displayDate` as the due date.
 
 ## Due Date Formats
 
@@ -332,7 +345,7 @@ remctl add "Title" -l Projects --private --section "Section" -d "2026-05-12 15:0
 remctl info <numericId> --json
 ```
 
-`add --json` returns `numericId` when the new reminder is immediately visible in the local database. Use that ID for `info`; fall back to resolving by title from `show <list> --json` only if `numericId` is absent. `info --json` includes private rich-link URLs, so raw SQLite verification should not be needed for normal rich-link tasks.
+`add --json` returns `numericId` when the new reminder is immediately visible in the local database. Use that ID for `info`; fall back to resolving by title from `show <list> --json` only if `numericId` is absent. `info --json` includes private rich-link URLs, parent and subtask image attachments, EventKit alarms, private location alarms, Early Reminders, and recurrence metadata, so raw SQLite verification should not be needed for normal reminder metadata tasks.
 
 If an agent supplies an invalid due date, RemCTL creates nothing and exits with a structured `invalid_due_date` error on stderr. Retry the same `add` command with one of the provided examples or a normalized `YYYY-MM-DD HH:MM` value; do not create first and patch the due date afterward.
 
