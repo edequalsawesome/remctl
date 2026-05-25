@@ -386,6 +386,11 @@ static NSString *normalizedColorName(NSString *value) {
 static REMColor *makeREMColor(NSString *value) {
     NSString *name = normalizedColorName(value);
     if (!name) return nil;
+    // ReminderKit rejects cyan as a symbolic private color on current macOS,
+    // but accepts the same RGB value through the custom hex initializer path.
+    if ([name isEqualToString:@"cyan"]) {
+        name = @"#5AC8FA";
+    }
     NSDictionary<NSString *, NSDictionary *> *colors = @{
         @"red": @{@"hex": @"#FF2968", @"r": @1.0, @"g": @0.1607843137254902, @"b": @0.40784313725490196, @"ck": @"red"},
         @"orange": @{@"hex": @"#FF8D28", @"r": @1.0, @"g": @0.5529411764705883, @"b": @0.1568627450980392, @"ck": @"orange"},

@@ -76,6 +76,40 @@ class CliTests(unittest.TestCase):
                 {"status": "error", "message": "ReminderKit unavailable"},
             )
 
+    def test_private_create_list_retries_transient_helper_error(self):
+        transient = {
+            "status": "error",
+            "message": "Couldn’t communicate with a helper application.",
+        }
+        created = {"status": "created", "name": "Project X"}
+        with (
+            mock.patch.object(self.remctl, "private_call", side_effect=[transient, created]) as private_call,
+            mock.patch.object(self.remctl, "open_db", return_value=object()),
+            mock.patch.object(self.remctl, "q_list_exact_name_count", return_value=0),
+            mock.patch.object(self.remctl.time, "sleep"),
+        ):
+            result = self.remctl.private_create_list_call({"action": "create_list"}, "Project X")
+
+        self.assertEqual(result, created)
+        self.assertEqual(private_call.call_count, 2)
+
+    def test_private_create_list_rechecks_before_retrying_transient_helper_error(self):
+        transient = {
+            "status": "error",
+            "message": "Couldn’t communicate with a helper application.",
+        }
+        with (
+            mock.patch.object(self.remctl, "private_call", return_value=transient) as private_call,
+            mock.patch.object(self.remctl, "open_db", return_value=object()),
+            mock.patch.object(self.remctl, "q_list_exact_name_count", return_value=1),
+            mock.patch.object(self.remctl.time, "sleep"),
+        ):
+            result = self.remctl.private_create_list_call({"action": "create_list"}, "Project X")
+
+        self.assertEqual(result["status"], "created")
+        self.assertTrue(result["verifiedAfterTransientError"])
+        self.assertEqual(private_call.call_count, 1)
+
     def _list_db(self, names, grocery_locales=None):
         grocery_locales = grocery_locales or {}
         db = sqlite3.connect(":memory:")
@@ -393,6 +427,53 @@ class CliTests(unittest.TestCase):
         self.assertIn("Available commands:", output)
         self.assertIn("  add,", output)
         self.assertNotIn("choose from", output)
+
+    def test_read_command_accepts_format_after_subcommand(self):
+        captured = {}
+
+        def capture(args, handler):
+            captured["args"] = args
+            captured["handler"] = handler
+
+        color_enabled = self.remctl.C.enabled
+        try:
+            with (
+                mock.patch.object(sys, "argv", ["remctl", "show", "Work", "--format", "table"]),
+                mock.patch.object(self.remctl, "maybe_run_first_launch_onboarding"),
+                mock.patch.object(self.remctl, "run_handler_with_fallback", side_effect=capture),
+            ):
+                self.remctl.main()
+        finally:
+            self.remctl.C.enabled = color_enabled
+
+        args = captured["args"]
+        self.assertIs(captured["handler"], self.remctl.cmd_show)
+        self.assertEqual(args.list, "Work")
+        self.assertEqual(args.format, "table")
+        self.assertFalse(args.json)
+
+    def test_read_command_local_format_json_enables_json_output(self):
+        captured = {}
+
+        def capture(args, handler):
+            captured["args"] = args
+            captured["handler"] = handler
+
+        color_enabled = self.remctl.C.enabled
+        try:
+            with (
+                mock.patch.object(sys, "argv", ["remctl", "today", "--format", "json"]),
+                mock.patch.object(self.remctl, "maybe_run_first_launch_onboarding"),
+                mock.patch.object(self.remctl, "run_handler_with_fallback", side_effect=capture),
+            ):
+                self.remctl.main()
+        finally:
+            self.remctl.C.enabled = color_enabled
+
+        args = captured["args"]
+        self.assertIs(captured["handler"], self.remctl.cmd_today)
+        self.assertEqual(args.format, "json")
+        self.assertTrue(args.json)
 
     def test_list_symbols_html_contact_sheet_embeds_badge_assets(self):
         rows = [

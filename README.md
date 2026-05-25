@@ -59,7 +59,7 @@ Full setup details live in [docs/installation.md](docs/installation.md).
 | Browse reminders | `lists`, `smart-lists`, `templates`, `template-info`, `show`, `search`, `flagged`, `urgent`, `info`, `subtasks` |
 | Create and edit | `add`, `edit`, `done`, `undone`, `delete`, `flag`, `unflag` |
 | Organize | `list-symbols`, `list-create`, `list-edit`, `list-pin`, `list-unpin`, `list-rename`, `list-delete`, `smart-list-create`, `smart-list-edit`, `smart-list-delete`, `template-create`, `template-apply`, `template-delete`, `sections`, `tags` |
-| Share data | `export`, `import`, `link`, `open`, `--json`, `--format table` |
+| Share data | `export`, `import`, `link`, `open`, `--json`, `--format table` on tabular read commands |
 | Set up the Mac | `onboard`, `permissions`, `doctor`, `setup`, `completion` |
 
 Common examples:

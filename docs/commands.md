@@ -93,7 +93,7 @@ remctl template-delete "Packing Template" --private --force
 
 RemCTL uses nouns for read-only inspectors (`lists`, `smart-lists`, `templates`, `today`, `stats`) and verb-style commands for writes (`add`, `edit`, `delete`, `list-create`, `smart-list-edit`). List-management commands keep the `list-*` prefix; custom smart-list writes keep the `smart-list-*` prefix; template writes keep the `template-*` prefix.
 
-Use `--json` on subcommands when scripting. The global `--format json` is equivalent for commands with JSON output; `--format table` is for human-readable tabular views. Export keeps its own `--format json|csv` because that chooses a file format, not display style.
+Use `--json` on subcommands when scripting. For tabular read commands (`today`, `upcoming`, `overdue`, `flagged`, `urgent`, `lists`, `show`, and `search`), `--format json|table|plain` can be passed globally before the command or directly on the read command, so both `remctl --format table show Work` and `remctl show Work --format table` are valid. Export keeps its own `--format json|csv` because that chooses a file format, not display style.
 
 List targets are consistent across commands that can safely resolve them: pass a list name positionally or with `-l/--list`, or pass `--list-id` when an exact numeric target matters. If both a name and `--list-id` are provided, RemCTL fails before writing or exporting. This applies to `show`, `add`, `edit`, `link`, `export`, `list-edit`, `list-pin`, `list-unpin`, `list-rename`, `list-delete`, and the smart-list `--include-list-id` filter. For pinning, `list-pin` and `list-unpin` also accept smart-list names or `--smart-list-id`; if a name matches both a regular list and a smart list, RemCTL fails before writing and asks for an explicit ID.
 
