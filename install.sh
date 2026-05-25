@@ -201,7 +201,7 @@ if [[ "$RUN_DOCTOR" -eq 1 ]]; then
 fi
 
 echo ""
-echo -e "${GREEN}${BOLD}Done!${RESET} RemCTL v1.0.1 installed."
+echo -e "${GREEN}${BOLD}Done!${RESET} RemCTL v1.0.2 installed."
 if [[ "$BOOTSTRAP" -eq 1 ]]; then
     echo -e "${DIM}Bootstrap is ready. Next: run 'remctl onboard', then 'remctl permissions full-disk-access', then 'remctl doctor'.${RESET}"
 else
