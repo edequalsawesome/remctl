@@ -1357,6 +1357,69 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(json.loads(stdout.getvalue())["filter"]["match"], "any")
 
+    def test_smart_list_create_builds_materializing_selected_tag_payload(self):
+        db = self._smart_list_db()
+        args = SimpleNamespace(
+            name="#remctl Today",
+            private=True,
+            match="all",
+            flagged=False,
+            priority=None,
+            tags="remctl",
+            tag_match="any",
+            any_tag=False,
+            untagged=False,
+            date="today",
+            date_today_include_past_due=False,
+            date_on=None,
+            date_before=None,
+            date_after=None,
+            date_range=None,
+            date_relative=None,
+            time=None,
+            include_list=None,
+            exclude_list=None,
+            include_list_id=None,
+            exclude_list_id=None,
+            list_match=None,
+            vehicle=None,
+            location_title=None,
+            latitude=None,
+            longitude=None,
+            radius=100.0,
+            proximity="enter",
+            filter_json=None,
+            color=None,
+            symbol=None,
+            emoji=None,
+            json=True,
+        )
+        try:
+            with (
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(
+                    self.remctl,
+                    "private_call",
+                    return_value={"status": "created", "id": "SMART-TAG"},
+                ) as private_call,
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.remctl.cmd_smart_list_create(args)
+        finally:
+            db.close()
+
+        decoded = json.loads(base64.b64decode(private_call.call_args.args[0]["filterData"]).decode("utf-8"))
+        self.assertEqual(
+            decoded,
+            {
+                "operation": "and",
+                "hashtags": {"hashtags": {"operation": "or", "include": ["remctl"], "exclude": []}},
+                "date": {"today": False},
+            },
+        )
+        self.assertEqual(json.loads(stdout.getvalue())["filter"]["filters"][0]["tagMatch"], "any")
+
     def test_smart_list_create_resolves_include_list_id_to_object_uuid(self):
         db = self._smart_list_db()
         args = SimpleNamespace(

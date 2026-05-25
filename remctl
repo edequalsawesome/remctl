@@ -4128,11 +4128,6 @@ def _resolve_smart_list_filter_list_ids(db, names, ids):
 def validate_materializing_smart_list_args(a):
     if getattr(a, "filter_json", None):
         return
-    if _smart_list_csv_values(getattr(a, "tags", None)):
-        raise SmartListFilterError(
-            "Selected tag filters do not materialize reliably in Reminders.app. "
-            "Use --any-tag, or inspect existing selected-tag smart lists with smart-lists."
-        )
     if bool(getattr(a, "untagged", False)):
         raise SmartListFilterError("Untagged smart-list writes do not materialize reliably in Reminders.app.")
     if getattr(a, "date", None) == "no-date":
@@ -4173,7 +4168,7 @@ def smart_list_filter_payload_from_args(a, db):
         flagged=bool(getattr(a, "flagged", False)),
         priorities=_smart_list_csv_values(getattr(a, "priority", None)),
         tags=_smart_list_csv_values(getattr(a, "tags", None)),
-        tag_match=getattr(a, "tag_match", "all"),
+        tag_match=getattr(a, "tag_match", "any"),
         any_tag=bool(getattr(a, "any_tag", False)),
         untagged=bool(getattr(a, "untagged", False)),
         date_any=getattr(a, "date", None) == "any",
@@ -5990,8 +5985,8 @@ def add_smart_list_filter_arguments(parser):
     parser.add_argument("--filter-json", help="Advanced: raw official smart-list filter JSON or @path")
     parser.add_argument("--flagged", action="store_true", help="Filter to flagged reminders")
     parser.add_argument("--priority", help="Priority filter: high, medium, low, or comma-separated values")
-    parser.add_argument("--tags", help=argparse.SUPPRESS)
-    parser.add_argument("--tag-match", choices=["all", "any"], default="all", help=argparse.SUPPRESS)
+    parser.add_argument("--tags", help="Selected tag filter, comma-separated; # prefix optional")
+    parser.add_argument("--tag-match", choices=["all", "any"], default="any", help="Selected tag matching mode")
     parser.add_argument("--any-tag", action="store_true", help="Filter to reminders with any tag")
     parser.add_argument("--untagged", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--date", choices=["any", "today"], help="Date filter")
@@ -6180,6 +6175,8 @@ _remctl() {
                 '--flagged[Filter to flagged reminders]' \
                 '--priority[Priority filter]:priority:(high medium low)' \
                 '--match[Match all or any filters]:match:(all any)' \
+                '--tags[Selected tag filter, comma-separated; # prefix optional]:tags:' \
+                '--tag-match[Selected tag matching mode]:match:(all any)' \
                 '--any-tag[Filter to reminders with any tag]' \
                 '--date[Date filter]:date:(any today)' \
                 '--date-on[On date]:date:' \
@@ -6209,6 +6206,8 @@ _remctl() {
                 '--flagged[Filter to flagged reminders]' \
                 '--priority[Priority filter]:priority:(high medium low)' \
                 '--match[Match all or any filters]:match:(all any)' \
+                '--tags[Selected tag filter, comma-separated; # prefix optional]:tags:' \
+                '--tag-match[Selected tag matching mode]:match:(all any)' \
                 '--any-tag[Filter to reminders with any tag]' \
                 '--date[Date filter]:date:(any today)' \
                 '--date-on[On date]:date:' \
@@ -6345,10 +6344,10 @@ BASH_COMPLETION = '''_remctl() {
         COMPREPLY=( $(compgen -W "--color --private --symbol --emoji --groceries --grocery-locale --json" -- "$cur") )
         return
     elif [ "$cmd" = "smart-list-create" ]; then
-        COMPREPLY=( $(compgen -W "--private --color --symbol --emoji --match --filter-json --flagged --priority --any-tag --date --date-today-include-past-due --date-on --date-before --date-after --date-range --time --include-list --include-list-id --vehicle --location-title --latitude --longitude --radius --proximity --json" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--private --color --symbol --emoji --match --filter-json --flagged --priority --tags --tag-match --any-tag --date --date-today-include-past-due --date-on --date-before --date-after --date-range --time --include-list --include-list-id --vehicle --location-title --latitude --longitude --radius --proximity --json" -- "$cur") )
         return
     elif [ "$cmd" = "smart-list-edit" ]; then
-        COMPREPLY=( $(compgen -W "--private --smart-list-id --color --symbol --emoji --match --filter-json --flagged --priority --any-tag --date --date-today-include-past-due --date-on --date-before --date-after --date-range --time --include-list --include-list-id --vehicle --location-title --latitude --longitude --radius --proximity --json" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--private --smart-list-id --color --symbol --emoji --match --filter-json --flagged --priority --tags --tag-match --any-tag --date --date-today-include-past-due --date-on --date-before --date-after --date-range --time --include-list --include-list-id --vehicle --location-title --latitude --longitude --radius --proximity --json" -- "$cur") )
         return
     elif [ "$cmd" = "smart-list-delete" ]; then
         COMPREPLY=( $(compgen -W "--private --smart-list-id --force --json" -- "$cur") )
@@ -6460,6 +6459,8 @@ complete -c remctl -n "__fish_seen_subcommand_from smart-list-create" -l priorit
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create" -l json -d "JSON output"
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l match -d "Match all or any filters" -a "all any"
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l filter-json -d "Raw official filter JSON or @path" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l tags -d "Selected tag filter, comma-separated" -r
+complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l tag-match -d "Selected tag matching mode" -a "all any"
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l any-tag -d "Filter to reminders with any tag"
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l date -d "Date filter" -a "any today"
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-create smart-list-edit" -l date-today-include-past-due -d "Include past due with today"
@@ -7449,6 +7450,7 @@ def main():
             "  remctl smart-list-create \"Flagged Review\" --private --flagged\n"
             "  remctl smart-list-create \"High Priority\" --private --priority high\n"
             "  remctl smart-list-create \"Any Tag\" --private --any-tag\n"
+            "  remctl smart-list-create \"#remctl Today\" --private --tags remctl --date today\n"
             "  remctl smart-list-create \"Projects Today\" --private --include-list Projects --date today --date-today-include-past-due\n"
             "  remctl smart-list-create \"Priority or Today\" --private --match any --priority high,medium --date today\n"
             "  remctl smart-list-create \"Due Before June 1\" --private --date-range 2026-05-16,2026-05-31 --color red --emoji 📆\n"
@@ -7476,6 +7478,7 @@ def main():
         epilog=(
             "Examples:\n"
             "  remctl smart-list-edit \"Flagged Review\" --private --priority high\n"
+            "  remctl smart-list-edit \"#remctl Today\" --private --tags remctl --date today\n"
             "  remctl smart-list-edit \"Due Before June 1\" --private --color red --emoji 📆\n"
             "  remctl smart-list-edit --smart-list-id 170 --private --match any --priority high,medium --date today\n"
         ),

@@ -70,7 +70,7 @@ class SmartListFilterTests(unittest.TestCase):
 
     def test_decode_reminders_app_official_filter_samples(self):
         samples = [
-            {"hashtags": {"hashtags": ["remctl", "codex"]}},
+            {"hashtags": {"hashtags": {"operation": "or", "include": ["remctl", "codex"], "exclude": []}}},
             {"hashtags": {"any": ""}},
             {"operation": "and", "hashtags": {"untagged": ""}},
             {"operation": "and", "date": {"afterDate": "15-05-2026"}},
@@ -90,13 +90,24 @@ class SmartListFilterTests(unittest.TestCase):
                 decoded = decode_smart_list_filter_blob(json.dumps(sample).encode("utf-8"))
                 self.assertTrue(decoded["summary"]["supported"])
 
+    def test_decode_legacy_short_selected_tag_filter_marks_non_materializing(self):
+        decoded = decode_smart_list_filter_blob(b'{"hashtags":{"hashtags":["remctl"]}}')
+
+        self.assertFalse(decoded["summary"]["supported"])
+        self.assertFalse(decoded["summary"]["materializes"])
+        self.assertEqual(decoded["summary"]["kind"], "unsupported")
+
     def test_build_supported_filter_payload_encodes_official_filters(self):
         self.assertEqual(
             build_supported_filter_payload(tags=["remctl", "codex"]),
-            {"hashtags": {"hashtags": ["remctl", "codex"]}},
+            {"hashtags": {"hashtags": {"operation": "or", "include": ["remctl", "codex"], "exclude": []}}},
         )
         self.assertEqual(
-            build_supported_filter_payload(tags=["remctl"], tag_match="any"),
+            build_supported_filter_payload(tags=["remctl"], tag_match="all"),
+            {"hashtags": {"hashtags": {"operation": "and", "include": ["remctl"], "exclude": []}}},
+        )
+        self.assertEqual(
+            build_supported_filter_payload(tags=["#remctl"], tag_match="any"),
             {"hashtags": {"hashtags": {"operation": "or", "include": ["remctl"], "exclude": []}}},
         )
         self.assertEqual(build_supported_filter_payload(any_tag=True), {"hashtags": {"any": ""}})
@@ -124,7 +135,7 @@ class SmartListFilterTests(unittest.TestCase):
             ),
             {
                 "operation": "or",
-                "hashtags": {"hashtags": ["remctl"]},
+                "hashtags": {"hashtags": {"operation": "or", "include": ["remctl"], "exclude": []}},
                 "date": {"today": False},
                 "lists": {"include": ["LIST-1"], "exclude": []},
             },

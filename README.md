@@ -120,11 +120,12 @@ Groceries writes require `--private` because Apple exposes the list type, locale
 
 ## Smart Lists
 
-RemCTL can inspect built-in and custom smart lists with `smart-lists`. It can also create, edit, and delete custom smart lists with the Reminders.app filters that currently materialize reliably through the private ReminderKit write path: any tag, date, time, priority, flag, vehicle-connected, specific location, one included list, and `--match all|any` across those reliable families.
+RemCTL can inspect built-in and custom smart lists with `smart-lists`. It can also create, edit, and delete custom smart lists with the Reminders.app filters that currently materialize reliably through the private ReminderKit write path: any tag, selected tags, date, time, priority, flag, vehicle-connected, specific location, one included list, and `--match all|any` across those reliable families.
 
 ```bash
 remctl smart-lists --json
 remctl smart-list-create "Any Tag" --private --any-tag
+remctl smart-list-create "#remctl Today" --private --tags remctl --date today
 remctl smart-list-create "Projects Today" --private --include-list Projects --date today --date-today-include-past-due
 remctl smart-list-create "Priority or Today" --private --match any --priority high,medium --date today
 remctl smart-list-create "Due Before June 1" --private --date-range 2026-05-16,2026-05-31 --color red --emoji 📆

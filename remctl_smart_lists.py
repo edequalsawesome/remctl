@@ -190,6 +190,8 @@ def summarize_smart_list_filter(payload):
         "kind": "unsupported",
         "description": "Unsupported custom filter",
         "supported": False,
+        "materializes": False if any(part.get("materializes") is False for part in unsupported) else None,
+        "filters": parts + unsupported,
         "keys": keys,
     }
 
@@ -214,10 +216,11 @@ def _summarize_filter_family(key, value):
         if isinstance(hashtags, list) and all(isinstance(item, str) for item in hashtags):
             return {
                 "kind": "tags",
-                "description": f"Tags all selected: {', '.join(hashtags)}",
-                "supported": True,
+                "description": f"Legacy selected tags: {', '.join(hashtags)}",
+                "supported": False,
                 "tags": hashtags,
                 "tagMatch": "all",
+                "materializes": False,
             }
         if isinstance(hashtags, dict):
             include = hashtags.get("include", [])
@@ -420,7 +423,7 @@ def build_supported_filter_payload(
     flagged=False,
     priorities=None,
     tags=None,
-    tag_match="all",
+    tag_match="any",
     any_tag=False,
     untagged=False,
     date_any=False,
@@ -494,7 +497,7 @@ def build_supported_filter_payload(
     return payload
 
 
-def _build_tag_filter(*, tags=None, tag_match="all", any_tag=False, untagged=False):
+def _build_tag_filter(*, tags=None, tag_match="any", any_tag=False, untagged=False):
     tags = [str(tag).lstrip("#").strip() for tag in (tags or []) if str(tag).lstrip("#").strip()]
     requested = sum(1 for item in (bool(tags), any_tag, untagged) if item)
     if requested > 1:
@@ -505,9 +508,7 @@ def _build_tag_filter(*, tags=None, tag_match="all", any_tag=False, untagged=Fal
         return {"untagged": ""}
     if tags:
         operation = normalize_match_operation(tag_match)
-        if operation == "and":
-            return {"hashtags": tags}
-        return {"hashtags": {"operation": "or", "include": tags, "exclude": []}}
+        return {"hashtags": {"operation": operation, "include": tags, "exclude": []}}
     return None
 
 
