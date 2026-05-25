@@ -10,11 +10,9 @@ RemCTL is a power-user Apple Reminders CLI. It reads the local Reminders CoreDat
 ## Default Workflow
 
 - Use the installed command for user tasks: `remctl ...`.
-- Use the repo command while developing RemCTL itself: `./remctl ...` from the repo root.
 - Prefer JSON for automation and verification: `remctl today --json`, `remctl show Work --json`, `remctl info <id> --json`.
 - Never write directly to the Reminders SQLite database.
 - For private reminder metadata, use regular `add` or `edit` with `--private`; for private list appearance, Groceries mode, or regular/smart-list pin state, use `list-create --private`, `list-edit --private`, `list-pin --private`, or `list-unpin --private`; for custom smart lists, use `smart-list-create`, `smart-list-edit`, or `smart-list-delete` with `--private`; for Reminders templates, use `template-create`, `template-apply`, or `template-delete` with `--private`. Do not use raw database mutation.
-- After changing repo code, reinstall before testing the user-facing command: `./install.sh && hash -r`.
 
 ## Agent Routing
 
@@ -241,18 +239,3 @@ remctl doctor
 RemCTL may need Reminders access for EventKit writes and private ReminderKit writes, Automation access for AppleScript fallback operations, and Full Disk Access for direct database reads. The guided permission helper only handles CLI targets; there is no service target. `remctl-private` does not have its own first-run flow; it depends on the same Reminders access and must be installed next to `remctl`.
 
 macOS TCC permissions are scoped to the process context. Terminal can pass `remctl doctor` while Codex or another agent runner fails from its own context. If agent-side `doctor` fails but the user's Terminal passes, treat that as expected TCC scoping rather than a broken install. Ask the user to grant Full Disk Access to the target printed by `remctl doctor --for-agent`, or for a one-off unblock run the requested `remctl` command through Terminal via AppleScript and capture stdout/stderr in temp files.
-
-## Development Checks
-
-```bash
-python3 -m py_compile remctl remctl_runtime.py remctl_serialization.py remctl_smart_lists.py
-python3 -m unittest discover -s tests -q
-swiftc -O -framework EventKit -framework Foundation -o /tmp/remctl-bridge-check remctl-bridge.swift
-swiftc -O -framework AppKit -framework Foundation -o /tmp/remctl-permissions-check remctl-permissions.swift
-clang -fobjc-arc -O -F/System/Library/PrivateFrameworks -framework Foundation -framework AppKit -framework ReminderKit -o /tmp/remctl-private-check remctl-private.m
-git diff --check
-swiftc -O -framework EventKit -framework Foundation -o remctl-bridge remctl-bridge.swift
-python3 scripts/live_private_matrix.py
-./install.sh --bootstrap
-remctl doctor --for-agent --json
-```

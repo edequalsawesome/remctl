@@ -189,9 +189,36 @@ remctl template-apply "Packing Template" --private --json
 remctl template-delete "Packing Template" --private --force
 ```
 
-Supported private metadata includes synced web rich links, synced tags, section assignment and creation, rich subtasks with per-child notes/due/URL/tags/images, image attachments, real flag state, urgent state at creation or edit time, Early Reminders, location alarms, list appearance and pin state, Groceries list creation/conversion/locale metadata, Groceries categorization verification, smart-list appearance and pin state, experimental custom smart-list creation/editing/deletion for verified materializing Reminders filters, and Reminders template create/apply/delete. `edit -l/--list` and `edit --list-id` move an existing reminder through the normal EventKit bridge and do not require `--private`. Location alarms still require the `--private` guardrail, but RemCTL writes them through `remctl-bridge` because EventKit's structured-location alarms persist correctly while the private ReminderKit alarm mutation does not on current macOS. Private edit operations for rich links and image attachments are additive: RemCTL can add synced web rich links and image attachments, but it does not remove or replace existing rich links/images. `--early-reminder` accepts values such as `15m`, `1h`, `2d`, `1w`, `1mo`, or `clear`, requires `--private`, and requires a due date when setting a non-clear value. `smart-lists` and `templates` are read-only and safe; `smart-list-create`, `smart-list-edit`, `smart-list-delete`, `template-create`, `template-apply`, and `template-delete` require `--private`. Template commands can report existing public links, but do not create iCloud sharing links. `list-create --color` uses public EventKit for normal color names; `--private` enables exact `#RRGGBB` colors plus official list symbols or emoji badges on both lists and smart lists. `lists --json` and `smart-lists --json` expose persisted `color`, `badge`, and `badgeEmblem` fields for appearance verification. `list-create --private --groceries`, `list-edit --private --groceries`, and `list-edit --private --standard` use ReminderKit's private grocery context; `add/edit --private --grocery` verifies Reminders' automatic sorter first and falls back to the explicit private categorizer only when needed. `list-pin` and `list-unpin` also require `--private` and save regular lists or smart lists through ReminderKit. `list-symbols` prints the 71 official Reminders emblem names; its terminal glyph column is only an approximation. Use `list-symbols --preview` to generate and open a standalone HTML contact sheet rendered from the native RemindersUICore badge assets with interactive official color swatches, or `list-symbols --html path/to/file.html` to write it without opening. Reminders stores built-in icons as private emblem names such as `education3`; `--symbol` is limited to those official names because arbitrary SF Symbol strings fall back to the default icon in Reminders. Use `--emoji` for custom standard emoji badges. If a section name is duplicated in the same list, RemCTL picks the single non-empty match when there is one; otherwise use `--section-id`.
+Private mode covers the parts of Reminders that EventKit does not expose:
 
-This is the major difference from ordinary EventKit-only Reminders CLIs, but it is still unsupported by Apple. Private-only flags fail before writing unless `--private` is present, generic file/PDF attachments are intentionally rejected, reminder metadata writes should be verified with `remctl info ID --json`, smart-list writes should be verified with `remctl smart-lists --json`, and template writes should be verified with `remctl templates --json` plus a UI/device check when sync behavior matters.
+- Reminder metadata: synced web rich links, synced tags, sections, rich subtasks, image attachments, real flag state, urgent state, Early Reminders, and location alarms.
+- List metadata: exact `#RRGGBB` colors, official list symbols, emoji badges, Groceries list conversion/locale metadata, and regular or smart-list pin state.
+- Smart lists: custom smart-list create/edit/delete for the Reminders filters that RemCTL has verified to materialize correctly.
+- Templates: whole-list template create/apply/delete. Existing public template links can be read, but RemCTL does not create iCloud sharing links.
+
+A few rules keep this safe and predictable:
+
+- `edit -l/--list` and `edit --list-id` are normal EventKit moves; they do not require `--private`.
+- Location alarms still require the `--private` guardrail, but RemCTL saves them through `remctl-bridge` because EventKit structured-location alarms persist correctly on current macOS.
+- Rich-link and image edit operations are additive. RemCTL can add them, but it does not remove or replace existing rich links/images.
+- `--early-reminder` accepts values such as `15m`, `1h`, `2d`, `1w`, `1mo`, or `clear`. Non-clear values require a due date.
+- `list-create --color` uses public EventKit for normal color names. Add `--private` for exact colors, official symbols, or emoji badges.
+- `list-symbols` prints the 71 official Reminders emblem names. Use `list-symbols --preview` for the native badge contact sheet. Use `--emoji` for custom emoji badges.
+- Groceries writes verify Reminders' automatic sorter first, then use the private categorizer only if needed.
+- If a section name is duplicated in the same list, RemCTL uses the single non-empty match when possible. Otherwise, pass `--section-id`.
+
+Verify with:
+
+- `remctl info ID --json` for reminder metadata.
+- `lists --json` for list `color`, `badge`, `badgeEmblem`, and Groceries metadata.
+- `smart-lists --json` for smart-list filters and pin state.
+- `templates --json` or `template-info` for templates.
+
+This is the major difference from ordinary EventKit-only Reminders CLIs, but it is still unsupported by Apple:
+
+- Private-only flags fail before writing unless `--private` is present.
+- Generic file/PDF attachments are intentionally rejected.
+- Smart-list and template writes should get a UI/device check when sync behavior matters.
 
 ## Output
 
