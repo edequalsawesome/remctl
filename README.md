@@ -1,6 +1,6 @@
 # RemCTL: The Power-User Reminders CLI
 
-![RemCTL](https://cdn.macstories.net/cleanshot-2026-05-04-at-18-15-17-2x-1777911332976.png)
+![RemCTL](https://cdn.macstories.net/images/uploads/2026/05/26/cleanshot-2026-05-26-at-1629152x-1779805785287-9271e938c2.png)
 
 RemCTL is a fast, scriptable Reminders CLI for macOS designed for power users and AI agents.
 
