@@ -229,6 +229,7 @@ RemCTL output is designed for both humans and agents:
 - flagged reminders show `⚑`
 - macOS 26 urgent reminders show `⏰`
 - `info --json` reports the actual due date as `dueDate`; if Reminders stores a separate display/alert date, it appears as `displayDate`
+- `edit -d` carries a single absolute alarm forward when it matches the old due/display time, keeping Reminders.app's visible time aligned for ordinary reschedules
 - normal EventKit alarms and location alarms appear in `info --json` as `alarms`
 - Early Reminders appear in verbose/info JSON as labels such as `15 minutes before`
 - recurring reminders show a repeat badge such as `↻ weekly Mon, Wed`

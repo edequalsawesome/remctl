@@ -318,7 +318,7 @@ JSON output preserves machine-readable fields:
 }
 ```
 
-`dueDate` is the actual Reminders due date. When Reminders stores a separate display/alert date, such as a normal alarm 15 minutes before the due date, JSON also includes `displayDate`; agents should not treat `displayDate` as the due date.
+`dueDate` is the actual Reminders due date. When Reminders stores a separate display/alert date, such as a normal alarm 15 minutes before the due date, JSON also includes `displayDate`; agents should not treat `displayDate` as the due date. For ordinary rescheduling with `edit -d`, RemCTL carries forward a single absolute alarm when that alarm matches the old due/display time, so Reminders.app's visible time moves with the due date instead of staying stale.
 
 ## Due Date Formats
 

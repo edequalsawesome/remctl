@@ -1493,6 +1493,49 @@ def alarm_rows_to_json(rows):
         alarms.append(alarm)
     return alarms
 
+def _same_datetime_second(left, right):
+    if not left or not right:
+        return False
+    return int(left.timestamp()) == int(right.timestamp())
+
+def _parse_alarm_iso_datetime(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+def should_carry_absolute_alarm_to_new_due(db, reminder, new_due, explicit_alarm=False):
+    """Keep Reminders.app's visible time aligned when moving due-at-time items.
+
+    Reminders may store an absolute alarm/display date that is the UI-facing
+    time. EventKit does not move that alarm when only dueDateComponents change,
+    so a plain `edit -d` can leave the app showing the old time. Only carry a
+    single absolute alarm when it matches the old due/display time; otherwise
+    preserve the user's custom alarm setup.
+    """
+    if explicit_alarm or db is None or new_due is None:
+        return False
+    reminder_pk = _row_get(reminder, "Z_PK")
+    if not reminder_pk:
+        return False
+    try:
+        alarms = alarm_rows_to_json(q_alarms(db, reminder_pk))
+    except Exception:
+        return False
+    absolute_alarms = [alarm for alarm in alarms if alarm.get("type") == "absolute"]
+    if len(alarms) != 1 or len(absolute_alarms) != 1:
+        return False
+    alarm_dt = _parse_alarm_iso_datetime(absolute_alarms[0].get("date"))
+    old_due = ts(_row_get(reminder, "ZDUEDATE"))
+    if _same_datetime_second(alarm_dt, old_due):
+        return True
+    old_display = ts(_row_get(reminder, "ZDISPLAYDATEDATE"))
+    if _same_datetime_second(old_due, new_due) and _same_datetime_second(alarm_dt, old_display):
+        return True
+    return False
+
 def hydrate_reminder_detail(db, payload, reminder_id):
     attachments = attachment_rows_to_json(q_attachments(db, reminder_id))
     if attachments:
@@ -5324,6 +5367,12 @@ def cmd_edit(a):
         current = ts(r["ZDUEDATE"])
         if current and int(current.timestamp()) == int(dt.timestamp()):
             dt_nudge = dt + timedelta(hours=1)
+    carry_absolute_alarm = should_carry_absolute_alarm_to_new_due(
+        db,
+        r,
+        dt,
+        explicit_alarm=bool(getattr(a, "alarm", None)),
+    )
 
     # Bridge-first for speed (post-2026-04-17 bridge fix: reminder.timeZone
     # is set explicitly and .timeZone is no longer embedded in the
@@ -5364,6 +5413,8 @@ def cmd_edit(a):
             data["recurrence"] = parse_recurrence(a.recurrence); has_changes = True
         if hasattr(a, 'alarm') and a.alarm:
             data["alarm"] = parse_alarm(a.alarm); has_changes = True
+        elif carry_absolute_alarm:
+            data["alarm"] = dt.isoformat(); has_changes = True
         if has_changes:
             result = bridge_call(data)
             if result and result.get("status") == "updated":
