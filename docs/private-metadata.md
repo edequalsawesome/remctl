@@ -21,6 +21,7 @@ Verified on macOS/iCloud sync:
 - section assignment: `--private --section "Research"`
 - section assignment by stable ID: `--private --section-id DCD255E2-7CF5-4B45-9566-3F9A5D84AFA8`
 - section creation and assignment: `--private --new-section "Research"`
+- shared-list assignment: `--private --assign Alex`, `--private --assign alex@example.com`, or `--private --assign me`
 - subtasks: `--private --subtask "Follow up"` or rich JSON objects with child metadata
 - image attachments: `--private --image ~/Desktop/mockup.png`
 - real flag state: `edit ID --private --flagged` or `add ... --private -f`
@@ -57,6 +58,8 @@ remctl add "Prepare screenshots" -l Projects --private \
 remctl add "Launch assets" -l Projects --private \
   --subtask '{"title":"Export PNG","notes":"Use final crop","due":"tomorrow","url":"https://example.com","tags":["media"],"urgent":true}'
 
+remctl add "Pick up groceries" -l Shopping --private --assign Alex --json
+
 remctl add "Flagged private task" -l Work --private -f
 remctl add "Leave early" -l Work -d "today 14:00" --private --early-reminder 15m
 ```
@@ -71,6 +74,9 @@ remctl edit 23880 --private -t remctl,work
 remctl edit 23880 --private --section "Research"
 remctl edit 23880 --private --section-id DCD255E2-7CF5-4B45-9566-3F9A5D84AFA8
 remctl edit 23880 --private --new-section "Inbox Zero"
+remctl sharees Shopping --json
+remctl edit 23880 --private --assign Alex --json
+remctl edit 23880 --private --unassign --json
 remctl edit 23880 --private --subtask "Follow up"
 remctl edit 23880 --private --subtask '{"title":"Follow up","notes":"Bring latest numbers","due":"next friday at 3pm","url":"https://example.com","tags":["work"],"flagged":true}'
 remctl edit 23880 --private --image ~/Desktop/mockup.png
@@ -80,6 +86,21 @@ remctl edit 23880 --private --early-reminder clear
 remctl edit 23880 --private --no-flagged --no-urgent
 remctl edit 23880 --private --location-title "Apple Park" --latitude 37.3349 --longitude -122.0090 --radius 200 --proximity arriving
 ```
+
+## Assignment Syntax
+
+Shared-list assignment uses ReminderKit assignment rows, not SQLite writes. The list must already be shared, and assignment writes require `--private`.
+
+```bash
+remctl sharees Shopping
+remctl sharees Shopping --json
+remctl add "Pick up groceries" -l Shopping --private --assign Alex --json
+remctl edit 23880 --private --assign alex@example.com --json
+remctl edit 23880 --private --assign me --json
+remctl edit 23880 --private --unassign --json
+```
+
+`--assign USER` resolves `USER` against the target list's `REMCDSharee` rows. It accepts display name, first/last name, email or phone address, numeric sharee ID, object UUID, or `me`. You do not need an email address when a person's name is unique, but email/phone address or ID is better for automation because names can collide. Inspect the exact candidates with `remctl sharees LIST --json`; agents should prefer the returned `address`, `id`, or `objectUUID` when ambiguity matters. RemCTL uses the current-user share participant stored on the list as the originator and verifies readback through `info --json` under `assignment`.
 
 `--subtask` remains backwards compatible with a plain title string. To set metadata on the child reminder itself, pass a JSON object. Supported subtask fields are `title`, `notes`, `due`, `priority`, `alarm`, `recurrence`, `earlyReminder`, `url`/`urls`, `tags`, `image`/`images`, `flagged`, `urgent`, and location fields (`locationTitle`, `latitude`, `longitude`, `radius`, `proximity`). Rich subtask URLs follow the same public-host rule as parent private URLs. `address` is not supported for location alarms. Public fields such as notes, due dates, and location alarms are applied through `remctl-bridge`; private fields such as rich links, tags, and Early Reminders are applied through `remctl-private`.
 

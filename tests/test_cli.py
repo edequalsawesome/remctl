@@ -2575,6 +2575,92 @@ class CliTests(unittest.TestCase):
         self.assertIn("either --section or --section-id", stderr.getvalue())
         db.close()
 
+    def _sharee_db(self):
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        db.executescript("""
+            CREATE TABLE ZREMCDBASELIST (
+                Z_PK INTEGER PRIMARY KEY,
+                ZSHAREDOWNERIDENTIFIER BLOB,
+                ZMARKEDFORDELETION INTEGER DEFAULT 0,
+                Z_ENT INTEGER DEFAULT 3
+            );
+            CREATE TABLE ZREMCDOBJECT (
+                Z_PK INTEGER PRIMARY KEY,
+                Z_ENT INTEGER,
+                ZMARKEDFORDELETION INTEGER DEFAULT 0,
+                ZLIST INTEGER,
+                ZCKIDENTIFIER TEXT,
+                ZDISPLAYNAME TEXT,
+                ZFIRSTNAME TEXT,
+                ZLASTNAME TEXT,
+                ZADDRESS1 TEXT,
+                ZSTATUS INTEGER,
+                ZACCESSLEVEL INTEGER
+            );
+        """)
+        owner = uuid.UUID("EBA4B6AE-6FA9-4361-BA3D-F548DE185CDA")
+        db.execute(
+            "INSERT INTO ZREMCDBASELIST (Z_PK, ZSHAREDOWNERIDENTIFIER) VALUES (?, ?)",
+            (7, owner.bytes),
+        )
+        db.executemany(
+            "INSERT INTO ZREMCDOBJECT (Z_PK, Z_ENT, ZLIST, ZCKIDENTIFIER, ZFIRSTNAME, ZLASTNAME, ZADDRESS1, ZSTATUS, ZACCESSLEVEL) "
+            "VALUES (?, 36, 7, ?, ?, ?, ?, 2, 2)",
+            [
+                (10, "AAF651E6-F8D7-44FA-A71F-8AB3D69C5C5A", "Alex", "Example", "mailto:alex@example.com"),
+                (11, "EBA4B6AE-6FA9-4361-BA3D-F548DE185CDA", "Current", "User", "mailto:current@example.com"),
+            ],
+        )
+        return db
+
+    def test_resolve_sharee_matches_name_email_and_me(self):
+        db = self._sharee_db()
+        self.assertEqual(self.remctl.resolve_sharee_or_die(db, 7, "Alex")["ZCKIDENTIFIER"], "AAF651E6-F8D7-44FA-A71F-8AB3D69C5C5A")
+        self.assertEqual(self.remctl.resolve_sharee_or_die(db, 7, "alex@example.com")["ZCKIDENTIFIER"], "AAF651E6-F8D7-44FA-A71F-8AB3D69C5C5A")
+        self.assertEqual(self.remctl.resolve_sharee_or_die(db, 7, "me")["ZCKIDENTIFIER"], "EBA4B6AE-6FA9-4361-BA3D-F548DE185CDA")
+        db.close()
+
+    def test_apply_private_changes_assigns_sharee_with_originator(self):
+        db = self._sharee_db()
+        args = SimpleNamespace(
+            private=True,
+            private_metadata=False,
+            tags=None,
+            url=None,
+            section=None,
+            section_id=None,
+            new_section=None,
+            subtask=None,
+            image=None,
+            flagged=None,
+            flag=False,
+            urgent=None,
+            early_reminder=None,
+            latitude=None,
+            longitude=None,
+            grocery=False,
+            assign="Alex",
+            unassign=False,
+        )
+        with (
+            mock.patch.object(self.remctl, "private_available", return_value=True),
+            mock.patch.object(
+                self.remctl,
+                "private_action",
+                return_value={"status": "updated", "action": "assign_sharee"},
+            ) as private_action,
+        ):
+            result = self.remctl.apply_private_changes("REMINDER-1", args, db=db, list_pk=7)
+
+        self.assertEqual(result[0]["action"], "assign_sharee")
+        payload = private_action.call_args.args[0]
+        self.assertEqual(payload["action"], "assign_sharee")
+        self.assertEqual(payload["id"], "REMINDER-1")
+        self.assertEqual(payload["assigneeId"], "AAF651E6-F8D7-44FA-A71F-8AB3D69C5C5A")
+        self.assertEqual(payload["originatorId"], "EBA4B6AE-6FA9-4361-BA3D-F548DE185CDA")
+        db.close()
+
     def test_cmd_add_private_invalid_url_fails_before_creation(self):
         args = SimpleNamespace(
             title="Bad private URL",

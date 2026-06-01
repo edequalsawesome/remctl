@@ -800,6 +800,155 @@ def list_ref_payload(row, *, requested=None, method="exact"):
         payload["grocery"] = grocery
     return payload
 
+
+def sharee_to_dict(row, *, current_user_ckid=None):
+    payload = {
+        "id": _row_get(row, "Z_PK"),
+        "objectUUID": _row_get(row, "ZCKIDENTIFIER"),
+        "name": _sharee_display_name(row),
+    }
+    for source_key, output_key in (
+        ("ZDISPLAYNAME", "displayName"),
+        ("ZFIRSTNAME", "firstName"),
+        ("ZLASTNAME", "lastName"),
+        ("ZADDRESS1", "address"),
+    ):
+        value = _row_get(row, source_key)
+        if value:
+            payload[output_key] = value
+    if _row_get(row, "ZSTATUS") is not None:
+        payload["status"] = _row_get(row, "ZSTATUS")
+    if _row_get(row, "ZACCESSLEVEL") is not None:
+        payload["accessLevel"] = _row_get(row, "ZACCESSLEVEL")
+    if current_user_ckid and payload.get("objectUUID") == current_user_ckid:
+        payload["currentUser"] = True
+    return payload
+
+
+def _sharee_match_terms(row):
+    terms = [
+        _row_get(row, "ZCKIDENTIFIER"),
+        _row_get(row, "ZDISPLAYNAME"),
+        _row_get(row, "ZFIRSTNAME"),
+        _row_get(row, "ZLASTNAME"),
+        _sharee_display_name(row),
+        _row_get(row, "ZADDRESS1"),
+    ]
+    address = _row_get(row, "ZADDRESS1")
+    if address and ":" in address:
+        terms.append(address.split(":", 1)[1])
+    return [term for term in terms if term]
+
+
+def resolve_sharee_or_die(db, list_pk, value, *, allow_me=True):
+    sharees = q_sharees(db, list_pk)
+    if not sharees:
+        print("Error: target list has no sharees; assignment requires a shared list.", file=sys.stderr)
+        sys.exit(1)
+    current_user_ckid = q_list_shared_owner_ckid(db, list_pk)
+    raw = str(value or "").strip()
+    if not raw:
+        print("Error: --assign requires a name, email, phone number, or sharee ID.", file=sys.stderr)
+        sys.exit(1)
+    if allow_me and raw.casefold() in {"me", "myself"}:
+        if not current_user_ckid:
+            print("Error: could not identify the current-user sharee for this list.", file=sys.stderr)
+            sys.exit(1)
+        for sharee in sharees:
+            if _row_get(sharee, "ZCKIDENTIFIER") == current_user_ckid:
+                return sharee
+        print("Error: current-user sharee is not present in this list.", file=sys.stderr)
+        sys.exit(1)
+
+    needle = normalize_list_lookup_name(raw)
+    exact = []
+    contains = []
+    for sharee in sharees:
+        if str(_row_get(sharee, "Z_PK")) == raw:
+            exact.append(sharee)
+            continue
+        for term in _sharee_match_terms(sharee):
+            normalized = normalize_list_lookup_name(term)
+            if normalized == needle:
+                exact.append(sharee)
+                break
+            if needle and needle in normalized:
+                contains.append(sharee)
+                break
+    matches = exact or contains
+    unique = []
+    seen = set()
+    for sharee in matches:
+        pk = _row_get(sharee, "Z_PK")
+        if pk not in seen:
+            unique.append(sharee)
+            seen.add(pk)
+    if len(unique) == 1:
+        return unique[0]
+    if len(unique) > 1:
+        options = ", ".join(
+            f"{_sharee_display_name(item)} ({_row_get(item, 'ZADDRESS1') or _row_get(item, 'ZCKIDENTIFIER')})"
+            for item in unique
+        )
+        print(f"Error: multiple sharees match {raw!r}. Use one of: {options}", file=sys.stderr)
+        sys.exit(1)
+    options = ", ".join(_sharee_display_name(item) or _row_get(item, "ZCKIDENTIFIER") for item in sharees)
+    print(f"Error: no sharee matching {raw!r} in this list. Available: {options}", file=sys.stderr)
+    sys.exit(1)
+
+
+def resolve_assignment_originator_or_die(db, list_pk):
+    owner_ckid = q_list_shared_owner_ckid(db, list_pk)
+    if not owner_ckid:
+        print("Error: could not identify the current-user sharee for assignment originator.", file=sys.stderr)
+        sys.exit(1)
+    for sharee in q_sharees(db, list_pk):
+        if _row_get(sharee, "ZCKIDENTIFIER") == owner_ckid:
+            return sharee
+    print("Error: current-user sharee is not present in this list.", file=sys.stderr)
+    sys.exit(1)
+
+
+def assignment_to_dict(row):
+    if not row:
+        return None
+    assignee = {
+        "id": _row_get(row, "assignee_pk"),
+        "objectUUID": _row_get(row, "assignee_ckid") or _row_get(row, "ZCKASSIGNEEIDENTIFIER"),
+        "name": _sharee_display_name({
+            "ZDISPLAYNAME": _row_get(row, "assignee_display"),
+            "ZFIRSTNAME": _row_get(row, "assignee_first"),
+            "ZLASTNAME": _row_get(row, "assignee_last"),
+            "ZADDRESS1": _row_get(row, "assignee_address"),
+        }),
+    }
+    originator = {
+        "id": _row_get(row, "originator_pk"),
+        "objectUUID": _row_get(row, "originator_ckid") or _row_get(row, "ZCKORIGINATORIDENTIFIER"),
+        "name": _sharee_display_name({
+            "ZDISPLAYNAME": _row_get(row, "originator_display"),
+            "ZFIRSTNAME": _row_get(row, "originator_first"),
+            "ZLASTNAME": _row_get(row, "originator_last"),
+            "ZADDRESS1": _row_get(row, "originator_address"),
+        }),
+    }
+    if _row_get(row, "assignee_address"):
+        assignee["address"] = _row_get(row, "assignee_address")
+    if _row_get(row, "originator_address"):
+        originator["address"] = _row_get(row, "originator_address")
+    payload = {
+        "id": _row_get(row, "Z_PK"),
+        "objectUUID": _row_get(row, "ZCKIDENTIFIER"),
+        "status": _row_get(row, "ZSTATUS"),
+        "assignee": assignee,
+        "originator": originator,
+    }
+    assigned_date = _row_get(row, "ZASSIGNEDDATE")
+    if assigned_date:
+        payload["assignedDate"] = ts(assigned_date).isoformat()
+    return payload
+
+
 def resolve_list_ref(db, name=None, list_id=None):
     if list_id is not None:
         columns = list_select_columns(db)
@@ -962,6 +1111,18 @@ def q_list_ckid(db, list_pk):
         (list_pk,),
     ).fetchone()
     return row["ZCKIDENTIFIER"] if row and row["ZCKIDENTIFIER"] else None
+
+
+def q_list_shared_owner_ckid(db, list_pk):
+    try:
+        row = db.execute(
+            "SELECT ZSHAREDOWNERIDENTIFIER FROM ZREMCDBASELIST "
+            "WHERE Z_PK = ? AND ZMARKEDFORDELETION = 0 AND Z_ENT = 3",
+            (list_pk,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return uuid_from_blob(row["ZSHAREDOWNERIDENTIFIER"]) if row else None
 
 
 def q_smart_list_ckid(db, smart_list_pk):
@@ -1370,6 +1531,48 @@ def q_section_member_counts(db, list_pk):
         if group_id and member_id:
             counts[group_id] = counts.get(group_id, 0) + 1
     return counts
+
+
+def _sharee_display_name(row):
+    display = _row_get(row, "ZDISPLAYNAME")
+    if display:
+        return display
+    parts = [part for part in (_row_get(row, "ZFIRSTNAME"), _row_get(row, "ZLASTNAME")) if part]
+    if parts:
+        return " ".join(parts)
+    return _row_get(row, "ZADDRESS1") or ""
+
+
+def q_sharees(db, list_pk):
+    return db.execute(
+        "SELECT Z_PK, ZCKIDENTIFIER, ZDISPLAYNAME, ZFIRSTNAME, ZLASTNAME, ZADDRESS1, "
+        "ZSTATUS, ZACCESSLEVEL FROM ZREMCDOBJECT "
+        "WHERE Z_ENT = 36 AND ZMARKEDFORDELETION = 0 AND ZLIST = ? "
+        "ORDER BY Z_PK",
+        (list_pk,),
+    ).fetchall()
+
+
+def q_assignment(db, reminder_pk):
+    try:
+        return db.execute(
+            "SELECT a.Z_PK, a.ZCKIDENTIFIER, a.ZSTATUS, a.ZASSIGNEDDATE, "
+            "a.ZCKASSIGNEEIDENTIFIER, a.ZCKORIGINATORIDENTIFIER, "
+            "assignee.Z_PK AS assignee_pk, assignee.ZCKIDENTIFIER AS assignee_ckid, "
+            "assignee.ZDISPLAYNAME AS assignee_display, assignee.ZFIRSTNAME AS assignee_first, "
+            "assignee.ZLASTNAME AS assignee_last, assignee.ZADDRESS1 AS assignee_address, "
+            "originator.Z_PK AS originator_pk, originator.ZCKIDENTIFIER AS originator_ckid, "
+            "originator.ZDISPLAYNAME AS originator_display, originator.ZFIRSTNAME AS originator_first, "
+            "originator.ZLASTNAME AS originator_last, originator.ZADDRESS1 AS originator_address "
+            "FROM ZREMCDOBJECT a "
+            "LEFT JOIN ZREMCDOBJECT assignee ON a.ZASSIGNEE = assignee.Z_PK "
+            "LEFT JOIN ZREMCDOBJECT originator ON a.ZORIGINATOR = originator.Z_PK "
+            "WHERE a.Z_ENT = 21 AND a.ZMARKEDFORDELETION = 0 AND a.ZREMINDER1 = ? "
+            "ORDER BY a.ZASSIGNEDDATE DESC, a.Z_PK DESC LIMIT 1",
+            (reminder_pk,),
+        ).fetchone()
+    except (AttributeError, sqlite3.OperationalError):
+        return None
 
 def q_attachments(db, pk):
     return db.execute(
@@ -1790,6 +1993,12 @@ def _tags_from_item(item, db=None, _ht=None):
     return _item_get(item, "tags", []) or []
 
 
+def _assignment_from_item(item, db=None):
+    if _item_has(item, "Z_PK") and db is not None:
+        return assignment_to_dict(q_assignment(db, item["Z_PK"]))
+    return _item_get(item, "assignment")
+
+
 RECURRENCE_DAY_NAMES = {
     1: "Sun",
     2: "Mon",
@@ -1863,6 +2072,10 @@ def fmt(r, db=None, verbose=False, indent="", _sc=None, _ht=None):
     tag_str = " " + " ".join(f"#{safe_display(t)}" for t in tags) if tags else ""
     sub_str = f" [{sc} subtask{'s' if sc != 1 else ''}]" if sc > 0 else ""
     pri_str = f" {_color_priority(pri_val)}" if PRI.get(pri_val, "") else ""
+    assignment = _assignment_from_item(r, db)
+    assign_str = ""
+    if assignment and assignment.get("assignee", {}).get("name"):
+        assign_str = f" @{safe_display(assignment['assignee']['name'])}"
     id_str = reminder_id_from_item(r, db)
     title = safe_display((r["ZTITLE"] if _item_has(r, "ZTITLE") else _item_get(r, "title")) or "(untitled)")
     all_day = _item_is_all_day(r)
@@ -1875,7 +2088,8 @@ def fmt(r, db=None, verbose=False, indent="", _sc=None, _ht=None):
         recur_str = C.dim(recur_str)
         tag_str = C.dim(tag_str)
         sub_str = C.dim(sub_str)
-    parts = [f"{indent}{status} {id_str}{pri_str}{marker_str} {title}{due_str}{recur_str}{tag_str}{sub_str}"]
+        assign_str = C.dim(assign_str)
+    parts = [f"{indent}{status} {id_str}{pri_str}{marker_str} {title}{due_str}{recur_str}{assign_str}{tag_str}{sub_str}"]
     if verbose:
         list_name = _list_name_from_item(r)
         if list_name:
@@ -1895,6 +2109,8 @@ def fmt(r, db=None, verbose=False, indent="", _sc=None, _ht=None):
         if early_reminders:
             labels = ", ".join(item["label"] for item in early_reminders)
             parts.append(f"{indent}    Early: {C.cyan(labels)}")
+        if assignment and assignment.get("assignee", {}).get("name"):
+            parts.append(f"{indent}    Assigned: {C.cyan(safe_display(assignment['assignee']['name']))}")
         if _item_is_flagged(r):
             parts.append(f"{indent}    Flagged: {C.yellow('Yes')}")
         if _item_is_urgent(r):
@@ -1902,7 +2118,7 @@ def fmt(r, db=None, verbose=False, indent="", _sc=None, _ht=None):
     return "\n".join(parts)
 
 def to_dict(r, db=None, section=None, _sc=None, _ht=None):
-    return serialize_reminder(
+    payload = serialize_reminder(
         r,
         ts=ts,
         priority_names=PRI_NAME,
@@ -1914,9 +2130,14 @@ def to_dict(r, db=None, section=None, _sc=None, _ht=None):
         fallback_subtask_count=q_subtask_count,
         fallback_hashtags=lambda inner_db, pk: [t["ZNAME"] for t in q_hashtags(inner_db, pk)],
     )
+    if db is not None and _item_has(r, "Z_PK"):
+        assignment = assignment_to_dict(q_assignment(db, r["Z_PK"]))
+        if assignment:
+            payload["assignment"] = assignment
+    return payload
 
 def reminders_to_dicts(items, db=None, memberships=None):
-    return serialize_reminders(
+    payloads = serialize_reminders(
         items,
         ts=ts,
         priority_names=PRI_NAME,
@@ -1926,6 +2147,13 @@ def reminders_to_dicts(items, db=None, memberships=None):
         fallback_subtask_count=q_subtask_count,
         fallback_hashtags=lambda inner_db, pk: [t["ZNAME"] for t in q_hashtags(inner_db, pk)],
     )
+    if db is not None:
+        for item, payload in zip(items, payloads):
+            if _item_has(item, "Z_PK"):
+                assignment = assignment_to_dict(q_assignment(db, item["Z_PK"]))
+                if assignment:
+                    payload["assignment"] = assignment
+    return payloads
 
 # ── Table Format ─────────────────────────────────────────────────────────────
 
@@ -2495,6 +2723,10 @@ def is_web_url(value):
 
 
 def validate_private_args(a):
+    if getattr(a, "assign", None) and getattr(a, "unassign", False):
+        print("Error: pass either --assign or --unassign, not both.", file=sys.stderr)
+        sys.exit(1)
+
     url = getattr(a, "url", None)
     if url and not is_web_url(url):
         print("Error: --private --url requires an http or https URL.", file=sys.stderr)
@@ -2595,6 +2827,8 @@ def location_alarm_exists(reminder_ckid, *, title=None, latitude=None, longitude
 
 IDEMPOTENT_PRIVATE_ACTIONS = {
     "assign_section",
+    "assign_sharee",
+    "clear_assignment",
     "set_flagged",
     "set_urgent",
     "set_early_reminder",
@@ -2901,6 +3135,8 @@ def private_changes_from_args(a):
         getattr(a, "location_title", None),
         getattr(a, "latitude", None) is not None,
         getattr(a, "longitude", None) is not None,
+        getattr(a, "assign", None),
+        getattr(a, "unassign", False),
     ])
 
 
@@ -2918,13 +3154,15 @@ def private_only_changes_from_args(a):
         getattr(a, "location_title", None),
         getattr(a, "latitude", None) is not None,
         getattr(a, "longitude", None) is not None,
+        getattr(a, "assign", None),
+        getattr(a, "unassign", False),
     ])
 
 
 def refuse_private_args_without_opt_in(a):
     if private_only_changes_from_args(a) and not private_metadata_enabled(a):
         print(
-            "Error: grocery, section, subtask, image, urgent, early-reminder, flagged, and location writes require --private. "
+            "Error: grocery, section, assignment, subtask, image, urgent, early-reminder, flagged, and location writes require --private. "
             "Example: remctl add \"Milk\" -l Groceries --private --grocery",
             file=sys.stderr,
         )
@@ -3164,6 +3402,27 @@ def apply_private_changes(reminder_ckid, a, db=None, list_pk=None):
             "radius": getattr(a, "radius", None) or 100,
             "proximity": proximity,
             "address": getattr(a, "address", None),
+        }))
+
+    if getattr(a, "assign", None):
+        if db is None:
+            db = open_db()
+        if list_pk is None:
+            print("Error: --assign requires a target shared list via -l/--list or --list-id.", file=sys.stderr)
+            sys.exit(1)
+        assignee = resolve_sharee_or_die(db, list_pk, a.assign)
+        originator = resolve_assignment_originator_or_die(db, list_pk)
+        results.append(private_action({
+            "action": "assign_sharee",
+            "id": reminder_ckid,
+            "assigneeId": _row_get(assignee, "ZCKIDENTIFIER"),
+            "originatorId": _row_get(originator, "ZCKIDENTIFIER"),
+        }))
+
+    if getattr(a, "unassign", False):
+        results.append(private_action({
+            "action": "clear_assignment",
+            "id": reminder_ckid,
         }))
 
     if getattr(a, "grocery", False):
@@ -3954,24 +4213,26 @@ def parse_due(s):
     if m:
         day_name, time_text = m.groups()
         parsed_time = parse_clock_time(time_text)
-        if parsed_time:
-            hour, minute = parsed_time
-            base = today if day_name == "today" else today + timedelta(days=1)
-            return base.replace(hour=hour, minute=minute)
+        if not parsed_time:
+            return None
+        hour, minute = parsed_time
+        base = today if day_name == "today" else today + timedelta(days=1)
+        return base.replace(hour=hour, minute=minute)
 
     # "tonight at 11" means the next occurrence of that time, preferring today.
     m = re.match(r'^tonight(?:\s+at)?\s+(.+)$', sl)
     if m:
         time_text = m.group(1)
         parsed_time = parse_clock_time(time_text)
-        if parsed_time:
-            hour, minute = parsed_time
-            if not re.search(r'\b(?:am|pm)\b', time_text) and 1 <= hour <= 11:
-                hour += 12
-            dt = today.replace(hour=hour, minute=minute)
-            if dt <= now:
-                dt += timedelta(days=1)
-            return dt
+        if not parsed_time:
+            return None
+        hour, minute = parsed_time
+        if not re.search(r'\b(?:am|pm)\b', time_text) and 1 <= hour <= 11:
+            hour += 12
+        dt = today.replace(hour=hour, minute=minute)
+        if dt <= now:
+            dt += timedelta(days=1)
+        return dt
 
     # Relative: +3d, +1w, +2m, +2h
     m = re.match(r'^[+]?(\d+)([dwmh])$', sl)
@@ -5882,6 +6143,13 @@ def cmd_info(a):
     print(f"  Flagged:   {flagged_str}")
     urgent_str = C.red("Yes") if _item_is_urgent(r) else "No"
     print(f"  Urgent:    {urgent_str}")
+    assignment = assignment_to_dict(q_assignment(db, a.id))
+    if assignment:
+        assignee = assignment.get("assignee", {}).get("name") or assignment.get("assignee", {}).get("objectUUID")
+        originator = assignment.get("originator", {}).get("name") or assignment.get("originator", {}).get("objectUUID")
+        print(f"  Assigned:  {C.cyan(safe_display(assignee or 'Unknown'))}")
+        if originator:
+            print(f"  By:        {safe_display(originator)}")
     if r["ZDUEDATE"]:
         effective_due = ts(row_effective_due(r))
         if _item_is_all_day(r):
@@ -5951,6 +6219,35 @@ def cmd_sections(a):
             cur = ln
         print(f"  - {safe_display(r['ZDISPLAYNAME'])}")
     print(f"\n{len(rows)} section{'s' if len(rows) != 1 else ''}")
+
+
+def cmd_sharees(a):
+    db = open_db()
+    list_ref = resolve_required_list_target_or_die(
+        db,
+        name=getattr(a, "list", None),
+        list_id=getattr(a, "list_id", None),
+    )
+    current_user_ckid = q_list_shared_owner_ckid(db, list_ref["id"])
+    rows = q_sharees(db, list_ref["id"])
+    payload = {
+        "list": list_ref,
+        "currentUserSharee": current_user_ckid,
+        "sharees": [sharee_to_dict(row, current_user_ckid=current_user_ckid) for row in rows],
+    }
+    if a.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    print(C.bold(f"Sharees for {safe_display(list_ref['title'])}:"))
+    if not rows:
+        print("  No sharees")
+        return
+    for item in payload["sharees"]:
+        current = C.dim(" (me)") if item.get("currentUser") else ""
+        address = f" {C.dim(item['address'])}" if item.get("address") else ""
+        print(f"  - {safe_display(item['name'])}{current}{address} {C.dim('(id: ' + str(item['id']) + ')')}")
+    print(f"\n{len(rows)} sharee{'s' if len(rows) != 1 else ''}")
+
 
 def cmd_stats(a):
     db = open_db()
@@ -6515,6 +6812,7 @@ _remctl() {
         'subtasks:Show subtasks'
         'info:Full detail view'
         'sections:Show sections'
+        'sharees:Show people available for assignment in a shared list'
         'stats:Statistics'
         'link:Get deep links'
         'open:Open in Reminders.app'
@@ -6567,6 +6865,8 @@ _remctl() {
                 '--new-section[Create and assign to new section]:section:' \
                 '--subtask[Add private subtask title or JSON object]:subtask:' \
                 '--image[Add private image attachment]:path:_files' \
+                '--assign[Assign to shared-list user]:sharee:' \
+                '--unassign[Clear existing assignment]' \
                 '--grocery[Auto-categorize in a Groceries list]' \
                 '--urgent[Set private urgent state]' \
                 '--no-urgent[Clear private urgent state]' \
@@ -6591,6 +6891,8 @@ _remctl() {
                 '--new-section[Create and assign to new section]:section:' \
                 '--subtask[Add private subtask title or JSON object]:subtask:' \
                 '--image[Add private image attachment]:path:_files' \
+                '--assign[Assign to shared-list user]:sharee:' \
+                '--unassign[Clear existing assignment]' \
                 '--grocery[Auto-categorize in the reminder Groceries list]' \
                 '--flagged[Set real private flag]' \
                 '--no-flagged[Clear real private flag]' \
@@ -6626,6 +6928,12 @@ _remctl() {
                 '(-l --list)'{-l,--list}'[Get links for active reminders in list]:list:' \
                 '--list-id[Get links for active reminders in list by stable numeric ID]:id:' \
                 '--completed[Include completed reminders]' \
+                '--json[JSON output]'
+            return
+            ;;
+        sharees)
+            _arguments \
+                '--list-id[Shared list by stable numeric ID]:id:' \
                 '--json[JSON output]'
             return
             ;;
@@ -6794,14 +7102,14 @@ BASH_COMPLETION = '''_remctl() {
     local cur prev commands
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="lists smart-lists templates template-info show add done undone edit delete search today upcoming overdue flagged urgent flag unflag tags subtasks info sections stats link open export import list-symbols list-create smart-list-create smart-list-edit smart-list-delete template-create template-apply template-delete list-edit list-pin list-unpin list-rename list-delete onboard doctor setup permissions completion"
+    commands="lists smart-lists templates template-info show add done undone edit delete search today upcoming overdue flagged urgent flag unflag tags subtasks info sections sharees stats link open export import list-symbols list-create smart-list-create smart-list-edit smart-list-delete template-create template-apply template-delete list-edit list-pin list-unpin list-rename list-delete onboard doctor setup permissions completion"
 
     local cmd="${COMP_WORDS[1]}"
     if [ "$cmd" = "add" ]; then
-        COMPREPLY=( $(compgen -W "--private --grocery --section --section-id --new-section --subtask --image --urgent --no-urgent --early-reminder --url --tags -t --list -l --list-id --notes -n --due -d --priority -p --flag -f --recurrence --alarm --json" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--private --grocery --section --section-id --new-section --subtask --image --assign --unassign --urgent --no-urgent --early-reminder --url --tags -t --list -l --list-id --notes -n --due -d --priority -p --flag -f --recurrence --alarm --json" -- "$cur") )
         return
     elif [ "$cmd" = "edit" ]; then
-        COMPREPLY=( $(compgen -W "--private --grocery --section --section-id --new-section --subtask --image --flagged --no-flagged --urgent --no-urgent --early-reminder --location-title --latitude --longitude --radius --proximity --title --list -l --list-id --url --tags -t --notes -n --due -d --priority -p --recurrence --alarm --json" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--private --grocery --section --section-id --new-section --subtask --image --assign --unassign --flagged --no-flagged --urgent --no-urgent --early-reminder --location-title --latitude --longitude --radius --proximity --title --list -l --list-id --url --tags -t --notes -n --due -d --priority -p --recurrence --alarm --json" -- "$cur") )
         return
     elif [ "$cmd" = "doctor" ]; then
         COMPREPLY=( $(compgen -W "--for-agent --json" -- "$cur") )
@@ -6832,6 +7140,9 @@ BASH_COMPLETION = '''_remctl() {
         return
     elif [ "$cmd" = "templates" ]; then
         COMPREPLY=( $(compgen -W "--json" -- "$cur") )
+        return
+    elif [ "$cmd" = "sharees" ]; then
+        COMPREPLY=( $(compgen -W "--list-id --json" -- "$cur") )
         return
     elif [ "$cmd" = "template-info" ]; then
         COMPREPLY=( $(compgen -W "--template-id --json" -- "$cur") )
@@ -6887,6 +7198,7 @@ complete -c remctl -n "__fish_use_subcommand" -a tags -d "List all tags"
 complete -c remctl -n "__fish_use_subcommand" -a subtasks -d "Show subtasks"
 complete -c remctl -n "__fish_use_subcommand" -a info -d "Full detail view"
 complete -c remctl -n "__fish_use_subcommand" -a sections -d "Show sections"
+complete -c remctl -n "__fish_use_subcommand" -a sharees -d "Show people available for assignment in a shared list"
 complete -c remctl -n "__fish_use_subcommand" -a stats -d "Statistics"
 complete -c remctl -n "__fish_use_subcommand" -a link -d "Get deep links"
 complete -c remctl -n "__fish_use_subcommand" -a open -d "Open in Reminders.app"
@@ -6965,6 +7277,8 @@ complete -c remctl -n "__fish_seen_subcommand_from smart-list-delete" -l smart-l
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-delete" -l force -d "Skip confirmation prompt"
 complete -c remctl -n "__fish_seen_subcommand_from smart-list-delete" -l json -d "JSON output"
 complete -c remctl -n "__fish_seen_subcommand_from templates" -l json -d "JSON output"
+complete -c remctl -n "__fish_seen_subcommand_from sharees" -l list-id -d "Shared list by stable numeric ID" -r
+complete -c remctl -n "__fish_seen_subcommand_from sharees" -l json -d "JSON output"
 complete -c remctl -n "__fish_seen_subcommand_from template-info" -l template-id -d "Read by numeric template ID" -r
 complete -c remctl -n "__fish_seen_subcommand_from template-info" -l json -d "JSON output"
 complete -c remctl -n "__fish_seen_subcommand_from template-create" -l from-list -d "Source list name" -r
@@ -7002,6 +7316,8 @@ complete -c remctl -n "__fish_seen_subcommand_from add" -l section-id -d "Assign
 complete -c remctl -n "__fish_seen_subcommand_from add" -l new-section -d "Create and assign to new section" -r
 complete -c remctl -n "__fish_seen_subcommand_from add" -l subtask -d "Add private subtask title or JSON object" -r
 complete -c remctl -n "__fish_seen_subcommand_from add" -l image -d "Add private image attachment" -r
+complete -c remctl -n "__fish_seen_subcommand_from add" -l assign -d "Assign to shared-list user" -r
+complete -c remctl -n "__fish_seen_subcommand_from add" -l unassign -d "Clear existing assignment"
 complete -c remctl -n "__fish_seen_subcommand_from add" -l grocery -d "Auto-categorize in a Groceries list"
 complete -c remctl -n "__fish_seen_subcommand_from add" -l urgent -d "Set private urgent state"
 complete -c remctl -n "__fish_seen_subcommand_from add" -l no-urgent -d "Clear private urgent state"
@@ -7015,6 +7331,8 @@ complete -c remctl -n "__fish_seen_subcommand_from edit" -l section-id -d "Assig
 complete -c remctl -n "__fish_seen_subcommand_from edit" -l new-section -d "Create and assign to new section" -r
 complete -c remctl -n "__fish_seen_subcommand_from edit" -l subtask -d "Add private subtask title or JSON object" -r
 complete -c remctl -n "__fish_seen_subcommand_from edit" -l image -d "Add private image attachment" -r
+complete -c remctl -n "__fish_seen_subcommand_from edit" -l assign -d "Assign to shared-list user" -r
+complete -c remctl -n "__fish_seen_subcommand_from edit" -l unassign -d "Clear existing assignment"
 complete -c remctl -n "__fish_seen_subcommand_from edit" -l grocery -d "Auto-categorize in the reminder Groceries list"
 complete -c remctl -n "__fish_seen_subcommand_from edit" -l flagged -d "Set real private flag"
 complete -c remctl -n "__fish_seen_subcommand_from edit" -l no-flagged -d "Clear real private flag"
@@ -7777,6 +8095,9 @@ def main():
             "  remctl add \"Ship notes\" -l Work -d \"Friday at 15:00\"\n"
             "  remctl add \"Research\" -l Projects --private --url https://example.com -t remctl --section Research\n"
             "  remctl add \"Research\" -l Projects --private --section-id DCD255E2-7CF5-4B45-9566-3F9A5D84AFA8\n"
+            "  remctl sharees Shopping --json\n"
+            "  remctl add \"Pick up groceries\" -l Shopping --private --assign Alex\n"
+            "  remctl add \"Pick up groceries\" -l Shopping --private --assign alex@example.com\n"
             "  remctl add \"Prepare screenshots\" -l Projects --private --image ~/Desktop/mockup.png --subtask \"Export PNG\"\n"
             "  remctl add \"Leave now\" -l Work --private --urgent\n"
             "  remctl add \"Leave early\" -l Work -d \"today 14:00\" --private --early-reminder 15m\n"
@@ -7784,6 +8105,8 @@ def main():
             "\n"
             "Without --private, --url is appended to notes and -t/--tags appends inline #hashtags to the title.\n"
             "With --private, --url creates a synced web rich link and -t/--tags creates synced Reminders tags.\n"
+            "--assign USER requires a shared list and accepts a unique name, email/phone, numeric sharee ID, object UUID, or me.\n"
+            "Use remctl sharees LIST --json before assignment when scripting or when names may collide.\n"
             "Date-only due inputs such as today, tomorrow, YYYY-MM-DD, +3d, and next friday create all-day reminders.\n"
             "Due inputs with explicit times create timed reminders.\n"
             "If -d/--due is present and cannot be parsed, add fails before creating the reminder.\n"
@@ -7800,7 +8123,7 @@ def main():
     c.add_argument("--url", help="URL; appended to notes normally, synced web rich link attachment with --private")
     c.add_argument("--recurrence", help="Recurrence: daily, weekly, 'weekly mon,wed,fri', 'monthly 1,15', yearly (bridge only)")
     c.add_argument("--alarm", help="Alarm: 15m, 1h, 1d, or ISO datetime (bridge only)")
-    c.add_argument("--private", action="store_true", help="Use unsupported private ReminderKit writes for URL/tags/sections/subtasks/images")
+    c.add_argument("--private", action="store_true", help="Use unsupported private ReminderKit writes for URL/tags/sections/assignments/subtasks/images")
     c.add_argument("--private-metadata", action="store_true", help=argparse.SUPPRESS)
     c.add_argument("--grocery", action="store_true", help="Private metadata: categorize this reminder in a Groceries list")
     c.add_argument("--section", help="Private metadata: assign to an existing section in the target list")
@@ -7808,6 +8131,8 @@ def main():
     c.add_argument("--new-section", help="Private metadata: create a section in the target list and assign this reminder")
     c.add_argument("--subtask", action="append", help="Private metadata: add a subtask title or JSON object (repeatable)")
     c.add_argument("--image", action="append", help="Private metadata: add an image attachment path (repeatable)")
+    c.add_argument("--assign", metavar="USER", help="Private metadata: assign in a shared list to a sharee by unique name, email/phone, numeric sharee ID, object UUID, or me")
+    c.add_argument("--unassign", action="store_true", help="Private metadata: clear any existing assignment")
     c.add_argument("--urgent", action=argparse.BooleanOptionalAction, default=None, help="Private metadata: set urgent state")
     c.add_argument("--early-reminder", help="Private metadata: Early Reminder before due date, e.g. 15m, 1h, 2d, 1w, 1mo, or clear")
     js(c)
@@ -7830,13 +8155,19 @@ def main():
             "  remctl edit 23880 --private --url https://example.com -t remctl\n"
             "  remctl edit 23880 --private --section Research --subtask \"Follow up\"\n"
             "  remctl edit 23880 --private --section-id DCD255E2-7CF5-4B45-9566-3F9A5D84AFA8\n"
+            "  remctl sharees Shopping --json\n"
+            "  remctl edit 23880 --private --assign Alex\n"
+            "  remctl edit 23880 --private --assign alex@example.com\n"
+            "  remctl edit 23880 --private --assign me\n"
+            "  remctl edit 23880 --private --unassign\n"
             "  remctl edit 23880 --private --subtask '{\"title\":\"Follow up\",\"notes\":\"Bring latest numbers\",\"due\":\"next friday at 3pm\",\"url\":\"https://example.com\",\"tags\":[\"work\"]}'\n"
             "  remctl edit 23880 --private --flagged --urgent\n"
             "  remctl edit 23880 --private --early-reminder 15m\n"
             "  remctl edit 23880 --private --location-title \"Apple Park\" --latitude 37.3349 --longitude -122.0090 --radius 200\n"
             "\n"
-            "Without --private, --url is appended to notes. Synced tags, web rich links, sections, subtasks, images, "
+            "Without --private, --url is appended to notes. Synced tags, web rich links, sections, shared-list assignments, subtasks, images, "
             "real flag state, urgent state, and location alarms require --private. "
+            "--assign USER accepts a unique name, email/phone, numeric sharee ID, object UUID, or me; use remctl sharees LIST --json before scripting. "
             "Location alarms are saved through the EventKit bridge as structured-location alarms."
         ),
         formatter_class=HelpFormatter,
@@ -7849,7 +8180,7 @@ def main():
     c.add_argument("--url", help="URL; appended to notes normally, synced web rich link attachment with --private")
     c.add_argument("--recurrence", help="Recurrence (bridge only)")
     c.add_argument("--alarm", help="Alarm: 15m, 1h, 1d, ISO datetime, or clear (bridge only)")
-    c.add_argument("--private", action="store_true", help="Use guarded Reminders metadata writes for URL/tags/sections/subtasks/images/location alarms")
+    c.add_argument("--private", action="store_true", help="Use guarded Reminders metadata writes for URL/tags/sections/assignments/subtasks/images/location alarms")
     c.add_argument("--private-metadata", action="store_true", help=argparse.SUPPRESS)
     c.add_argument("-t", "--tags", help="Private metadata: add comma-separated synced hashtag labels")
     c.add_argument("--grocery", action="store_true", help="Private metadata: categorize this reminder in its Groceries list")
@@ -7858,6 +8189,8 @@ def main():
     c.add_argument("--new-section", help="Private metadata: create a section in the reminder's list and assign this reminder")
     c.add_argument("--subtask", action="append", help="Private metadata: add a subtask title or JSON object (repeatable)")
     c.add_argument("--image", action="append", help="Private metadata: add an image attachment path (repeatable)")
+    c.add_argument("--assign", metavar="USER", help="Private metadata: assign in a shared list to a sharee by unique name, email/phone, numeric sharee ID, object UUID, or me")
+    c.add_argument("--unassign", action="store_true", help="Private metadata: clear any existing assignment")
     c.add_argument("--flagged", action=argparse.BooleanOptionalAction, default=None, help="Private metadata: set the real flagged state")
     c.add_argument("--urgent", action=argparse.BooleanOptionalAction, default=None, help="Private metadata: set urgent state")
     c.add_argument("--early-reminder", help="Private metadata: Early Reminder before due date, e.g. 15m, 1h, 2d, 1w, 1mo, or clear")
@@ -7891,6 +8224,25 @@ def main():
     c = sub.add_parser("info", help="Full detail view"); c.add_argument("id", type=int); js(c)
 
     c = sub.add_parser("sections", help="Show sections across lists"); js(c)
+
+    c = sub.add_parser(
+        "sharees",
+        help="Show people available for assignment in a shared list",
+        description="Show the sharees RemCTL can target with --assign for a shared list.",
+        epilog=(
+            "Examples:\n"
+            "  remctl sharees Shopping\n"
+            "  remctl sharees Shopping --json\n"
+            "  remctl sharees --list-id 153 --json\n"
+            "\n"
+            "Use the returned name, address, numeric id, objectUUID, or me with --assign. "
+            "Names are convenient when unique; agents should prefer address, id, or objectUUID."
+        ),
+        formatter_class=HelpFormatter,
+    )
+    c.add_argument("list", nargs="?", help="Shared list name")
+    c.add_argument("--list-id", type=int, help="Shared list numeric ID")
+    js(c)
 
     c = sub.add_parser("stats", help="Statistics"); js(c)
 
@@ -8265,6 +8617,7 @@ def main():
         "subtasks": cmd_subtasks,
         "info": cmd_info,
         "sections": cmd_sections,
+        "sharees": cmd_sharees,
         "stats": cmd_stats,
         "link": cmd_link,
         "open": cmd_open,

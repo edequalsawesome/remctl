@@ -89,6 +89,7 @@
 @end
 
 @interface REMReminderChangeItem : NSObject
+- (id)assignmentContext;
 - (id)attachmentContext;
 - (id)dueDateDeltaAlertContext;
 - (id)flaggedContext;
@@ -96,6 +97,11 @@
 - (id)subtaskContext;
 - (id)urgentAlarmContext;
 - (void)addAlarm:(id)alarm;
+@end
+
+@interface REMReminderAssignmentContextChangeItem : NSObject
+- (id)addAssignmentWithAssigneeID:(id)assigneeID originatorID:(id)originatorID status:(NSInteger)status;
+- (void)removeAllAssignments;
 @end
 
 @interface REMReminderDueDateDeltaAlertContextChangeItem : NSObject
@@ -341,6 +347,10 @@ static NSURL *reminderURL(NSString *ckIdentifier) {
 
 static NSURL *sectionURL(NSString *ckIdentifier) {
     return [NSURL URLWithString:[NSString stringWithFormat:@"x-apple-reminderkit://REMCDListSection/%@", ckIdentifier]];
+}
+
+static NSURL *shareeURL(NSString *ckIdentifier) {
+    return [NSURL URLWithString:[NSString stringWithFormat:@"x-apple-reminderkit://REMCDSharee/%@", ckIdentifier]];
 }
 
 static NSURL *listURL(NSString *ckIdentifier) {
@@ -659,6 +669,8 @@ int main(int argc, const char * argv[]) {
             @"add_subtasks",
             @"assign_section",
             @"add_section_and_assign",
+            @"assign_sharee",
+            @"clear_assignment",
             @"add_attachments",
             @"set_flagged",
             @"set_urgent",
@@ -1309,6 +1321,31 @@ int main(int argc, const char * argv[]) {
             [sectionContext setUnsavedSectionIDsOrdering:@[sectionObjectID]];
             [sectionContext setShouldUpdateSectionsOrdering:YES];
             details[@"sectionURL"] = [[sectionObjectID urlRepresentation] absoluteString] ?: @"";
+        } else if ([action isEqualToString:@"assign_sharee"]) {
+            NSString *assigneeID = cmd[@"assigneeId"];
+            NSString *originatorID = cmd[@"originatorId"];
+            if (![assigneeID isKindOfClass:[NSString class]] || assigneeID.length == 0) fail(@"assigneeId is required");
+            if (![originatorID isKindOfClass:[NSString class]] || originatorID.length == 0) fail(@"originatorId is required");
+            id assignmentContext = [change assignmentContext];
+            if (!assignmentContext || ![assignmentContext respondsToSelector:@selector(addAssignmentWithAssigneeID:originatorID:status:)]) {
+                fail(@"ReminderKit reminder change item does not support assignment");
+            }
+            id assigneeObjectID = [REMObjectID objectIDWithURL:shareeURL(assigneeID)];
+            id originatorObjectID = [REMObjectID objectIDWithURL:shareeURL(originatorID)];
+            if (!assigneeObjectID) fail(@"Could not build ReminderKit assignee object ID");
+            if (!originatorObjectID) fail(@"Could not build ReminderKit originator object ID");
+            [assignmentContext removeAllAssignments];
+            id assignment = [(REMReminderAssignmentContextChangeItem *)assignmentContext addAssignmentWithAssigneeID:assigneeObjectID originatorID:originatorObjectID status:1];
+            if (!assignment) fail(@"Could not create ReminderKit assignment");
+            details[@"assigneeId"] = assigneeID;
+            details[@"originatorId"] = originatorID;
+        } else if ([action isEqualToString:@"clear_assignment"]) {
+            id assignmentContext = [change assignmentContext];
+            if (!assignmentContext || ![assignmentContext respondsToSelector:@selector(removeAllAssignments)]) {
+                fail(@"ReminderKit reminder change item does not support assignment");
+            }
+            [assignmentContext removeAllAssignments];
+            details[@"assignmentCleared"] = @YES;
         } else if ([action isEqualToString:@"add_attachments"]) {
             NSArray<NSString *> *files = stringArray(cmd[@"files"], @"files");
             NSArray<NSString *> *images = stringArray(cmd[@"images"], @"images");
