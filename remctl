@@ -3919,6 +3919,13 @@ def fail_invalid_due_date(value, *, json_mode=False, field="due"):
             print(f"  {example}", file=sys.stderr)
     sys.exit(2)
 
+WEEKDAY_MAP = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+    "friday": 4, "saturday": 5, "sunday": 6,
+    "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6
+}
+
+
 def parse_due(s):
     """Parse due date. Accepts:
       - ISO: 2026-04-15, 2026-04-15 14:00, 2026-04-15T14:00
@@ -3931,11 +3938,7 @@ def parse_due(s):
     sl = s.lower().strip()
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     now = datetime.now()
-    days_map = {
-        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
-        "friday": 4, "saturday": 5, "sunday": 6,
-        "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6
-    }
+    days_map = WEEKDAY_MAP
 
     # Exact shortcuts
     if sl == "today": return today
@@ -4021,6 +4024,34 @@ def parse_due(s):
         if status > 0: return result
 
     return None
+
+
+def due_spec_is_all_day(s):
+    """Return True when the due-date text names a day without a clock time."""
+    if not s:
+        return False
+    sl = s.lower().strip()
+    if sl in {"today", "tomorrow", "eow"}:
+        return True
+    if sl == "eod":
+        return False
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", s.strip()):
+        return True
+
+    m = re.match(r"^[+]?(\d+)([dwmh])$", sl)
+    if m:
+        return m.group(2) in {"d", "w", "m"}
+
+    m = re.match(r"^in\s+(\d+)\s+(day|days|week|weeks|hour|hours|month|months)$", sl)
+    if m:
+        return m.group(2) not in {"hour", "hours"}
+
+    m = re.match(r"^(?:(next|this)\s+)?(\w+)(?:\s+(?:at\s+)?(.+))?$", sl)
+    if m:
+        _, day_name, time_text = m.groups()
+        return day_name in WEEKDAY_MAP and not time_text
+
+    return False
 
 # ── Recurrence / Alarm Parsing ───────────────────────────────────────────────
 
@@ -5173,6 +5204,7 @@ def cmd_add(a):
     dt = parse_due(a.due)
     if a.due and not dt:
         fail_invalid_due_date(a.due, json_mode=getattr(a, "json", False))
+    due_all_day = bool(dt and due_spec_is_all_day(a.due))
     parsed_recurrence = None
     if hasattr(a, 'recurrence') and a.recurrence:
         parsed_recurrence = recurrence_or_die(a.recurrence)
@@ -5232,7 +5264,10 @@ def cmd_add(a):
         data = {"action": "create", "title": title}
         if target_list_name: data["list"] = target_list_name
         if a.notes: data["notes"] = a.notes
-        if dt: data["due"] = dt.isoformat()
+        if dt:
+            data["due"] = dt.isoformat()
+            if due_all_day:
+                data["allDay"] = True
         if priority_value is not None:
             data["priority"] = priority_value
         if a.flag and not wants_private: data["flagged"] = True
@@ -5283,6 +5318,14 @@ def cmd_add(a):
                 if private_results:
                     print(f"Private metadata: applied {len(private_results)} update{'s' if len(private_results) != 1 else ''}")
             return
+
+    if dt and due_all_day:
+        message = "All-day due dates require remctl-bridge so Reminders can store date-only components."
+        if getattr(a, "json", False):
+            print(json.dumps({"status": "error", "code": "bridge_required_for_all_day", "message": message}), file=sys.stderr)
+        else:
+            print(f"Error: {message}", file=sys.stderr)
+        sys.exit(1)
 
     # Fall back to AppleScript. Warn about fields AppleScript can't express,
     # so users don't silently lose url/recurrence/alarm when the bridge is
@@ -7730,6 +7773,7 @@ def main():
         epilog=(
             "Examples:\n"
             "  remctl add \"Review PR\" -l Work -d tomorrow\n"
+            "  remctl add \"Pay rent\" -d 2026-06-01\n"
             "  remctl add \"Ship notes\" -l Work -d \"Friday at 15:00\"\n"
             "  remctl add \"Research\" -l Projects --private --url https://example.com -t remctl --section Research\n"
             "  remctl add \"Research\" -l Projects --private --section-id DCD255E2-7CF5-4B45-9566-3F9A5D84AFA8\n"
@@ -7740,6 +7784,8 @@ def main():
             "\n"
             "Without --private, --url is appended to notes and -t/--tags appends inline #hashtags to the title.\n"
             "With --private, --url creates a synced web rich link and -t/--tags creates synced Reminders tags.\n"
+            "Date-only due inputs such as today, tomorrow, YYYY-MM-DD, +3d, and next friday create all-day reminders.\n"
+            "Due inputs with explicit times create timed reminders.\n"
             "If -d/--due is present and cannot be parsed, add fails before creating the reminder.\n"
             "Private metadata is unsupported by Apple and never writes SQLite directly."
         ),
@@ -7747,7 +7793,7 @@ def main():
     )
     c.add_argument("title"); c.add_argument("-l", "--list")
     c.add_argument("--list-id", type=int, help="Create in a list by stable numeric ID")
-    c.add_argument("-n", "--notes"); c.add_argument("-d", "--due", help="YYYY-MM-DD, today, tomorrow, tonight at 11, Friday at 15:00, +3d, eod, eow")
+    c.add_argument("-n", "--notes"); c.add_argument("-d", "--due", help="Due date; date-only forms create all-day reminders, explicit times create timed reminders")
     c.add_argument("-p", "--priority", help="high, medium, low")
     c.add_argument("-f", "--flag", action="store_true")
     c.add_argument("-t", "--tags", help="Comma-separated tags; inline #hashtags normally, synced Reminders tags with --private")

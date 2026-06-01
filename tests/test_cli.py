@@ -62,6 +62,68 @@ class CliTests(unittest.TestCase):
     def test_parse_due_rejects_invalid_clock_time(self):
         self.assertIsNone(self.remctl.parse_due("today at 25:00"))
 
+    def test_due_spec_is_all_day_for_date_only_inputs(self):
+        self.assertTrue(self.remctl.due_spec_is_all_day("today"))
+        self.assertTrue(self.remctl.due_spec_is_all_day("tomorrow"))
+        self.assertTrue(self.remctl.due_spec_is_all_day("2026-06-01"))
+        self.assertTrue(self.remctl.due_spec_is_all_day("+3d"))
+        self.assertTrue(self.remctl.due_spec_is_all_day("in 2 weeks"))
+        self.assertTrue(self.remctl.due_spec_is_all_day("next friday"))
+        self.assertFalse(self.remctl.due_spec_is_all_day("today at 3pm"))
+        self.assertFalse(self.remctl.due_spec_is_all_day("2026-06-01 09:30"))
+        self.assertFalse(self.remctl.due_spec_is_all_day("+2h"))
+        self.assertFalse(self.remctl.due_spec_is_all_day("eod"))
+
+    def test_add_passes_all_day_to_bridge_for_date_only_due(self):
+        args = SimpleNamespace(
+            title="Test",
+            list=None,
+            list_id=None,
+            notes=None,
+            due="today",
+            priority=None,
+            flag=False,
+            tags=None,
+            url=None,
+            recurrence=None,
+            alarm=None,
+            private=False,
+            private_metadata=False,
+            grocery=False,
+            section=None,
+            section_id=None,
+            new_section=None,
+            subtask=None,
+            image=None,
+            urgent=None,
+            early_reminder=None,
+            location_title=None,
+            latitude=None,
+            longitude=None,
+            json=True,
+        )
+        with (
+            mock.patch.object(self.remctl, "bridge_available", return_value=True),
+            mock.patch.object(
+                self.remctl,
+                "bridge_call",
+                return_value={"status": "created", "id": "REMINDER-1"},
+            ) as bridge_call,
+            mock.patch.object(
+                self.remctl,
+                "open_db",
+                side_effect=self.remctl.RemindersDBUnavailable("no db"),
+            ),
+            mock.patch.object(sys, "stdout", new_callable=io.StringIO),
+        ):
+            self.remctl.cmd_add(args)
+
+        bridge_call.assert_called_once()
+        payload = bridge_call.call_args.args[0]
+        self.assertEqual(payload["action"], "create")
+        self.assertEqual(payload["due"], self.remctl.parse_due("today").isoformat())
+        self.assertTrue(payload["allDay"])
+
     def test_parse_recurrence_rejects_invalid_specs(self):
         self.assertEqual(
             self.remctl.parse_recurrence("weekly mon,wed"),

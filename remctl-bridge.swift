@@ -17,6 +17,7 @@ struct Command: Decodable {
     let flagged: Bool?
     let recurrence: RecurrenceSpec?
     let alarm: String?
+    let allDay: Bool?
     let clearAlarms: Bool?
     let locationTitle: String?
     let latitude: Double?
@@ -224,8 +225,13 @@ func applyFields(_ reminder: EKReminder, _ cmd: Command, store: EKEventStore) {
         guard let dueStr = cmd.due, !dueStr.isEmpty, let date = parseISO(dueStr) else {
             fail("Invalid due date")
         }
-        reminder.dueDateComponents = Calendar.current.dateComponents(
-            [.year, .month, .day, .hour, .minute, .second], from: date)
+        if cmd.allDay == true {
+            reminder.dueDateComponents = Calendar.current.dateComponents(
+                [.year, .month, .day], from: date)
+        } else {
+            reminder.dueDateComponents = Calendar.current.dateComponents(
+                [.year, .month, .day, .hour, .minute, .second], from: date)
+        }
         reminder.timeZone = TimeZone.current
     }
     // If due was explicitly null in JSON, the Decodable will still decode it;

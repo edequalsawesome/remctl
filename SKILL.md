@@ -37,6 +37,7 @@ High-value guardrails:
 - Private rich URLs require public `http` or `https` hosts; loopback, `.local`, private, link-local, multicast, reserved, and unresolved hosts fail before writing. Non-private `--url` is only a notes fallback.
 - Human output strips terminal control characters from Reminders text; use JSON when exact raw values matter.
 - Invalid due dates, recurrence, normal alarms, priorities, and location payloads fail before writing. `upcoming DAYS` accepts 1 through 3650 days.
+- Date-only `add -d` inputs such as `today`, `tomorrow`, `2026-06-01`, `+3d`, and `next friday` create all-day reminders; explicit times create timed reminders.
 - Do not verify smart-list pinning with `lists --json`; use `smart-lists --json`.
 - Do not promise template link creation or editing individual saved reminders inside a template.
 - Do not create multi-list aggregate smart lists with list filters; Reminders.app materializes only one included list through this write path.
@@ -217,7 +218,7 @@ remctl template-delete "Packing Template" --private --force --json
 - Prefer deterministic due-date strings. If the user says "today at 3pm", either pass `today at 3pm` or normalize it to `YYYY-MM-DD HH:MM` in the user's timezone before calling `remctl`; do not invent broader natural-language phrases.
 - `add` and `edit` are atomic for due dates: if `-d/--due` is present and cannot be parsed, RemCTL exits before writing. With `--json`, parse failures are structured `invalid_due_date` errors on stderr with accepted examples. Retry with a corrected date instead of creating first and patching later.
 - Accepted dependency-free due-date forms include `YYYY-MM-DD`, `YYYY-MM-DD HH:MM`, `today at 3pm`, `tomorrow 09:30`, `tonight at 11`, `Friday at 15:00`, `next friday at 3pm`, `+3d`, `eod`, and `eow`.
-- `dueDate` in JSON is the actual Reminders due date from `ZDUEDATE`. If Reminders stores a separate UI/alert display date, RemCTL reports it separately as `displayDate`.
+- `dueDate` in JSON is the actual Reminders due date from `ZDUEDATE`. If Reminders stores a separate UI/alert display date, including all-day display dates, RemCTL reports it separately as `displayDate`.
 - For ordinary rescheduling, use `remctl edit ID -d "YYYY-MM-DD HH:MM" --json` first. When a reminder has a single absolute alarm/display time equal to the old due time, RemCTL carries that alarm forward so Reminders.app does not keep showing the old time. `edit ID -d clear --json` also removes a single matching absolute alarm/display time so the item does not stay visible under the old time.
 - When debugging due-date or alarm mismatches, compare `dueDate`, `displayDate`, and `alarms` before assuming the CLI or UI is wrong.
 

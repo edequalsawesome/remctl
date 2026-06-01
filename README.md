@@ -100,7 +100,7 @@ remctl info 23880 --json
 
 The full command guide is in [docs/commands.md](docs/commands.md). For smart lists specifically, start with [Smart Lists in the command guide](docs/commands.md#smart-lists), then read [Private Metadata Writes: Smart List Examples](docs/private-metadata.md#smart-list-examples) for the ReminderKit write path, guardrails, and implementation notes. Template commands are covered in [docs/commands.md#templates](docs/commands.md#templates) and [docs/private-metadata.md#template-examples](docs/private-metadata.md#template-examples).
 
-Due dates are atomic. If `-d/--due` is present and RemCTL cannot parse it, the command fails before creating or editing anything. Supported deterministic forms include `YYYY-MM-DD`, `YYYY-MM-DD HH:MM`, `today at 3pm`, `tomorrow 09:30`, `tonight at 11`, `Friday at 15:00`, `next friday at 3pm`, `+3d`, `eod`, and `eow`.
+Due dates are atomic. If `-d/--due` is present and RemCTL cannot parse it, the command fails before creating or editing anything. Supported deterministic forms include `YYYY-MM-DD`, `YYYY-MM-DD HH:MM`, `today at 3pm`, `tomorrow 09:30`, `tonight at 11`, `Friday at 15:00`, `next friday at 3pm`, `+3d`, `eod`, and `eow`. In create mode, date-only forms such as `today`, `tomorrow`, `YYYY-MM-DD`, `+3d`, and `next friday` create all-day reminders; forms with explicit times create timed reminders.
 
 Recurrence, normal alarm, and priority inputs are also validated before writes. Supported recurrence forms are `daily`, `weekly`, `weekly mon,wed,fri`, `monthly`, `monthly 1,15`, and `yearly`; `upcoming DAYS` requires a positive range from 1 to 3650 days.
 
@@ -232,6 +232,7 @@ RemCTL output is designed for both humans and agents:
 - flagged reminders show `⚑`
 - macOS 26 urgent reminders show `⏰`
 - `info --json` reports the actual due date as `dueDate`; if Reminders stores a separate display/alert date, it appears as `displayDate`
+- `add -d` creates all-day reminders when the input names a date without a time, such as `today`, `tomorrow`, `2026-06-01`, `+3d`, or `next friday`
 - `edit -d` carries a single absolute alarm forward when it matches the old due/display time, keeping Reminders.app's visible time aligned for ordinary reschedules
 - `edit -d clear` removes a single matching absolute alarm/display time; `edit --alarm clear` removes normal alarms explicitly
 - normal EventKit alarms and location alarms appear in `info --json` as `alarms`
@@ -294,7 +295,7 @@ For template automation, use `templates --json` and `template-info` to inspect s
 
 For Groceries automation, use `lists --json` to detect `listType: "groceries"` and `grocery.locale`, then use `add --private --grocery` or `edit --private --grocery` only against an existing Groceries list. Verify with `show <list> --json` and check the reminder's `section` after categorization.
 
-Agents should pass deterministic due dates, ideally `YYYY-MM-DD HH:MM` after resolving the user's request in their timezone. If a due date is invalid, RemCTL exits before writing and emits a structured `invalid_due_date` JSON error on stderr with examples. Retry with a corrected date; do not create a reminder first and patch the due date afterward.
+Agents should pass deterministic due dates, using `YYYY-MM-DD` for all-day reminders and `YYYY-MM-DD HH:MM` for timed reminders after resolving the user's request in their timezone. If a due date is invalid, RemCTL exits before writing and emits a structured `invalid_due_date` JSON error on stderr with examples. Retry with a corrected date; do not create a reminder first and patch the due date afterward.
 
 List names are resolved conservatively: exact match first, then case-insensitive match, then a normalized fallback that can handle decorative prefixes such as emoji. If more than one list matches, RemCTL fails before writing and asks for `--list-id`. Commands that target lists use the same rule: pass a name, or use `--list-id` for exact agent-safe targeting on `show`, `add`, `edit`, `link`, `export`, `list-edit`, `list-pin`, `list-unpin`, `list-rename`, `list-delete`, and smart-list list filters. `list-pin` and `list-unpin` can also target smart lists by name or `--smart-list-id`.
 

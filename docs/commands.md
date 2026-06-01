@@ -95,6 +95,8 @@ RemCTL uses nouns for read-only inspectors (`lists`, `smart-lists`, `templates`,
 
 Use `--json` on subcommands when scripting. For tabular read commands (`today`, `upcoming`, `overdue`, `flagged`, `urgent`, `lists`, `show`, and `search`), `--format json|table|plain` can be passed globally before the command or directly on the read command, so both `remctl --format table show Work` and `remctl show Work --format table` are valid. Export keeps its own `--format json|csv` because that chooses a file format, not display style.
 
+Date-only `add -d` inputs create all-day reminders instead of midnight timed reminders. This applies to forms such as `today`, `tomorrow`, `2026-06-01`, `+3d`, `in 2 weeks`, and `next friday`; inputs with explicit times remain timed reminders.
+
 `upcoming DAYS` accepts 1 through 3650 days. Zero and negative ranges fail before RemCTL opens the Reminders database.
 
 List targets are consistent across commands that can safely resolve them: pass a list name positionally or with `-l/--list`, or pass `--list-id` when an exact numeric target matters. If both a name and `--list-id` are provided, RemCTL fails before writing or exporting. This applies to `show`, `add`, `edit`, `link`, `export`, `list-edit`, `list-pin`, `list-unpin`, `list-rename`, `list-delete`, and the smart-list `--include-list-id` filter. For pinning, `list-pin` and `list-unpin` also accept smart-list names or `--smart-list-id`; if a name matches both a regular list and a smart list, RemCTL fails before writing and asks for an explicit ID.
@@ -322,7 +324,7 @@ JSON output preserves machine-readable fields:
 }
 ```
 
-`dueDate` is the actual Reminders due date. When Reminders stores a separate display/alert date, such as a normal alarm 15 minutes before the due date, JSON also includes `displayDate`; agents should not treat `displayDate` as the due date. For ordinary rescheduling with `edit -d`, RemCTL carries forward a single absolute alarm when that alarm matches the old due/display time, so Reminders.app's visible time moves with the due date instead of staying stale. `edit -d clear` removes a single matching absolute alarm/display time while preserving unrelated custom alarms.
+`dueDate` is the actual Reminders due date. When Reminders stores a separate display/alert date, such as a normal alarm 15 minutes before the due date or an all-day display date, JSON also includes `displayDate`; agents should not treat `displayDate` as the due date. For ordinary rescheduling with `edit -d`, RemCTL carries forward a single absolute alarm when that alarm matches the old due/display time, so Reminders.app's visible time moves with the due date instead of staying stale. `edit -d clear` removes a single matching absolute alarm/display time while preserving unrelated custom alarms.
 
 ## Due Date Formats
 
@@ -368,7 +370,7 @@ remctl info <numericId> --json
 
 `add --json` returns `numericId` when the new reminder is immediately visible in the local database. Use that ID for `info`; fall back to resolving by title from `show <list> --json` only if `numericId` is absent. `info --json` includes private rich-link URLs, parent and subtask image attachments, EventKit alarms, location alarms, Early Reminders, and recurrence metadata, so raw SQLite verification should not be needed for normal reminder metadata tasks.
 
-If an agent supplies an invalid due date, RemCTL creates nothing and exits with a structured `invalid_due_date` error on stderr. Retry the same `add` command with one of the provided examples or a normalized `YYYY-MM-DD HH:MM` value; do not create first and patch the due date afterward.
+If an agent supplies an invalid due date, RemCTL creates nothing and exits with a structured `invalid_due_date` error on stderr. Retry the same `add` command with one of the provided examples, using `YYYY-MM-DD` for all-day reminders or `YYYY-MM-DD HH:MM` for timed reminders; do not create first and patch the due date afterward.
 
 For Groceries automation, detect eligible lists with `remctl lists --json` and `listType == "groceries"`. After `add --private --grocery`, verify with `remctl show <list> --json` and check that the reminder has a non-empty `section` once categorization completes.
 
