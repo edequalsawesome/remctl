@@ -2621,6 +2621,85 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.remctl.resolve_sharee_or_die(db, 7, "me")["ZCKIDENTIFIER"], "EBA4B6AE-6FA9-4361-BA3D-F548DE185CDA")
         db.close()
 
+    def test_resolve_sharee_rejects_ambiguous_names(self):
+        db = self._sharee_db()
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT (Z_PK, Z_ENT, ZLIST, ZCKIDENTIFIER, ZFIRSTNAME, ZLASTNAME, ZADDRESS1, ZSTATUS, ZACCESSLEVEL) "
+            "VALUES (?, 36, 7, ?, ?, ?, ?, 2, 2)",
+            (12, "6D6E1104-E989-45F7-A5D5-1E8711E0B71D", "Alex", "Second", "mailto:alex.second@example.com"),
+        )
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            with self.assertRaises(SystemExit):
+                self.remctl.resolve_sharee_or_die(db, 7, "Alex")
+        self.assertIn("multiple sharees match", stderr.getvalue())
+        self.assertIn("alex.second@example.com", stderr.getvalue())
+        db.close()
+
+    def test_validate_private_args_rejects_assign_and_unassign_together(self):
+        args = SimpleNamespace(
+            assign="Alex",
+            unassign=True,
+            url=None,
+            early_reminder=None,
+            due=None,
+            subtask=None,
+            latitude=None,
+            longitude=None,
+        )
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            with self.assertRaises(SystemExit):
+                self.remctl.validate_private_args(args)
+        self.assertIn("either --assign or --unassign", stderr.getvalue())
+
+    def test_assignment_requires_private_opt_in(self):
+        args = SimpleNamespace(
+            private=False,
+            private_metadata=False,
+            grocery=False,
+            section=None,
+            section_id=None,
+            new_section=None,
+            subtask=None,
+            image=None,
+            flagged=None,
+            urgent=None,
+            early_reminder=None,
+            location_title=None,
+            latitude=None,
+            longitude=None,
+            assign="Alex",
+            unassign=False,
+        )
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            with self.assertRaises(SystemExit):
+                self.remctl.refuse_private_args_without_opt_in(args)
+        self.assertIn("assignment", stderr.getvalue())
+        self.assertIn("--private", stderr.getvalue())
+
+    def test_cmd_sharees_json_reports_assignment_candidates(self):
+        db = self._sharee_db()
+        list_ref = {
+            "id": 7,
+            "title": "Shopping",
+            "objectUUID": "LIST-UUID",
+            "requested": "Shopping",
+            "method": "exact",
+            "isGroceries": False,
+        }
+        args = SimpleNamespace(list="Shopping", list_id=None, json=True)
+        with (
+            mock.patch.object(self.remctl, "open_db", return_value=db),
+            mock.patch.object(self.remctl, "resolve_required_list_target_or_die", return_value=list_ref),
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+        ):
+            self.remctl.cmd_sharees(args)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["list"]["title"], "Shopping")
+        self.assertEqual(len(payload["sharees"]), 2)
+        self.assertEqual(payload["sharees"][0]["address"], "mailto:alex@example.com")
+        self.assertTrue(payload["sharees"][1]["currentUser"])
+        db.close()
+
     def test_apply_private_changes_assigns_sharee_with_originator(self):
         db = self._sharee_db()
         args = SimpleNamespace(
