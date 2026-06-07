@@ -2417,6 +2417,238 @@ def bridge_call(data):
     return None
 
 
+EVENTKIT_READ_ID_WARNING = (
+    "eventKitId is not a RemCTL numeric id and cannot be passed to info, edit, "
+    "done, delete, link, open, subtasks, or any other numeric-id command."
+)
+EVENTKIT_READ_LIMITATIONS = [
+    "No RemCTL numeric ids",
+    "No sections",
+    "No synced tags",
+    "No urgent state",
+    "No private rich links",
+    "No templates or smart-list internals",
+]
+EVENTKIT_ITEM_KEYS = {
+    "eventKitId",
+    "externalId",
+    "title",
+    "list",
+    "completed",
+    "priority",
+    "notes",
+    "url",
+    "dueDate",
+    "allDay",
+    "createdDate",
+    "completionDate",
+    "alarms",
+    "recurrence",
+}
+EVENTKIT_READ_COMMANDS = {"show", "search", "today", "upcoming"}
+
+
+def eventkit_read_requested(a):
+    return bool(getattr(a, "via_eventkit", False))
+
+
+def _eventkit_read_error(message, a=None, *, code="eventkit_read_unsupported", exit_code=2):
+    json_mode = bool(getattr(a, "json", False)) if a is not None else False
+    if json_mode:
+        print(json.dumps({
+            "status": "error",
+            "code": code,
+            "message": message,
+            "source": "eventkit",
+            "fidelity": "limited",
+            "idWarning": EVENTKIT_READ_ID_WARNING,
+        }), file=sys.stderr)
+    else:
+        print(f"Error: {message}", file=sys.stderr)
+        print(f"EventKit fallback note: {EVENTKIT_READ_ID_WARNING}", file=sys.stderr)
+    sys.exit(exit_code)
+
+
+def validate_eventkit_read_args(a, *, allow_list=False):
+    if getattr(a, "list_id", None) is not None:
+        _eventkit_read_error(
+            "--via-eventkit cannot use RemCTL numeric list ids. Pass a list name instead.",
+            a,
+        )
+    if getattr(a, "format", None) == "table":
+        _eventkit_read_error(
+            "--via-eventkit does not support table output because EventKit ids are long and non-chainable. Use plain or JSON output.",
+            a,
+        )
+    if allow_list and not getattr(a, "list", None):
+        _eventkit_read_error("--via-eventkit show requires a list name.", a)
+
+
+def limited_eventkit_read(mode, a, **extra):
+    if not bridge_available():
+        _eventkit_read_error("remctl-bridge is required for --via-eventkit reads.", a, code="bridge_unavailable", exit_code=1)
+    data = {
+        "action": "read",
+        "readMode": mode,
+        "limit": 500,
+    }
+    data.update(extra)
+    result = bridge_call(data)
+    if not result or result.get("status") != "ok":
+        message = (result or {}).get("message") if isinstance(result, dict) else None
+        _eventkit_read_error(message or "EventKit read failed.", a, code="eventkit_read_failed", exit_code=1)
+    items = []
+    for item in result.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        sanitized = {key: item[key] for key in EVENTKIT_ITEM_KEYS if key in item}
+        sanitized.pop("id", None)
+        items.append(sanitized)
+    return {
+        "source": "eventkit",
+        "fidelity": "limited",
+        "mode": mode,
+        "idWarning": EVENTKIT_READ_ID_WARNING,
+        "limitations": EVENTKIT_READ_LIMITATIONS,
+        "items": items,
+    }
+
+
+def fmt_eventkit_item(item, verbose=False, indent=""):
+    completed = bool(item.get("completed"))
+    status = C.green("[x]") if completed else C.dim("[ ]")
+    pri_val = _priority_value_from_item(item)
+    pri_str = f" {_color_priority(pri_val)}" if PRI.get(pri_val, "") else ""
+    title = safe_display(item.get("title") or "(untitled)")
+    due_str = fmt_due(item.get("dueDate"), all_day=bool(item.get("allDay")))
+    eventkit_id = safe_display(item.get("eventKitId") or "?")
+    id_str = C.dim(f"EventKit ID: {eventkit_id}")
+    if completed:
+        title = C.dim(C.strikethrough(title))
+        due_str = C.dim(due_str)
+    parts = [f"{indent}{status}{pri_str} {title}{due_str} {id_str}"]
+    if verbose:
+        if item.get("list"):
+            parts.append(f"{indent}    List: {safe_display(item['list'])}")
+        if item.get("notes"):
+            parts.append(f"{indent}    Notes: {C.dim(safe_display(item['notes'])[:200])}")
+        if item.get("url"):
+            parts.append(f"{indent}    URL: {C.dim(safe_display(item['url']))}")
+        recurrence = recurrence_summary(item.get("recurrence"))
+        if recurrence:
+            parts.append(f"{indent}    Repeats: {C.magenta(recurrence)}")
+        if item.get("allDay"):
+            parts.append(f"{indent}    All-day: {C.cyan('Yes')}")
+    return "\n".join(parts)
+
+
+def print_eventkit_notice():
+    print(C.yellow("EventKit limited read fallback"))
+    print(C.dim(EVENTKIT_READ_ID_WARNING))
+    print(C.dim("Unavailable in this mode: " + ", ".join(EVENTKIT_READ_LIMITATIONS[1:])))
+    print()
+
+
+def output_eventkit_read(payload, a, *, heading=None, empty_message="No reminders found", group_by_day=False):
+    if getattr(a, "json", False):
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    items = payload["items"]
+    print_eventkit_notice()
+    if heading:
+        print(C.bold(heading))
+    if not items:
+        print(empty_message)
+        return
+    if group_by_day:
+        groups = {}
+        for item in items:
+            due = item.get("dueDate")
+            try:
+                dt = datetime.fromisoformat(due) if due else None
+            except ValueError:
+                dt = None
+            key = dt.strftime("%Y-%m-%d") if dt else "No due date"
+            label = dt.strftime("%A, %b %d") if dt else "No due date"
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            if dt and dt.date() == today.date():
+                label = "Today"
+            elif dt and dt.date() == (today + timedelta(days=1)).date():
+                label = "Tomorrow"
+            groups.setdefault((key, label), []).append(item)
+        for (_key, label), day_items in sorted(groups.items()):
+            print(f"\n  {C.bold(label)}:")
+            for item in day_items:
+                print(fmt_eventkit_item(item, verbose=getattr(a, "verbose", False), indent="    "))
+    else:
+        for item in items:
+            print(fmt_eventkit_item(item, verbose=getattr(a, "verbose", False), indent="  "))
+    print(f"\n{len(items)} reminder{'s' if len(items) != 1 else ''}")
+
+
+def cmd_show_eventkit(a):
+    validate_eventkit_read_args(a, allow_list=True)
+    payload = limited_eventkit_read(
+        "show",
+        a,
+        list=getattr(a, "list", None),
+        completed=bool(getattr(a, "completed", False)),
+    )
+    output_eventkit_read(
+        payload,
+        a,
+        heading=f"{safe_display(getattr(a, 'list', '') or 'Reminders')} (EventKit limited)",
+        empty_message=f"No {'active ' if not getattr(a, 'completed', False) else ''}reminders found via EventKit",
+    )
+
+
+def cmd_search_eventkit(a):
+    validate_eventkit_read_args(a)
+    payload = limited_eventkit_read(
+        "search",
+        a,
+        query=getattr(a, "query", None),
+        completed=bool(getattr(a, "completed", False)),
+    )
+    output_eventkit_read(
+        payload,
+        a,
+        heading=f"Search: {safe_display(getattr(a, 'query', ''))} (EventKit limited)",
+        empty_message=f"No reminders matching '{safe_display(getattr(a, 'query', ''))}' via EventKit",
+    )
+
+
+def cmd_today_eventkit(a):
+    validate_eventkit_read_args(a)
+    payload = limited_eventkit_read(
+        "today",
+        a,
+        includeOverdue=not bool(getattr(a, "no_overdue", False)),
+    )
+    output_eventkit_read(
+        payload,
+        a,
+        heading=f"Due Today ({datetime.now().strftime('%Y-%m-%d')}) (EventKit limited)",
+        empty_message=f"Nothing due today ({datetime.now().strftime('%Y-%m-%d')}) via EventKit",
+    )
+
+
+def cmd_upcoming_eventkit(a):
+    validate_eventkit_read_args(a)
+    days = getattr(a, "days", 7)
+    if days < 1 or days > 3650:
+        print("Error: upcoming days must be between 1 and 3650.", file=sys.stderr)
+        sys.exit(1)
+    payload = limited_eventkit_read("upcoming", a, days=days)
+    output_eventkit_read(
+        payload,
+        a,
+        heading=f"Upcoming ({days} days) (EventKit limited)",
+        empty_message=f"Nothing due in the next {days} days via EventKit",
+        group_by_day=True,
+    )
+
+
 # ── Private ReminderKit Integration ──────────────────────────────────────────
 
 def private_metadata_enabled(a=None):
@@ -5665,6 +5897,9 @@ def cmd_list_symbols(a):
         print(f"  {row['preview']:<2}  {row['name']:<{width}}  {C.dim(row['asset'])}")
 
 def cmd_show(a):
+    if eventkit_read_requested(a):
+        cmd_show_eventkit(a)
+        return
     db = open_db()
     list_ref = resolve_required_list_target_or_die(
         db,
@@ -6281,6 +6516,9 @@ def cmd_edit(a):
 
 
 def cmd_search(a):
+    if eventkit_read_requested(a):
+        cmd_search_eventkit(a)
+        return
     db = open_db()
     items = q_search(db, a.query, completed=a.completed)
     pks = [i["Z_PK"] for i in items]
@@ -6300,6 +6538,9 @@ def cmd_search(a):
     print(f"\n{len(items)} result{'s' if len(items) != 1 else ''}")
 
 def cmd_today(a):
+    if eventkit_read_requested(a):
+        cmd_today_eventkit(a)
+        return
     db = open_db()
     items = q_due_today(db, include_overdue=not a.no_overdue)
     pks = [i["Z_PK"] for i in items]
@@ -6712,6 +6953,9 @@ def cmd_upcoming(a):
     if days < 1 or days > 3650:
         print("Error: upcoming days must be between 1 and 3650.", file=sys.stderr)
         sys.exit(1)
+    if eventkit_read_requested(a):
+        cmd_upcoming_eventkit(a)
+        return
     db = open_db()
     items = q_upcoming(db, days=days)
     pks = [i["Z_PK"] for i in items]
@@ -7143,6 +7387,30 @@ _remctl() {
             _arguments \
                 '--list-id[Show list by stable numeric ID]:id:' \
                 '--completed[Include completed reminders]' \
+                '--via-eventkit[Limited read-only EventKit fallback; no numeric ids or private metadata]' \
+                '(-v --verbose)'{-v,--verbose}'[Verbose output]' \
+                '--json[JSON output]'
+            return
+            ;;
+        search)
+            _arguments \
+                '--completed[Include completed reminders]' \
+                '--via-eventkit[Limited read-only EventKit fallback; no numeric ids or private metadata]' \
+                '(-v --verbose)'{-v,--verbose}'[Verbose output]' \
+                '--json[JSON output]'
+            return
+            ;;
+        today)
+            _arguments \
+                '--no-overdue[Exclude overdue reminders]' \
+                '--via-eventkit[Limited read-only EventKit fallback; no numeric ids or private metadata]' \
+                '(-v --verbose)'{-v,--verbose}'[Verbose output]' \
+                '--json[JSON output]'
+            return
+            ;;
+        upcoming)
+            _arguments \
+                '--via-eventkit[Limited read-only EventKit fallback; no numeric ids or private metadata]' \
                 '(-v --verbose)'{-v,--verbose}'[Verbose output]' \
                 '--json[JSON output]'
             return
@@ -7425,7 +7693,16 @@ BASH_COMPLETION = '''_remctl() {
         COMPREPLY=( $(compgen -W "--for-agent --json" -- "$cur") )
         return
     elif [ "$cmd" = "show" ]; then
-        COMPREPLY=( $(compgen -W "--list-id --completed --verbose -v --json" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--list-id --completed --via-eventkit --verbose -v --json" -- "$cur") )
+        return
+    elif [ "$cmd" = "search" ]; then
+        COMPREPLY=( $(compgen -W "--completed --via-eventkit --verbose -v --json" -- "$cur") )
+        return
+    elif [ "$cmd" = "today" ]; then
+        COMPREPLY=( $(compgen -W "--no-overdue --via-eventkit --verbose -v --json" -- "$cur") )
+        return
+    elif [ "$cmd" = "upcoming" ]; then
+        COMPREPLY=( $(compgen -W "--via-eventkit --verbose -v --json" -- "$cur") )
         return
     elif [ "$cmd" = "link" ]; then
         COMPREPLY=( $(compgen -W "--list -l --list-id --completed --json" -- "$cur") )
@@ -7535,7 +7812,12 @@ complete -c remctl -n "__fish_use_subcommand" -a completion -d "Generate shell c
 complete -c remctl -n "__fish_seen_subcommand_from doctor" -l for-agent -d "Print agent-focused context and TCC guidance"
 complete -c remctl -n "__fish_seen_subcommand_from show" -l list-id -d "Show list by stable numeric ID" -r
 complete -c remctl -n "__fish_seen_subcommand_from show" -l completed -d "Include completed reminders"
+complete -c remctl -n "__fish_seen_subcommand_from show" -l via-eventkit -d "Limited read-only EventKit fallback; no numeric ids or private metadata"
 complete -c remctl -n "__fish_seen_subcommand_from show" -s v -l verbose -d "Verbose output"
+complete -c remctl -n "__fish_seen_subcommand_from search" -l completed -d "Include completed reminders"
+complete -c remctl -n "__fish_seen_subcommand_from search today upcoming" -l via-eventkit -d "Limited read-only EventKit fallback; no numeric ids or private metadata"
+complete -c remctl -n "__fish_seen_subcommand_from search today upcoming" -s v -l verbose -d "Verbose output"
+complete -c remctl -n "__fish_seen_subcommand_from today" -l no-overdue -d "Exclude overdue reminders"
 complete -c remctl -n "__fish_seen_subcommand_from done" -l date -d "Set completion date" -r
 complete -c remctl -n "__fish_seen_subcommand_from done" -l json -d "JSON output"
 complete -c remctl -n "__fish_seen_subcommand_from link" -s l -l list -d "Get links for active reminders in list" -r
@@ -8064,6 +8346,17 @@ def run_handler_with_fallback(args, handler):
         handler(args)
     except RemindersDBUnavailable as exc:
         print(f"Error: {exc}", file=sys.stderr)
+        if (
+            getattr(args, "cmd", None) in EVENTKIT_READ_COMMANDS
+            and hasattr(args, "via_eventkit")
+            and not eventkit_read_requested(args)
+        ):
+            print(
+                "Limited fallback: rerun with --via-eventkit for a read-only EventKit result "
+                "when Full Disk Access is unavailable. This mode is not full fidelity and does "
+                "not return RemCTL numeric ids.",
+                file=sys.stderr,
+            )
         sys.exit(1)
 
 
@@ -8435,6 +8728,15 @@ def main():
             help="Output format for this read command",
         )
     def vb(c): c.add_argument("-v", "--verbose", action="store_true")
+    def eventkit_read(c):
+        c.add_argument(
+            "--via-eventkit",
+            action="store_true",
+            help=(
+                "Limited read-only EventKit fallback for hosts without Full Disk Access; "
+                "never the default, no RemCTL numeric ids, no sections/tags/private metadata"
+            ),
+        )
 
     # --- Existing commands ---
     c = sub.add_parser("lists", help="List all iCloud reminder lists"); js(c); display_format(c)
@@ -8464,7 +8766,7 @@ def main():
     c.add_argument("list", nargs="?", help="List name")
     c.add_argument("--list-id", type=int, help="Show a list by stable numeric ID")
     c.add_argument("--completed", action="store_true", help="Include completed")
-    vb(c); js(c); display_format(c)
+    eventkit_read(c); vb(c); js(c); display_format(c)
 
     c = sub.add_parser(
         "add",
@@ -8610,10 +8912,11 @@ def main():
 
     c = sub.add_parser("search", help="Search reminders")
     c.add_argument("query"); c.add_argument("--completed", action="store_true"); vb(c); js(c)
+    eventkit_read(c)
     display_format(c)
 
     c = sub.add_parser("today", help="Due today + overdue")
-    c.add_argument("--no-overdue", action="store_true"); vb(c); js(c); display_format(c)
+    c.add_argument("--no-overdue", action="store_true"); eventkit_read(c); vb(c); js(c); display_format(c)
 
     c = sub.add_parser("flagged", help="Flagged reminders"); vb(c); js(c); display_format(c)
 
@@ -8664,7 +8967,7 @@ def main():
 
     c = sub.add_parser("upcoming", help="Show reminders due in next N days (default 7)")
     c.add_argument("days", type=int, nargs="?", default=7, help="Number of days to look ahead")
-    vb(c); js(c); display_format(c)
+    eventkit_read(c); vb(c); js(c); display_format(c)
 
     c = sub.add_parser("overdue", help="Show all overdue reminders"); vb(c); js(c); display_format(c)
 

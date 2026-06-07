@@ -8,11 +8,11 @@ RemCTL intentionally splits reads and writes.
 remctl (Python)
   ├─ reads Reminders CoreData SQLite database
   ├─ formats human and JSON output
-  ├─ calls remctl-bridge for normal writes
+  ├─ calls remctl-bridge for normal writes and limited EventKit reads
   └─ calls remctl-private for opt-in private metadata writes
 
 remctl-bridge (Swift)
-  └─ writes through EventKit
+  └─ writes through EventKit and supports --via-eventkit read fallback
 
 remctl-private (Objective-C)
   └─ writes selected private metadata through private ReminderKit APIs
@@ -44,6 +44,14 @@ This exposes fields EventKit does not expose cleanly for fast list views:
 - Early Reminder due-date delta alerts
 
 RemCTL opens the database read-only. It never writes to SQLite.
+
+## Limited EventKit Read Fallback
+
+`--via-eventkit` is a narrow fallback for automation hosts that cannot get Full Disk Access. It is supported only by `show`, `search`, `today`, and `upcoming`, and it is never selected automatically. Normal direct reads remain the primary read path because they expose Reminders metadata that EventKit does not.
+
+The fallback runs through `remctl-bridge` and uses public EventKit reminder predicates. It returns a wrapper payload with `source: "eventkit"`, `fidelity: "limited"`, `idWarning`, and `items`. Items use `eventKitId` from `EKReminder.calendarItemIdentifier`; they do not include RemCTL numeric `id` values. `eventKitId` is not accepted by numeric-ID commands such as `info`, `edit`, `done`, `delete`, `link`, `open`, or `subtasks`.
+
+The fallback intentionally does not support `--list-id`, table output, sections, synced tags, private rich links, urgent state, template internals, smart-list internals, or exact ID compatibility with direct database reads. If a workflow needs those fields or needs to chain IDs into later commands, the correct fix is Full Disk Access for the host process.
 
 ## Writes
 

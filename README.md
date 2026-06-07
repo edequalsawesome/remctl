@@ -15,6 +15,7 @@ As a result, RemCTL is the only Reminders CLI that truly replicates the modern R
 ```text
 remctl
   reads:  ~/Library/Group Containers/group.com.apple.reminders/.../Data-*.sqlite
+  fallback reads: remctl-bridge -> EventKit (--via-eventkit, limited)
   writes: remctl-bridge -> EventKit
   private: remctl-private -> private ReminderKit APIs (--private only)
 ```
@@ -22,6 +23,7 @@ remctl
 Why this architecture exists:
 
 - **Direct SQLite reads** expose sections, subtasks, tags, attachments, deep links, list colors and badges, recurrence metadata, normal alarms, location alarms, and Early Reminder metadata in tens of milliseconds.
+- **Limited EventKit reads** are available only with `--via-eventkit` on `show`, `search`, `today`, and `upcoming`. This is a fallback for automation hosts that cannot get Full Disk Access. It is never the default and does not return RemCTL numeric IDs.
 - **EventKit writes** keep Reminders and iCloud in charge of mutations. RemCTL does not write directly to the database.
 - **Private metadata writes** are unsupported and explicitly opt-in with `--private`. They use Apple's private ReminderKit APIs, not direct SQLite mutation, and should be treated as experimental power-user functionality.
 
@@ -68,6 +70,8 @@ Common examples:
 remctl today
 remctl show Work --format table
 remctl show --list-id 153 --json
+remctl today --via-eventkit --json
+remctl show Work --via-eventkit
 remctl add "Review PR" -l Work -d "tomorrow 10:00" -p high
 remctl add "Pay rent" -d "2026-06-01" --recurrence monthly
 remctl done 23880 --date "2026-05-27 09:30"
@@ -102,6 +106,8 @@ remctl info 23880 --json
 ```
 
 The full command guide is in [docs/commands.md](docs/commands.md). For smart lists specifically, start with [Smart Lists in the command guide](docs/commands.md#smart-lists), then read [Private Metadata Writes: Smart List Examples](docs/private-metadata.md#smart-list-examples) for the ReminderKit write path, guardrails, and implementation notes. Template commands are covered in [docs/commands.md#templates](docs/commands.md#templates) and [docs/private-metadata.md#template-examples](docs/private-metadata.md#template-examples).
+
+`--via-eventkit` is a limited read-only fallback, not an alternate primary mode. It works only for `show`, `search`, `today`, and `upcoming` when a host cannot read the Reminders database. JSON output is a wrapper object with `source: "eventkit"`, `fidelity: "limited"`, and `items`; each item has `eventKitId`, not RemCTL's numeric `id`. Never pass `eventKitId` to `info`, `edit`, `done`, `delete`, `link`, `open`, `subtasks`, or any command that expects a numeric RemCTL ID. This mode also cannot show sections, synced tags, private rich links, urgent state, template internals, smart-list internals, numeric list IDs, or table output.
 
 Due dates are atomic. If `-d/--due` is present and RemCTL cannot parse it, the command fails before creating or editing anything. Supported deterministic forms include `YYYY-MM-DD`, `YYYY-MM-DD HH:MM`, `today at 3pm`, `tomorrow 09:30`, `tonight at 11`, `Friday at 15:00`, `next friday at 3pm`, `+3d`, `eod`, and `eow`. In create mode, date-only forms such as `today`, `tomorrow`, `YYYY-MM-DD`, `+3d`, and `next friday` create all-day reminders; forms with explicit times create timed reminders.
 
@@ -250,6 +256,9 @@ This is the major difference from ordinary EventKit-only Reminders CLIs, but it 
 RemCTL output is designed for both humans and agents:
 
 - reminder IDs are shown as `#ID`
+- normal JSON read commands return RemCTL numeric `id` values that can be used with `info`, `edit`, `done`, `delete`, `link`, `open`, and `subtasks`
+- `--via-eventkit` JSON returns `eventKitId` values instead; they are EventKit calendar item identifiers and cannot be chained into numeric-ID commands
+- `--via-eventkit` JSON includes `source: "eventkit"`, `fidelity: "limited"`, and `idWarning` so automation can reject accidental ID chaining
 - `#ID` is colored with the reminder list color when RemCTL can read list colors
 - flagged reminders show `⚑`
 - macOS 26 urgent reminders show `⏰`
@@ -294,6 +303,8 @@ Full Disk Access is scoped to the process context. A Terminal session can pass `
 
 Manual fallback: run `remctl doctor --for-agent`, then add the printed target in System Settings > Privacy & Security > Full Disk Access. In the file picker, press `Command-Shift-G`, paste the path, press Return, then click Open.
 
+If Full Disk Access cannot be granted to an automation host, `show`, `search`, `today`, and `upcoming` support `--via-eventkit` as a limited read-only fallback through the EventKit bridge. This does not replace normal setup: it omits RemCTL numeric IDs, sections, synced tags, private metadata, smart-list/template internals, numeric list targeting, and table output.
+
 ## For Agents
 
 Use JSON when scripting:
@@ -307,6 +318,8 @@ remctl doctor --for-agent --json
 ```
 
 `search` matches reminder titles and notes. By default it searches active reminders; pass `--completed` to include completed reminders too.
+
+Do not use `--via-eventkit` by default. Use it only when a supported basic read command is blocked by Full Disk Access and the task can tolerate limited EventKit fidelity. In this mode JSON returns a wrapper with `source: "eventkit"`, `fidelity: "limited"`, and `items`; item identifiers are `eventKitId`, not RemCTL numeric `id`. Never pass `eventKitId` to `info`, `edit`, `done`, `delete`, `link`, `open`, `subtasks`, or any other numeric-ID command. If the task needs sections, tags, rich links, urgent state, templates, smart-list internals, or chainable IDs, fix Full Disk Access instead.
 
 For fast agent writes, call `remctl add ... --json`, use the returned `numericId` when present, then verify with `remctl info <numericId> --json`. `info` includes private rich-link URLs, parent and subtask image attachments, EventKit alarms, location alarms, Early Reminders, and recurrence metadata, so agents should not need raw SQLite checks for ordinary reminder metadata verification.
 

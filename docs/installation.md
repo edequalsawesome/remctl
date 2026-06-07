@@ -104,6 +104,8 @@ Use the exact target printed by `doctor`. Open System Settings > Privacy & Secur
 
 If an agent cannot get Full Disk Access but the user's Terminal already passes `doctor`, a one-off Terminal relay can unblock testing: ask the user for approval, run the requested `remctl` command in Terminal via AppleScript, and capture stdout/stderr through temporary files. Do not treat that as the default automation path; the durable fix is granting access to the actual runner.
 
+For basic reads only, `show`, `search`, `today`, and `upcoming` also accept `--via-eventkit` as a limited read-only fallback when a host cannot get Full Disk Access. This is not a setup replacement and should never be the default for agents. It omits RemCTL numeric IDs, sections, synced tags, private rich links, urgent state, template internals, smart-list internals, numeric list targeting, and table output. JSON returns `source: "eventkit"`, `fidelity: "limited"`, and per-item `eventKitId` values; those IDs cannot be passed to `info`, `edit`, `done`, `delete`, `link`, `open`, `subtasks`, or any numeric-ID command.
+
 ## Upgrading
 
 `git pull` updates the checkout only. It does not update the copied CLI in your `PATH`.

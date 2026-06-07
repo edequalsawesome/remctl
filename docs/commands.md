@@ -19,8 +19,10 @@ remctl show Shopping
 remctl show --list-id 153
 remctl show Work --completed
 remctl show Family -v
+remctl show Work --via-eventkit
 remctl search "milk"
 remctl search "milk" --completed
+remctl today --via-eventkit --json
 remctl info 23880
 remctl subtasks 23880
 remctl sections
@@ -94,6 +96,39 @@ remctl template-delete "Packing Template" --private --force
 RemCTL uses nouns for read-only inspectors (`lists`, `smart-lists`, `templates`, `today`, `stats`) and verb-style commands for writes (`add`, `edit`, `delete`, `list-create`, `smart-list-edit`). List-management commands keep the `list-*` prefix; custom smart-list writes keep the `smart-list-*` prefix; template writes keep the `template-*` prefix.
 
 Use `--json` on subcommands when scripting. For tabular read commands (`today`, `upcoming`, `overdue`, `flagged`, `urgent`, `lists`, `show`, and `search`), `--format json|table|plain` can be passed globally before the command or directly on the read command, so both `remctl --format table show Work` and `remctl show Work --format table` are valid. Export keeps its own `--format json|csv` because that chooses a file format, not display style.
+
+### Limited EventKit Read Fallback
+
+`--via-eventkit` is a limited read-only fallback for hosts that cannot get Full Disk Access. It is never the default and is supported only by:
+
+```bash
+remctl show Work --via-eventkit
+remctl search "milk" --via-eventkit
+remctl today --via-eventkit --json
+remctl upcoming 14 --via-eventkit --json
+```
+
+This mode uses EventKit through `remctl-bridge`, so it can return basic reminder fields without opening the Reminders SQLite database. It is not full RemCTL output. It does not support `--list-id`, table output, sections, synced tags, private rich links, urgent state, template internals, smart-list internals, or exact numeric ID compatibility.
+
+JSON output is a wrapper object, not the normal read-command array:
+
+```json
+{
+  "source": "eventkit",
+  "fidelity": "limited",
+  "idWarning": "eventKitId is not a RemCTL numeric id and cannot be passed to info, edit, done, delete, link, open, subtasks, or any other numeric-id command.",
+  "items": [
+    {
+      "eventKitId": "EVENTKIT-CALENDAR-ITEM-ID",
+      "title": "Review PR",
+      "list": "Work",
+      "completed": false
+    }
+  ]
+}
+```
+
+Treat `eventKitId` as display/readback data only. Never pass it to `info`, `edit`, `done`, `delete`, `link`, `open`, `subtasks`, or any command that expects a RemCTL numeric `id`. If an automation needs chainable IDs or private Reminders metadata, fix Full Disk Access and use the normal read path.
 
 Date-only `add -d` inputs create all-day reminders instead of midnight timed reminders. This applies to forms such as `today`, `tomorrow`, `2026-06-01`, `+3d`, `in 2 weeks`, and `next friday`; inputs with explicit times remain timed reminders.
 
@@ -333,6 +368,8 @@ JSON output preserves machine-readable fields:
 
 `dueDate` is the actual Reminders due date. When Reminders stores a separate display/alert date, such as a normal alarm 15 minutes before the due date or an all-day display date, JSON also includes `displayDate`; agents should not treat `displayDate` as the due date. For ordinary rescheduling with `edit -d`, RemCTL carries forward a single absolute alarm when that alarm matches the old due/display time, so Reminders.app's visible time moves with the due date instead of staying stale. `edit -d clear` removes a single matching absolute alarm/display time while preserving unrelated custom alarms.
 
+Normal read-command JSON includes numeric `id` values. `--via-eventkit` is the exception: it returns `source: "eventkit"`, `fidelity: "limited"`, and per-item `eventKitId` values instead of numeric IDs. Those identifiers are not accepted by RemCTL numeric-ID commands.
+
 ## Due Date Formats
 
 | Format | Example |
@@ -378,6 +415,8 @@ remctl info <numericId> --json
 ```
 
 `add --json` returns `numericId` when the new reminder is immediately visible in the local database. Use that ID for `info`; fall back to resolving by title from `show <list> --json` only if `numericId` is absent. `info --json` includes private rich-link URLs, parent and subtask image attachments, EventKit alarms, location alarms, Early Reminders, and recurrence metadata, so raw SQLite verification should not be needed for normal reminder metadata tasks.
+
+Agents must not use `--via-eventkit` by default. It is a limited read-only fallback only for `show`, `search`, `today`, and `upcoming` when Full Disk Access blocks a basic read and the task does not need chainable IDs or private metadata. Its `eventKitId` values are not RemCTL numeric IDs and must not be used with `info`, `edit`, `done`, `delete`, `link`, `open`, or `subtasks`.
 
 If an agent supplies an invalid due date, RemCTL creates nothing and exits with a structured `invalid_due_date` error on stderr. Retry the same `add` command with one of the provided examples, using `YYYY-MM-DD` for all-day reminders or `YYYY-MM-DD HH:MM` for timed reminders; do not create first and patch the due date afterward.
 

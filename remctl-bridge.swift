@@ -26,6 +26,12 @@ struct Command: Decodable {
     let proximity: String?
     let color: String?
     let completionDate: String?
+    let readMode: String?
+    let query: String?
+    let completed: Bool?
+    let days: Int?
+    let includeOverdue: Bool?
+    let limit: Int?
 }
 
 struct RecurrenceSpec: Decodable {
@@ -330,6 +336,215 @@ func authorizationSummary(_ store: EKEventStore) -> [String: Any] {
     ]
 }
 
+// MARK: - Limited EventKit reads
+
+let limitedReadWarning = "EventKit read mode is a limited fallback: eventKitId is not a RemCTL numeric id, and private Reminders metadata such as sections, tags, urgent state, rich links, templates, and numeric ids is unavailable."
+
+func priorityName(_ value: Int) -> String {
+    if value >= 1 && value <= 4 { return "high" }
+    if value == 5 { return "medium" }
+    if value >= 6 && value <= 9 { return "low" }
+    return "none"
+}
+
+func dateFromComponents(_ components: DateComponents?) -> (Date?, Bool) {
+    guard var components = components else { return (nil, false) }
+    let allDay = components.hour == nil && components.minute == nil && components.second == nil
+    if components.calendar == nil {
+        components.calendar = Calendar.current
+    }
+    return (components.date, allDay)
+}
+
+func alarmPayload(_ alarm: EKAlarm) -> [String: Any] {
+    var payload: [String: Any] = [:]
+    if let absoluteDate = alarm.absoluteDate {
+        payload["type"] = "absolute"
+        payload["date"] = isoFormatter.string(from: absoluteDate)
+    } else if alarm.structuredLocation != nil {
+        payload["type"] = "location"
+        payload["proximity"] = alarm.proximity == .leave ? "leaving" : "arriving"
+    } else {
+        payload["type"] = "relative"
+        payload["relativeOffset"] = alarm.relativeOffset
+        payload["relativeOffsetMinutes"] = Int(alarm.relativeOffset / 60.0)
+    }
+    return payload
+}
+
+func recurrencePayload(_ rule: EKRecurrenceRule) -> [String: Any] {
+    let frequency: String
+    switch rule.frequency {
+    case .daily: frequency = "daily"
+    case .weekly: frequency = "weekly"
+    case .monthly: frequency = "monthly"
+    case .yearly: frequency = "yearly"
+    @unknown default: frequency = "unknown"
+    }
+    var payload: [String: Any] = [
+        "frequency": frequency,
+        "interval": rule.interval,
+    ]
+    if let days = rule.daysOfTheWeek, !days.isEmpty {
+        payload["daysOfWeek"] = days.map { $0.dayOfTheWeek.rawValue }
+    }
+    if let days = rule.daysOfTheMonth, !days.isEmpty {
+        payload["daysOfMonth"] = days.map { $0.intValue }
+    }
+    return payload
+}
+
+func reminderPayload(_ reminder: EKReminder) -> [String: Any] {
+    var payload: [String: Any] = [
+        "eventKitId": reminder.calendarItemIdentifier,
+        "title": reminder.title ?? "",
+        "list": reminder.calendar?.title ?? "",
+        "completed": reminder.isCompleted,
+        "priority": priorityName(Int(reminder.priority)),
+    ]
+    if let externalId = reminder.calendarItemExternalIdentifier {
+        payload["externalId"] = externalId
+    }
+    if let notes = reminder.notes, !notes.isEmpty {
+        payload["notes"] = notes
+    }
+    if let url = reminder.url {
+        payload["url"] = url.absoluteString
+    }
+    let due = dateFromComponents(reminder.dueDateComponents)
+    if let dueDate = due.0 {
+        payload["dueDate"] = isoFormatter.string(from: dueDate)
+        payload["allDay"] = due.1
+    }
+    if let creationDate = reminder.creationDate {
+        payload["createdDate"] = isoFormatter.string(from: creationDate)
+    }
+    if let completionDate = reminder.completionDate {
+        payload["completionDate"] = isoFormatter.string(from: completionDate)
+    }
+    if let alarms = reminder.alarms, !alarms.isEmpty {
+        payload["alarms"] = alarms.map { alarmPayload($0) }
+    }
+    if let rules = reminder.recurrenceRules, !rules.isEmpty {
+        payload["recurrence"] = recurrencePayload(rules[0])
+    }
+    return payload
+}
+
+func fetchReminders(_ store: EKEventStore, predicate: NSPredicate) -> [EKReminder] {
+    let semaphore = DispatchSemaphore(value: 0)
+    var result: [EKReminder] = []
+    var fetchId: Any?
+    fetchId = store.fetchReminders(matching: predicate) { reminders in
+        result = reminders ?? []
+        semaphore.signal()
+    }
+    if semaphore.wait(timeout: .now() + 30) == .timedOut {
+        if let fetchId = fetchId {
+            store.cancelFetchRequest(fetchId)
+        }
+        fail("EventKit read timed out")
+    }
+    return result
+}
+
+func eventKitCalendars(_ store: EKEventStore, listName: String?) -> [EKCalendar]? {
+    guard let listName = listName, !listName.isEmpty else { return nil }
+    let matches = store.calendars(for: .reminder).filter { $0.title == listName }
+    if matches.isEmpty {
+        fail("List not found: \(listName)")
+    }
+    if matches.count > 1 {
+        fail("Multiple reminder lists named \(listName); EventKit fallback cannot disambiguate them")
+    }
+    return matches
+}
+
+func containsQuery(_ reminder: EKReminder, _ query: String) -> Bool {
+    let options: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+    if (reminder.title ?? "").range(of: query, options: options) != nil { return true }
+    if (reminder.notes ?? "").range(of: query, options: options) != nil { return true }
+    return false
+}
+
+func dueDateForSort(_ reminder: EKReminder) -> Date? {
+    dateFromComponents(reminder.dueDateComponents).0
+}
+
+func runLimitedEventKitRead(_ cmd: Command, store: EKEventStore) {
+    guard let mode = cmd.readMode else { fail("readMode is required") }
+    let calendars = eventKitCalendars(store, listName: cmd.list)
+    let completed = cmd.completed ?? false
+    let limit = max(1, min(cmd.limit ?? 500, 1000))
+    let now = Date()
+    let calendar = Calendar.current
+    let startOfToday = calendar.startOfDay(for: now)
+    let startOfTomorrow = calendar.date(byAdding: .day, value: 1, to: startOfToday)!
+    var reminders: [EKReminder]
+
+    switch mode {
+    case "show":
+        let predicate = store.predicateForReminders(in: calendars)
+        reminders = fetchReminders(store, predicate: predicate)
+        if !completed {
+            reminders = reminders.filter { !$0.isCompleted }
+        }
+    case "search":
+        guard let query = cmd.query, !query.isEmpty else { fail("query is required") }
+        let predicate = store.predicateForReminders(in: calendars)
+        reminders = fetchReminders(store, predicate: predicate)
+        if !completed {
+            reminders = reminders.filter { !$0.isCompleted }
+        }
+        reminders = reminders.filter { containsQuery($0, query) }
+    case "today":
+        let includeOverdue = cmd.includeOverdue ?? true
+        let start = includeOverdue ? nil : startOfToday
+        let predicate = store.predicateForIncompleteReminders(withDueDateStarting: start, ending: startOfTomorrow, calendars: calendars)
+        reminders = fetchReminders(store, predicate: predicate)
+    case "upcoming":
+        let days = max(1, min(cmd.days ?? 7, 3650))
+        guard let end = calendar.date(byAdding: .day, value: days + 1, to: startOfToday) else {
+            fail("Invalid upcoming range")
+        }
+        let predicate = store.predicateForIncompleteReminders(withDueDateStarting: startOfToday, ending: end, calendars: calendars)
+        reminders = fetchReminders(store, predicate: predicate)
+    default:
+        fail("Unsupported EventKit read mode: \(mode)")
+    }
+
+    reminders.sort {
+        let leftDue = dueDateForSort($0)
+        let rightDue = dueDateForSort($1)
+        if let leftDue = leftDue, let rightDue = rightDue {
+            if leftDue != rightDue { return leftDue < rightDue }
+        } else if leftDue != nil {
+            return true
+        } else if rightDue != nil {
+            return false
+        }
+        return ($0.title ?? "") < ($1.title ?? "")
+    }
+    let items = reminders.prefix(limit).map { reminderPayload($0) }
+    output([
+        "status": "ok",
+        "source": "eventkit",
+        "fidelity": "limited",
+        "mode": mode,
+        "idWarning": "eventKitId is not a RemCTL numeric id and cannot be passed to numeric-id commands.",
+        "limitations": [
+            "No RemCTL numeric ids",
+            "No sections",
+            "No synced tags",
+            "No urgent state",
+            "No private rich links",
+            "No templates or smart-list internals",
+        ],
+        "items": Array(items),
+        "warning": limitedReadWarning,
+    ])
+}
+
 // Read stdin. Use readDataToEndOfFile so chunked pipes aren't silently
 // truncated (availableData only returns what's buffered at call time).
 // Cap at 1 MiB — no legitimate command payload is anywhere near that.
@@ -361,6 +576,9 @@ if cmd.action == "authorize" {
 requestAccess(store)
 
 switch cmd.action {
+
+case "read":
+    runLimitedEventKitRead(cmd, store: store)
 
 case "create":
     guard let title = cmd.title, !title.isEmpty else { fail("title is required for create") }

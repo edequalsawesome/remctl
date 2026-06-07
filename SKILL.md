@@ -12,6 +12,7 @@ RemCTL is a power-user Apple Reminders CLI. It reads the local Reminders CoreDat
 - Use the installed command for user tasks: `remctl ...`.
 - Prefer JSON for automation and verification: `remctl today --json`, `remctl show Work --json`, `remctl info <id> --json`.
 - Never write directly to the Reminders SQLite database.
+- Do not use `--via-eventkit` by default. It is a limited read-only fallback for `show`, `search`, `today`, and `upcoming` when Full Disk Access blocks a basic read and the task can tolerate missing Reminders metadata.
 - For private reminder metadata, use regular `add` or `edit` with `--private`; for private list appearance, Groceries mode, or regular/smart-list pin state, use `list-create --private`, `list-edit --private`, `list-pin --private`, or `list-unpin --private`; for custom smart lists, use `smart-list-create`, `smart-list-edit`, or `smart-list-delete` with `--private`; for Reminders templates, use `template-create`, `template-apply`, or `template-delete` with `--private`. Do not use raw database mutation.
 
 ## Agent Routing
@@ -28,6 +29,23 @@ Start by deciding the write path. Public EventKit writes are stable and do not n
 | List appearance, Groceries metadata, list or smart-list pin state | `list-create --private`, `list-edit --private`, `list-pin --private`, `list-unpin --private` | Yes | `lists --json` for list color/badge/Groceries/pin state, `smart-lists --json` for smart-list appearance/pin state |
 | Custom smart list create/edit/delete | `smart-list-create`, `smart-list-edit`, `smart-list-delete` | Yes | `smart-lists --json` |
 | Saved Reminders templates | `templates`, `template-info`, `template-create`, `template-apply`, `template-delete` | Reads no; writes yes | `templates --json`, `template-info`, then `show <new list> --json` after apply |
+
+## Limited EventKit Read Fallback
+
+`--via-eventkit` is not normal RemCTL output. Use it only when a supported basic read command is blocked by Full Disk Access and the user request does not need full Reminders fidelity.
+
+Supported commands:
+
+```bash
+remctl show Work --via-eventkit --json
+remctl search "query" --via-eventkit --json
+remctl today --via-eventkit --json
+remctl upcoming 7 --via-eventkit --json
+```
+
+Fallback JSON is a wrapper object with `source: "eventkit"`, `fidelity: "limited"`, `idWarning`, and `items`. Each item has `eventKitId`, not RemCTL numeric `id`. Never pass `eventKitId` to `info`, `edit`, `done`, `delete`, `link`, `open`, `subtasks`, or any command that expects a numeric ID.
+
+Unavailable in this mode: RemCTL numeric IDs, `--list-id`, table output, sections, synced tags, private rich links, urgent state, template internals, smart-list internals, and exact ID compatibility. If the task needs any of those, fix Full Disk Access for the host process instead of using the fallback.
 
 High-value guardrails:
 

@@ -660,6 +660,102 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload[0]["section"], "Dairy, Eggs & Cheese")
         self.assertEqual(payload[0]["sectionEmoji"], "🥛")
 
+    def test_show_via_eventkit_json_uses_limited_non_chainable_ids(self):
+        bridge_payload = {
+            "status": "ok",
+            "items": [
+                {
+                    "id": 42,
+                    "eventKitId": "EK-1",
+                    "title": "Review issue",
+                    "list": "Work",
+                    "completed": False,
+                    "priority": "none",
+                    "section": "Research",
+                    "tags": ["remctl"],
+                }
+            ],
+        }
+        args = SimpleNamespace(
+            list="Work",
+            list_id=None,
+            completed=False,
+            via_eventkit=True,
+            json=True,
+            format=None,
+            verbose=False,
+        )
+        with (
+            mock.patch.object(self.remctl, "open_db") as open_db,
+            mock.patch.object(self.remctl, "bridge_available", return_value=True),
+            mock.patch.object(self.remctl, "bridge_call", return_value=bridge_payload) as bridge_call,
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+        ):
+            self.remctl.cmd_show(args)
+
+        open_db.assert_not_called()
+        bridge_call.assert_called_once_with({
+            "action": "read",
+            "readMode": "show",
+            "limit": 500,
+            "list": "Work",
+            "completed": False,
+        })
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["source"], "eventkit")
+        self.assertEqual(payload["fidelity"], "limited")
+        self.assertIn("cannot be passed", payload["idWarning"])
+        self.assertEqual(payload["items"][0]["eventKitId"], "EK-1")
+        self.assertNotIn("id", payload["items"][0])
+        self.assertNotIn("section", payload["items"][0])
+        self.assertNotIn("tags", payload["items"][0])
+
+    def test_show_via_eventkit_rejects_numeric_list_id_before_bridge(self):
+        args = SimpleNamespace(
+            list=None,
+            list_id=153,
+            completed=False,
+            via_eventkit=True,
+            json=True,
+            format=None,
+            verbose=False,
+        )
+        with (
+            mock.patch.object(self.remctl, "open_db") as open_db,
+            mock.patch.object(self.remctl, "bridge_call") as bridge_call,
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            self.assertRaises(SystemExit) as raised,
+        ):
+            self.remctl.cmd_show(args)
+
+        self.assertEqual(raised.exception.code, 2)
+        open_db.assert_not_called()
+        bridge_call.assert_not_called()
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(payload["code"], "eventkit_read_unsupported")
+        self.assertIn("numeric list ids", payload["message"])
+
+    def test_today_via_eventkit_rejects_table_output_before_bridge(self):
+        args = SimpleNamespace(
+            no_overdue=False,
+            via_eventkit=True,
+            json=False,
+            format="table",
+            verbose=False,
+        )
+        with (
+            mock.patch.object(self.remctl, "open_db") as open_db,
+            mock.patch.object(self.remctl, "bridge_call") as bridge_call,
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            self.assertRaises(SystemExit) as raised,
+        ):
+            self.remctl.cmd_today(args)
+
+        self.assertEqual(raised.exception.code, 2)
+        open_db.assert_not_called()
+        bridge_call.assert_not_called()
+        self.assertIn("does not support table output", stderr.getvalue())
+
     def test_templates_json_reports_counts_and_existing_public_link(self):
         db = self._template_db()
         try:
@@ -902,6 +998,43 @@ class CliTests(unittest.TestCase):
         self.assertIs(captured["handler"], self.remctl.cmd_today)
         self.assertEqual(args.format, "json")
         self.assertTrue(args.json)
+
+    def test_read_command_parses_eventkit_fallback_flag(self):
+        captured = {}
+
+        def capture(args, handler):
+            captured["args"] = args
+            captured["handler"] = handler
+
+        color_enabled = self.remctl.C.enabled
+        try:
+            with (
+                mock.patch.object(sys, "argv", ["remctl", "today", "--via-eventkit", "--json"]),
+                mock.patch.object(self.remctl, "maybe_run_first_launch_onboarding"),
+                mock.patch.object(self.remctl, "run_handler_with_fallback", side_effect=capture),
+            ):
+                self.remctl.main()
+        finally:
+            self.remctl.C.enabled = color_enabled
+
+        args = captured["args"]
+        self.assertIs(captured["handler"], self.remctl.cmd_today)
+        self.assertTrue(args.via_eventkit)
+        self.assertTrue(args.json)
+
+    def test_show_help_labels_eventkit_mode_as_limited_and_non_default(self):
+        with (
+            mock.patch.object(sys, "argv", ["remctl", "show", "--help"]),
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+            self.assertRaises(SystemExit) as raised,
+        ):
+            self.remctl.main()
+
+        self.assertEqual(raised.exception.code, 0)
+        output = " ".join(stdout.getvalue().split())
+        self.assertIn("--via-eventkit", output)
+        self.assertIn("never the default", output)
+        self.assertIn("no RemCTL numeric ids", output)
 
     def test_list_symbols_html_contact_sheet_embeds_badge_assets(self):
         rows = [
@@ -4142,6 +4275,22 @@ class CliTests(unittest.TestCase):
         ):
             self.remctl.run_handler_with_fallback(args, handler)
         self.assertIn("db unavailable", stderr.getvalue())
+
+    def test_run_handler_with_fallback_suggests_eventkit_without_switching(self):
+        args = SimpleNamespace(cmd="today", json=False, no_overdue=False, format="plain", via_eventkit=False)
+        handler = mock.Mock(side_effect=self.remctl.RemindersDBUnavailable("db unavailable"))
+        with (
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            self.assertRaises(SystemExit) as raised,
+        ):
+            self.remctl.run_handler_with_fallback(args, handler)
+
+        self.assertEqual(raised.exception.code, 1)
+        handler.assert_called_once_with(args)
+        output = stderr.getvalue()
+        self.assertIn("--via-eventkit", output)
+        self.assertIn("not full fidelity", output)
+        self.assertIn("does not return RemCTL numeric ids", output)
 
     def test_fmt_supports_sqlite_row_without_dict_get(self):
         conn = sqlite3.connect(":memory:")
