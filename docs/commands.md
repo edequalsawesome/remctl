@@ -153,7 +153,7 @@ Private rich URLs require public `http` or `https` hosts. RemCTL rejects loopbac
 | Surface | Command | Private? | Notes |
 | --- | --- | --- | --- |
 | Title, notes, due date, priority | `edit --title`, `-n`, `-d`, `-p` | No | EventKit bridge with AppleScript fallback for ordinary fields |
-| Move to another list | `edit -l LIST` or `edit --list-id ID` | No | EventKit bridge; use `--list-id` for exact agent targeting |
+| Move to another list | `edit -l LIST` or `edit --list-id ID` | No | EventKit bridge for ordinary reminders; parent reminders with subtasks use a verified ReminderKit clone-delete fallback and return a new numeric `id` plus `oldId` |
 | Recurrence and normal alarms | `edit --recurrence`, `edit --alarm` | No | EventKit bridge only; verify in `info --json` |
 | Notes URL fallback | `edit --url URL` | No | Appends the URL to notes, not a rich attachment |
 | Rich web URL attachment and real tags | `edit --private --url URL -t tags` | Yes | Additive; does not remove or replace existing rich links |
@@ -209,6 +209,8 @@ remctl delete 23880 --force
 ```
 
 `done --date WHEN` records an explicit completion date instead of "now". It also works on an already-completed reminder to correct the stored completion date. `WHEN` must be an absolute `YYYY-MM-DD` or `YYYY-MM-DD HH:MM`; recurring reminders reject `--date` because plain completion advances the series and EventKit discards a manually supplied completion date.
+
+For parent reminders with subtasks, Reminders rejects an in-place EventKit list move. RemCTL handles that shape by cloning the parent and subtasks into the destination list, verifying the cloned subtask count, then deleting the original. JSON output includes `method: "clone-delete"`, `oldId`, the new `id`, and `subtasksMoved`. Move the parent first, then apply unrelated title/notes/due/private edits to the returned ID.
 
 ## Lists
 

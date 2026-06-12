@@ -4123,6 +4123,96 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload["resolvedList"]["id"], 9)
         self.assertEqual(payload["resolvedList"]["method"], "id")
 
+    def test_cmd_edit_moves_parent_with_subtasks_by_verified_clone_delete(self):
+        reminder = dict(self._FAKE_REMINDER)
+        reminder["Z_PK"] = 1
+        reminder["ZLIST"] = 7
+        children = [
+            {"Z_PK": 2, "ZCKIDENTIFIER": "CHILD-1"},
+            {"Z_PK": 3, "ZCKIDENTIFIER": "CHILD-2"},
+        ]
+        target = {"id": 9, "title": "Projects", "requested": "9", "method": "id", "objectUUID": "LIST-UUID"}
+        args = SimpleNamespace(
+            id=1, json=True, title=None, list=None, list_id=9,
+            notes=None, priority=None, due=None, url=None, recurrence=None,
+            alarm=None, private=False, private_metadata=False, tags=None,
+            grocery=False, section=None, section_id=None, new_section=None,
+            subtask=None, image=None, flagged=None, urgent=None,
+            early_reminder=None, location_title=None, latitude=None,
+            longitude=None, radius=100, proximity="arriving", address=None,
+        )
+        with (
+            mock.patch.object(self.remctl, "open_db", return_value=object()),
+            mock.patch.object(self.remctl, "q_reminder", return_value=reminder),
+            mock.patch.object(
+                self.remctl,
+                "resolve_required_list_target_or_die",
+                return_value=target,
+            ),
+            mock.patch.object(self.remctl, "subtask_rows_for_parent_move", return_value=children) as subtask_rows,
+            mock.patch.object(
+                self.remctl,
+                "clone_reminder_tree_to_list_or_die",
+                return_value={
+                    "status": "updated",
+                    "id": 42,
+                    "oldId": 1,
+                    "list": "Projects",
+                    "objectUUID": "NEW-REMINDER",
+                    "subtasksMoved": 2,
+                    "method": "clone-delete",
+                    "delete": {"status": "deleted"},
+                },
+            ) as clone_move,
+            mock.patch.object(self.remctl, "bridge_call") as bridge_call,
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+        ):
+            self.remctl.cmd_edit(args)
+
+        subtask_rows.assert_called_once_with(mock.ANY, reminder)
+        clone_move.assert_called_once_with(mock.ANY, reminder, target, children)
+        bridge_call.assert_not_called()
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["id"], 42)
+        self.assertEqual(payload["oldId"], 1)
+        self.assertEqual(payload["method"], "clone-delete")
+        self.assertEqual(payload["subtasksMoved"], 2)
+        self.assertTrue(payload["originalDeleted"])
+        self.assertEqual(payload["resolvedList"]["id"], 9)
+
+    def test_cmd_edit_rejects_parent_with_subtasks_move_plus_other_edits(self):
+        reminder = dict(self._FAKE_REMINDER)
+        reminder["Z_PK"] = 1
+        reminder["ZLIST"] = 7
+        args = SimpleNamespace(
+            id=1, json=True, title="New title", list=None, list_id=9,
+            notes=None, priority=None, due=None, url=None, recurrence=None,
+            alarm=None, private=False, private_metadata=False, tags=None,
+            grocery=False, section=None, section_id=None, new_section=None,
+            subtask=None, image=None, flagged=None, urgent=None,
+            early_reminder=None, location_title=None, latitude=None,
+            longitude=None, radius=100, proximity="arriving", address=None,
+        )
+        with (
+            mock.patch.object(self.remctl, "open_db", return_value=object()),
+            mock.patch.object(self.remctl, "q_reminder", return_value=reminder),
+            mock.patch.object(
+                self.remctl,
+                "resolve_required_list_target_or_die",
+                return_value={"id": 9, "title": "Projects", "requested": "9", "method": "id", "objectUUID": "LIST-UUID"},
+            ),
+            mock.patch.object(self.remctl, "subtask_rows_for_parent_move", return_value=[{"Z_PK": 2, "ZCKIDENTIFIER": "CHILD-1"}]),
+            mock.patch.object(self.remctl, "clone_reminder_tree_to_list_or_die") as clone_move,
+            mock.patch.object(self.remctl, "bridge_call") as bridge_call,
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            self.assertRaises(SystemExit),
+        ):
+            self.remctl.cmd_edit(args)
+
+        clone_move.assert_not_called()
+        bridge_call.assert_not_called()
+        self.assertIn("cannot currently be combined with other edits", stderr.getvalue())
+
     def test_cmd_edit_resolves_private_section_against_destination_list(self):
         reminder = self._FAKE_REMINDER
         args = SimpleNamespace(

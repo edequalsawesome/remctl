@@ -226,7 +226,7 @@ Private mode covers the parts of Reminders that EventKit does not expose:
 
 A few rules keep this safe and predictable:
 
-- `edit -l/--list` and `edit --list-id` are normal EventKit moves; they do not require `--private`.
+- `edit -l/--list` and `edit --list-id` are normal EventKit moves for ordinary reminders. Parent reminders with subtasks use a verified ReminderKit clone-delete fallback because EventKit rejects moving only the parent.
 - Shared-list assignment uses `--private --assign USER`; `USER` may be a unique name, email/phone address, numeric sharee ID, object UUID, or `me`. Use `remctl sharees LIST --json` before assigning when scripting.
 - Location alarms still require the `--private` guardrail, but RemCTL saves them through `remctl-bridge` because EventKit structured-location alarms persist correctly on current macOS.
 - `--private --url` and rich subtask URLs must be public `http` or `https` hosts. Loopback, `.local`, private, link-local, multicast, reserved, and unresolved hosts are rejected before writing.
