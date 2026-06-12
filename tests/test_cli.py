@@ -380,7 +380,10 @@ class CliTests(unittest.TestCase):
             "ZISPINNEDBYCURRENTUSER INTEGER, ZPINNEDDATE REAL, "
             "ZSHOULDCATEGORIZEGROCERYITEMS INTEGER, ZSHOULDAUTOCATEGORIZEITEMS INTEGER, "
             "ZSHOULDSUGGESTCONVERSIONTOGROCERYLIST INTEGER, ZGROCERYLOCALEID TEXT, "
-            "ZAUTOCATEGORIZATIONLOCALCORRECTIONSCHECKSUM TEXT, ZAUTOCATEGORIZATIONLOCALCORRECTIONSASDATA BLOB)"
+            "ZAUTOCATEGORIZATIONLOCALCORRECTIONSCHECKSUM TEXT, ZAUTOCATEGORIZATIONLOCALCORRECTIONSASDATA BLOB, "
+            "ZCACHEDGROCERYITEMSCOUNT INTEGER, "
+            "ZMEMBERSHIPSOFREMINDERSINPREDEFINEDGROCERYSECTIONSCHECKSUM TEXT, "
+            "ZMEMBERSHIPSOFREMINDERSINPREDEFINEDGROCERYSECTIONSASDATA BLOB)"
         )
         for idx, name in enumerate(names, start=1):
             grocery_locale = grocery_locales.get(name)
@@ -487,12 +490,18 @@ class CliTests(unittest.TestCase):
             "ZBADGEEMBLEM": "{\"Emoji\" : \"\\ud83d\\udccc\"}",
             "ZCOLOR": b"not-a-color",
             "ZSHOULDCATEGORIZEGROCERYITEMS": 0,
+            "ZCACHEDGROCERYITEMSCOUNT": 3,
+            "ZMEMBERSHIPSOFREMINDERSINPREDEFINEDGROCERYSECTIONSASDATA_LENGTH": 128,
+            "ZMEMBERSHIPSOFREMINDERSINPREDEFINEDGROCERYSECTIONSCHECKSUM": "checksum",
         }
 
         payload = self.remctl.list_to_dict(row)
 
         self.assertEqual(payload["badge"]["emoji"], "\U0001f4cc")
         self.assertEqual(payload["color"]["hex"], "#007AFF")
+        self.assertEqual(payload["grocery"]["cachedItemsCount"], 3)
+        self.assertEqual(payload["grocery"]["predefinedSectionsMembershipLength"], 128)
+        self.assertEqual(payload["grocery"]["predefinedSectionsChecksum"], "checksum")
 
     def test_lists_json_reports_grocery_metadata(self):
         db = self._list_db(["Groceries", "Work"], grocery_locales={"Groceries": "en_US"})
@@ -4870,6 +4879,66 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload["earlyReminder"]["unitCode"], 0)
         self.assertEqual(payload["earlyReminder"]["count"], -15)
         self.assertEqual(payload["earlyReminders"][0]["identifier"], "DELTA-1")
+
+    def test_early_reminder_serializes_from_delta_alert_table_when_blob_missing(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        reminder_uuid = uuid.UUID("339DDE31-8F53-46BD-8469-CF42CA5C8CAB")
+        alert_uuid = uuid.UUID("2C0EDC64-6294-488A-814F-46B44C8ABBD3")
+        conn.execute(
+            "CREATE TABLE ZREMCDOBJECT ("
+            "Z_PK INTEGER, ZURL TEXT, ZREMINDER2 INTEGER, ZMARKEDFORDELETION INTEGER)"
+        )
+        conn.execute(
+            "CREATE TABLE ZREMCDDUEDATEDELTAALERT ("
+            "Z_PK INTEGER, ZIDENTIFIER BLOB, ZREMINDERIDENTIFIER BLOB, "
+            "ZDUEDATEDELTAUNIT INTEGER, ZDUEDATEDELTACOUNT INTEGER, "
+            "ZMINIMUMSUPPORTEDAPPVERSION INTEGER, ZCREATIONDATE REAL, "
+            "ZACKNOWLEDGEDDATE REAL, ZSORTORDER INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO ZREMCDDUEDATEDELTAALERT VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (1, alert_uuid.bytes, reminder_uuid.bytes, 1, -1, 0, 800786817.653489, None, 1),
+        )
+        row = conn.execute(
+            "SELECT 42 AS Z_PK, 'Taxes' AS ZTITLE, NULL AS ZNOTES, "
+            "0 AS ZCOMPLETED, 0 AS ZFLAGGED, 0 AS ZPRIORITY, 0 AS ZISURGENTSTATEENABLEDFORCURRENTUSER, "
+            "NULL AS ZDUEDATEDELTAALERTSDATA, 800798400 AS ZDUEDATE, NULL AS ZALLDAY, NULL AS ZCOMPLETIONDATE, "
+            "NULL AS ZCREATIONDATE, NULL AS ZPARENTREMINDER, 1 AS ZLIST, "
+            "NULL AS ZICSURL, ? AS ZCKIDENTIFIER, 'Work' AS list_name, "
+            "NULL AS recurrence_frequency, NULL AS recurrence_interval, "
+            "NULL AS recurrence_count, NULL AS recurrence_end_date, "
+            "NULL AS recurrence_days_of_week, NULL AS recurrence_days_of_month, "
+            "NULL AS recurrence_months_of_year, NULL AS recurrence_days_of_year, "
+            "NULL AS recurrence_weeks_of_year, NULL AS recurrence_set_positions",
+            (str(reminder_uuid),),
+        ).fetchone()
+
+        payload = self.remctl.to_dict(row, db=conn, _sc={42: 0}, _ht={42: []})
+        formatted = self.remctl.fmt(row, db=conn, verbose=True, _sc={42: 0}, _ht={42: []})
+        conn.close()
+
+        self.assertEqual(payload["earlyReminder"]["label"], "1 hour before")
+        self.assertEqual(payload["earlyReminder"]["identifier"], str(alert_uuid).upper())
+        self.assertIn("Early: 1 hour before", self.remctl._strip_ansi(formatted))
+
+    def test_existing_early_reminder_identifiers_fall_back_to_delta_alert_table(self):
+        row = {"Z_PK": 1, "ZDUEDATEDELTAALERTSDATA": None}
+        alert_row = {
+            "ZIDENTIFIER": uuid.UUID("2C0EDC64-6294-488A-814F-46B44C8ABBD3").bytes,
+            "ZDUEDATEDELTAUNIT": 0,
+            "ZDUEDATEDELTACOUNT": -15,
+            "ZMINIMUMSUPPORTEDAPPVERSION": 0,
+            "ZCREATIONDATE": None,
+            "ZACKNOWLEDGEDDATE": None,
+        }
+        with (
+            mock.patch.object(self.remctl, "q_reminder_by_identifier", return_value=row),
+            mock.patch.object(self.remctl, "q_due_date_delta_alerts", return_value=[alert_row]),
+        ):
+            identifiers = self.remctl.early_reminder_identifiers_for_reminder(object(), "REMINDER-ID")
+
+        self.assertEqual(identifiers, ["2C0EDC64-6294-488A-814F-46B44C8ABBD3"])
 
 
 if __name__ == "__main__":

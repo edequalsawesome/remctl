@@ -560,10 +560,14 @@ def list_select_columns(db):
         "ZSHOULDSUGGESTCONVERSIONTOGROCERYLIST",
         "ZGROCERYLOCALEID",
         "ZAUTOCATEGORIZATIONLOCALCORRECTIONSCHECKSUM",
+        "ZCACHEDGROCERYITEMSCOUNT",
+        "ZMEMBERSHIPSOFREMINDERSINPREDEFINEDGROCERYSECTIONSCHECKSUM",
     ]
     columns.extend(column for column in optional_columns if column in table_columns)
     if "ZAUTOCATEGORIZATIONLOCALCORRECTIONSASDATA" in table_columns:
         columns.append("length(ZAUTOCATEGORIZATIONLOCALCORRECTIONSASDATA) AS ZAUTOCATEGORIZATIONLOCALCORRECTIONSASDATA_LENGTH")
+    if "ZMEMBERSHIPSOFREMINDERSINPREDEFINEDGROCERYSECTIONSASDATA" in table_columns:
+        columns.append("length(ZMEMBERSHIPSOFREMINDERSINPREDEFINEDGROCERYSECTIONSASDATA) AS ZMEMBERSHIPSOFREMINDERSINPREDEFINEDGROCERYSECTIONSASDATA_LENGTH")
     return columns
 
 
@@ -807,6 +811,9 @@ def grocery_list_payload(row):
             "ZSHOULDSUGGESTCONVERSIONTOGROCERYLIST",
             "ZGROCERYLOCALEID",
             "ZAUTOCATEGORIZATIONLOCALCORRECTIONSASDATA_LENGTH",
+            "ZCACHEDGROCERYITEMSCOUNT",
+            "ZMEMBERSHIPSOFREMINDERSINPREDEFINEDGROCERYSECTIONSASDATA_LENGTH",
+            "ZMEMBERSHIPSOFREMINDERSINPREDEFINEDGROCERYSECTIONSCHECKSUM",
         )
     ):
         return None
@@ -825,6 +832,15 @@ def grocery_list_payload(row):
     corrections_checksum = _row_get(row, "ZAUTOCATEGORIZATIONLOCALCORRECTIONSCHECKSUM")
     if corrections_checksum:
         payload["localCorrectionsChecksum"] = corrections_checksum
+    cached_count = _row_get(row, "ZCACHEDGROCERYITEMSCOUNT")
+    if cached_count is not None:
+        payload["cachedItemsCount"] = cached_count
+    predefined_length = _row_get(row, "ZMEMBERSHIPSOFREMINDERSINPREDEFINEDGROCERYSECTIONSASDATA_LENGTH")
+    if predefined_length is not None:
+        payload["predefinedSectionsMembershipLength"] = predefined_length
+    predefined_checksum = _row_get(row, "ZMEMBERSHIPSOFREMINDERSINPREDEFINEDGROCERYSECTIONSCHECKSUM")
+    if predefined_checksum:
+        payload["predefinedSectionsChecksum"] = predefined_checksum
     return payload
 
 
@@ -1280,6 +1296,15 @@ def uuid_from_blob(value):
         return None
 
 
+def uuid_blob_from_string(value):
+    if not value:
+        return None
+    try:
+        return uuid.UUID(str(value)).bytes
+    except (TypeError, ValueError):
+        return None
+
+
 def template_deep_link(object_uuid):
     return f"x-apple-reminderkit://REMCDTemplate/{object_uuid}" if object_uuid else None
 
@@ -1717,6 +1742,27 @@ def q_hashtags(db, pk):
         "ON o.ZHASHTAGLABEL = h.Z_PK WHERE o.ZREMINDER3 = ?", (pk,)
     ).fetchall()
 
+
+def q_due_date_delta_alerts(db, reminder_ckid):
+    try:
+        has_table = table_exists(db, "ZREMCDDUEDATEDELTAALERT")
+    except AttributeError:
+        return []
+    if not has_table:
+        return []
+    reminder_identifier = uuid_blob_from_string(reminder_ckid)
+    if not reminder_identifier:
+        return []
+    return db.execute(
+        "SELECT ZIDENTIFIER, ZDUEDATEDELTAUNIT, ZDUEDATEDELTACOUNT, "
+        "ZMINIMUMSUPPORTEDAPPVERSION, ZCREATIONDATE, ZACKNOWLEDGEDDATE "
+        "FROM ZREMCDDUEDATEDELTAALERT "
+        "WHERE ZREMINDERIDENTIFIER = ? "
+        "ORDER BY COALESCE(ZSORTORDER, 0), Z_PK",
+        (reminder_identifier,),
+    ).fetchall()
+
+
 def attachment_rows_to_json(rows):
     return [
         {"filename": row["ZFILENAME"], "type": row["ZATTACHMENTTYPERAWVALUE"]}
@@ -1820,6 +1866,43 @@ def alarm_rows_to_json(rows):
                 alarm["type"] = "unknown"
         alarms.append(alarm)
     return alarms
+
+
+def due_date_delta_alert_rows_to_json(rows):
+    alerts = []
+    for row in rows:
+        try:
+            unit_raw = int(row["ZDUEDATEDELTAUNIT"])
+            count = int(row["ZDUEDATEDELTACOUNT"])
+        except (TypeError, ValueError, KeyError, IndexError):
+            continue
+        singular, plural = DUE_DATE_DELTA_UNITS.get(unit_raw, ("unknown", "unknown"))
+        value = abs(count)
+        unit_name = singular if value == 1 else plural
+        direction = "before" if count < 0 else "after"
+        alert = {
+            "unit": unit_name,
+            "unitCode": unit_raw,
+            "count": count,
+            "value": value,
+            "direction": direction,
+            "label": f"{value} {unit_name} {direction}",
+        }
+        identifier = uuid_from_blob(_row_get(row, "ZIDENTIFIER"))
+        if identifier:
+            alert["identifier"] = identifier
+        creation_date = _row_get(row, "ZCREATIONDATE")
+        if creation_date:
+            alert["creationDate"] = ts(creation_date).isoformat()
+        acknowledged_date = _row_get(row, "ZACKNOWLEDGEDDATE")
+        if acknowledged_date:
+            alert["acknowledgedDate"] = ts(acknowledged_date).isoformat()
+        minimum_supported = _row_get(row, "ZMINIMUMSUPPORTEDAPPVERSION")
+        if minimum_supported is not None:
+            alert["minimumSupportedAppVersion"] = minimum_supported
+        alerts.append(alert)
+    return alerts
+
 
 def _same_datetime_second(left, right):
     if not left or not right:
@@ -2204,6 +2287,11 @@ def fmt(r, db=None, verbose=False, indent="", _sc=None, _ht=None):
         if all_day:
             parts.append(f"{indent}    All-day: {C.cyan('Yes')}")
         early_reminders = due_date_delta_alerts_from_row(r, ts=ts)
+        if not early_reminders and db is not None and _item_has(r, "ZCKIDENTIFIER"):
+            try:
+                early_reminders = due_date_delta_alert_rows_to_json(q_due_date_delta_alerts(db, r["ZCKIDENTIFIER"]))
+            except (sqlite3.Error, ValueError):
+                early_reminders = []
         if early_reminders:
             labels = ", ".join(item["label"] for item in early_reminders)
             parts.append(f"{indent}    Early: {C.cyan(labels)}")
@@ -2232,6 +2320,11 @@ def to_dict(r, db=None, section=None, _sc=None, _ht=None):
         assignment = assignment_to_dict(q_assignment(db, r["Z_PK"]))
         if assignment:
             payload["assignment"] = assignment
+        if not payload.get("earlyReminders"):
+            alerts = due_date_delta_alert_rows_to_json(q_due_date_delta_alerts(db, _row_get(r, "ZCKIDENTIFIER")))
+            if alerts:
+                payload["earlyReminder"] = alerts[0]
+                payload["earlyReminders"] = alerts
     return payload
 
 def reminders_to_dicts(items, db=None, memberships=None):
@@ -2251,6 +2344,11 @@ def reminders_to_dicts(items, db=None, memberships=None):
                 assignment = assignment_to_dict(q_assignment(db, item["Z_PK"]))
                 if assignment:
                     payload["assignment"] = assignment
+                if not payload.get("earlyReminders"):
+                    alerts = due_date_delta_alert_rows_to_json(q_due_date_delta_alerts(db, _row_get(item, "ZCKIDENTIFIER")))
+                    if alerts:
+                        payload["earlyReminder"] = alerts[0]
+                        payload["earlyReminders"] = alerts
     return payloads
 
 # ── Table Format ─────────────────────────────────────────────────────────────
@@ -3167,11 +3265,21 @@ def early_reminder_identifiers_for_reminder(db, reminder_ckid):
         row = None
     if not row:
         return []
-    return [
+    identifiers = [
         item["identifier"]
         for item in due_date_delta_alerts_from_row(row, ts=ts)
         if item.get("identifier")
     ]
+    if identifiers:
+        return identifiers
+    try:
+        return [
+            item["identifier"]
+            for item in due_date_delta_alert_rows_to_json(q_due_date_delta_alerts(db, reminder_ckid))
+            if item.get("identifier")
+        ]
+    except (sqlite3.Error, ValueError):
+        return []
 
 
 def location_alarm_exists(reminder_ckid, *, title=None, latitude=None, longitude=None):
