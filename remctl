@@ -44,7 +44,9 @@ try:
 except ImportError:
     _cal = None
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
+PRIVATE_PROTOCOL_VERSION = 1
+_private_protocol_probe = None
 
 APPLE_EPOCH = 978307200
 STORE_DIR = resolve_store_dir()
@@ -1929,7 +1931,8 @@ def q_reminders(db, list_pk=None, completed=False, parent_pk=None, top_level=Fal
     elif top_level: c.append("(r.ZPARENTREMINDER IS NULL OR r.ZPARENTREMINDER = 0)")
     return db.execute(
         f"SELECT {rem_cols(db)} FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l "
-        f"ON r.ZLIST = l.Z_PK WHERE {' AND '.join(c)} ORDER BY r.Z_PK LIMIT ?",
+        f"ON r.ZLIST = l.Z_PK WHERE {' AND '.join(c)} AND l.Z_PK IS NOT NULL "
+        f"ORDER BY r.Z_PK LIMIT ?",
         params + [limit]
     ).fetchall()
 
@@ -1956,7 +1959,8 @@ def q_reminder(db, pk):
     return db.execute(
         f"SELECT {rem_cols(db)} FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l "
         f"ON r.ZLIST = l.Z_PK "
-        f"WHERE r.Z_PK = ? AND r.ZMARKEDFORDELETION = 0 AND r.ZACCOUNT IS NOT NULL",
+        f"WHERE r.Z_PK = ? AND r.ZMARKEDFORDELETION = 0 AND r.ZACCOUNT IS NOT NULL "
+        f"AND l.Z_PK IS NOT NULL",
         (pk,)
     ).fetchone()
 
@@ -1967,8 +1971,32 @@ def q_reminder_by_identifier(db, identifier):
         f"SELECT {rem_cols(db)} FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l "
         f"ON r.ZLIST = l.Z_PK "
         f"WHERE lower(r.ZCKIDENTIFIER) = lower(?) AND r.ZMARKEDFORDELETION = 0 AND r.ZACCOUNT IS NOT NULL "
-        f"ORDER BY r.Z_PK DESC LIMIT 1",
+        f"AND l.Z_PK IS NOT NULL ORDER BY r.Z_PK DESC LIMIT 1",
         (identifier,)
+    ).fetchone()
+
+
+def q_recent_reminder_by_title(db, title, *, list_pk=None, within_seconds=10):
+    if not title:
+        return None
+    cutoff = to_ts(datetime.now()) - within_seconds
+    clauses = [
+        "r.ZMARKEDFORDELETION = 0",
+        "r.ZACCOUNT IS NOT NULL",
+        "l.Z_PK IS NOT NULL",
+        "lower(r.ZTITLE) = lower(?)",
+        "r.ZCREATIONDATE IS NOT NULL",
+        "r.ZCREATIONDATE >= ?",
+    ]
+    params = [title, cutoff]
+    if list_pk is not None:
+        clauses.append("r.ZLIST = ?")
+        params.append(list_pk)
+    return db.execute(
+        f"SELECT {rem_cols(db)} FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l "
+        f"ON r.ZLIST = l.Z_PK WHERE {' AND '.join(clauses)} "
+        f"ORDER BY r.Z_PK DESC LIMIT 1",
+        params,
     ).fetchone()
 
 def q_subtask_count(db, pk):
@@ -2131,7 +2159,8 @@ def q_rich_link(db, pk):
 def q_hashtags(db, pk):
     return db.execute(
         "SELECT h.ZNAME FROM ZREMCDOBJECT o JOIN ZREMCDHASHTAGLABEL h "
-        "ON o.ZHASHTAGLABEL = h.Z_PK WHERE o.ZREMINDER3 = ?", (pk,)
+        "ON o.ZHASHTAGLABEL = h.Z_PK WHERE o.ZREMINDER3 = ? AND o.ZMARKEDFORDELETION = 0",
+        (pk,),
     ).fetchall()
 
 
@@ -3132,6 +3161,36 @@ def fail_bridge_write(result, *, operation):
     sys.exit(1)
 
 
+NUDGE_PREP_WARNING = (
+    "Warning: could not prepare the due-date sync workaround; "
+    "the change may not push to iCloud immediately"
+)
+
+
+def rollback_nudged_due(reminder_ckid, original_dt, due_all_day):
+    if not reminder_ckid or original_dt is None:
+        return None
+    data = {"action": "update", "id": reminder_ckid, "due": original_dt.isoformat()}
+    if due_all_day:
+        data["allDay"] = True
+    result = bridge_call_result(data)
+    if bridge_result_ok(result, "updated"):
+        return None
+    offset = "1 day" if due_all_day else "1 hour"
+    return (
+        f"Warning: reminder due date may be wrong by {offset} "
+        f"(reminder id {reminder_ckid}); check it in Reminders."
+    )
+
+
+def warn_if_nudged_due_stranded(reminder, nudge_succeeded, original_dt, due_all_day):
+    if not nudge_succeeded:
+        return
+    warning = rollback_nudged_due(reminder["ZCKIDENTIFIER"], original_dt, due_all_day)
+    if warning:
+        print(warning, file=sys.stderr)
+
+
 EVENTKIT_READ_ID_WARNING = (
     "eventKitId is not a RemCTL numeric id and cannot be passed to info, edit, "
     "done, delete, link, open, subtasks, or any other numeric-id command."
@@ -3518,6 +3577,31 @@ def private_create_group_call(request, name, attempts=3):
     return last_result
 
 
+def _probe_private_protocol_version():
+    global _private_protocol_probe
+    if _private_protocol_probe is not None:
+        return _private_protocol_probe
+    result = private_call_result({"action": "protocol_version"}, timeout=5)
+    payload = result.get("payload") if isinstance(result, dict) else None
+    if not isinstance(payload, dict):
+        _private_protocol_probe = {"ok": False, "reason": "broken"}
+        return _private_protocol_probe
+    version = payload.get("protocolVersion")
+    if payload.get("status") == "ok" and isinstance(version, int):
+        _private_protocol_probe = {"ok": True, "version": version}
+        return _private_protocol_probe
+    message = payload.get("message", "")
+    if payload.get("status") == "error" and "Unknown action" in message:
+        _private_protocol_probe = {"ok": False, "reason": "outdated", "version": 0}
+        return _private_protocol_probe
+    _private_protocol_probe = {
+        "ok": False,
+        "reason": "broken",
+        "message": message or "private helper protocol check failed",
+    }
+    return _private_protocol_probe
+
+
 def require_private_metadata(a=None):
     if not private_metadata_enabled(a):
         print(
@@ -3531,6 +3615,22 @@ def require_private_metadata(a=None):
             file=sys.stderr,
         )
         sys.exit(1)
+    probe = _probe_private_protocol_version()
+    if probe.get("ok") and probe.get("version", 0) >= PRIVATE_PROTOCOL_VERSION:
+        return
+    if probe.get("reason") == "outdated":
+        version = probe.get("version", 0)
+        print(
+            f"Error: remctl-private is outdated (protocol {version} < required {PRIVATE_PROTOCOL_VERSION}); re-run install.sh to rebuild.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    message = probe.get("message")
+    if message:
+        print(f"Error: {message}", file=sys.stderr)
+        sys.exit(1)
+    print("Error: remctl-private protocol check failed.", file=sys.stderr)
+    sys.exit(1)
 
 
 def split_csv(value):
@@ -3666,7 +3766,8 @@ def parse_subtask_specs(values):
             normalized["notes"] = spec["notes"]
 
         if spec.get("due"):
-            dt = parse_due(str(spec["due"]))
+            due_text = str(spec["due"])
+            dt = parse_due(due_text)
             if not dt:
                 print(
                     f"Error: could not parse subtask due date {spec['due']!r}. "
@@ -3675,6 +3776,8 @@ def parse_subtask_specs(values):
                 )
                 sys.exit(1)
             normalized["due"] = dt.isoformat()
+            if due_spec_is_all_day(due_text):
+                normalized["allDay"] = True
 
         if spec.get("priority"):
             priority = str(spec["priority"]).lower()
@@ -3799,6 +3902,8 @@ def bridge_update_subtask(subtask_id, spec):
         data["notes"] = spec["notes"]
     if "due" in spec:
         data["due"] = spec["due"]
+        if spec.get("allDay"):
+            data["allDay"] = True
     if "priority" in spec:
         data["priority"] = pm[spec["priority"]]
     if "alarm" in spec:
@@ -4007,18 +4112,52 @@ IDEMPOTENT_PRIVATE_ACTIONS = {
 }
 
 
-def private_action(data):
+def fail_private_add_partial(partial_context, failed_action, error_message):
+    if partial_context.get("json"):
+        payload = {
+            "status": "partial",
+            "id": partial_context.get("id", ""),
+            "failed": failed_action,
+            "error": error_message,
+        }
+        numeric_id = partial_context.get("numericId")
+        if numeric_id is not None:
+            payload["numericId"] = numeric_id
+        completed = partial_context.get("completed")
+        if completed:
+            payload["completed"] = completed
+        print(json.dumps(payload))
+    else:
+        numeric_id = partial_context.get("numericId")
+        if numeric_id is not None:
+            ident = f"#{numeric_id}"
+        else:
+            ident = partial_context.get("id") or "(unknown)"
+        print(
+            f"Created reminder {ident} but failed to apply {failed_action}; "
+            "re-run edit to finish. Do NOT re-run add (would duplicate).",
+            file=sys.stderr,
+        )
+        print(f"Error: {error_message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def private_action(data, partial_context=None):
     attempts = 3 if data.get("action") in IDEMPOTENT_PRIVATE_ACTIONS else 1
     result = None
     for attempt in range(attempts):
         result = private_call(data)
         if result and result.get("status") == "updated":
+            if partial_context is not None:
+                partial_context.setdefault("completed", []).append(data.get("action", "private_action"))
             return result
         if not private_helper_error_is_transient(result) or attempt == attempts - 1:
             break
         time.sleep(0.5)
     if not result or result.get("status") != "updated":
         message = result.get("message") if isinstance(result, dict) else "private helper failed"
+        if partial_context is not None:
+            fail_private_add_partial(partial_context, data.get("action", "private_action"), message)
         print(f"Error: {message}", file=sys.stderr)
         sys.exit(1)
     return result
@@ -4152,7 +4291,8 @@ def emit_clone_delete_move_result(args, move_result, target_list_ref):
         print(f"Subtasks: {move_result['subtasksMoved']}")
 
 
-def private_location_action(data):
+def private_location_action(data, partial_context=None):
+    action_name = data.get("action", "add_location_alarm")
     if bridge_available():
         bridge_payload = {
             "action": "update",
@@ -4165,13 +4305,17 @@ def private_location_action(data):
         }
         result = bridge_call(bridge_payload)
         if result and result.get("status") == "updated":
+            if partial_context is not None:
+                partial_context.setdefault("completed", []).append(action_name)
             return {
                 "status": "updated",
-                "action": "add_location_alarm",
+                "action": action_name,
                 "source": "eventkit_bridge",
                 "locationTitle": data.get("title"),
             }
         message = result.get("message") if isinstance(result, dict) else "remctl-bridge failed"
+        if partial_context is not None:
+            fail_private_add_partial(partial_context, action_name, message)
         print(f"Error: {message}", file=sys.stderr)
         sys.exit(1)
 
@@ -4179,6 +4323,8 @@ def private_location_action(data):
     for attempt in range(3):
         result = private_call(data)
         if result and result.get("status") == "updated":
+            if partial_context is not None:
+                partial_context.setdefault("completed", []).append(action_name)
             return result
         if private_helper_error_is_transient(result):
             for _ in range(8):
@@ -4188,9 +4334,11 @@ def private_location_action(data):
                     latitude=data.get("latitude"),
                     longitude=data.get("longitude"),
                 ):
+                    if partial_context is not None:
+                        partial_context.setdefault("completed", []).append(action_name)
                     return {
                         "status": "updated",
-                        "action": "add_location_alarm",
+                        "action": action_name,
                         "verifiedAfterTransientError": True,
                         "warning": result.get("message") if isinstance(result, dict) else "private helper failed",
                     }
@@ -4199,6 +4347,8 @@ def private_location_action(data):
                 continue
         break
     message = result.get("message") if isinstance(result, dict) else "private helper failed"
+    if partial_context is not None:
+        fail_private_add_partial(partial_context, action_name, message)
     print(f"Error: {message}", file=sys.stderr)
     sys.exit(1)
 
@@ -4557,7 +4707,7 @@ def wait_for_grocery_section(list_pk, reminder_ckid, attempts=24, delay=0.25):
     return None
 
 
-def apply_private_grocery_categorization(db, list_pk, reminder_ckids):
+def apply_private_grocery_categorization(db, list_pk, reminder_ckids, partial_context=None):
     require_private_metadata(SimpleNamespace(private=True, private_metadata=False))
     require_grocery_list_target(db, list_pk)
     ckid = q_list_ckid(db, list_pk)
@@ -4633,10 +4783,28 @@ def apply_private_grocery_categorization(db, list_pk, reminder_ckids):
         }
 
     print(f"Error: {message}", file=sys.stderr)
+    if partial_context is not None:
+        fail_private_add_partial(partial_context, "categorize_grocery_items", message)
     sys.exit(1)
 
 
-def apply_private_changes(reminder_ckid, a, db=None, list_pk=None):
+def validate_private_add_ready(a, db, list_pk):
+    if getattr(a, "section", None) or getattr(a, "section_id", None):
+        resolve_section_ckid(
+            db,
+            list_pk,
+            section_name=getattr(a, "section", None),
+            section_id=getattr(a, "section_id", None),
+        )
+    if getattr(a, "assign", None):
+        if list_pk is None:
+            print("Error: --assign requires a target shared list via -l/--list or --list-id.", file=sys.stderr)
+            sys.exit(1)
+        resolve_sharee_or_die(db, list_pk, a.assign)
+        resolve_assignment_originator_or_die(db, list_pk)
+
+
+def apply_private_changes(reminder_ckid, a, db=None, list_pk=None, partial_context=None):
     require_private_metadata(a)
     validate_tag_replacement_args(a)
     results = []
@@ -4660,7 +4828,7 @@ def apply_private_changes(reminder_ckid, a, db=None, list_pk=None):
             "action": "set_tags",
             "id": reminder_ckid,
             "tags": replacement_tags,
-        }))
+        }, partial_context=partial_context))
 
     if urls or tags:
         results.append(private_action({
@@ -4668,7 +4836,7 @@ def apply_private_changes(reminder_ckid, a, db=None, list_pk=None):
             "id": reminder_ckid,
             "urls": urls,
             "tags": tags,
-        }))
+        }, partial_context=partial_context))
 
     if getattr(a, "section", None) or getattr(a, "section_id", None):
         if db is None:
@@ -4683,22 +4851,38 @@ def apply_private_changes(reminder_ckid, a, db=None, list_pk=None):
             "action": "assign_section",
             "id": reminder_ckid,
             "sectionId": section_id,
-        }))
+        }, partial_context=partial_context))
 
     if getattr(a, "new_section", None):
+        if db is None:
+            db = open_db()
+        if list_pk is None:
+            reminder_row = q_reminder_by_identifier(db, reminder_ckid)
+            if reminder_row is not None:
+                list_pk = reminder_row["ZLIST"]
+        existing_section_ids = []
+        if list_pk is not None:
+            existing_section_ids = [
+                row["ZCKIDENTIFIER"] for row in q_sections(db, list_pk) if row["ZCKIDENTIFIER"]
+            ]
         results.append(private_action({
             "action": "add_section_and_assign",
             "id": reminder_ckid,
             "name": a.new_section,
-        }))
+            "existingSectionIds": existing_section_ids,
+        }, partial_context=partial_context))
 
     subtasks = parse_subtask_specs(getattr(a, "subtask", None))
     if subtasks:
+        private_subtasks = [
+            {key: value for key, value in spec.items() if key != "allDay"}
+            for spec in subtasks
+        ]
         subtask_result = private_action({
             "action": "add_subtasks",
             "id": reminder_ckid,
-            "subtasks": subtasks,
-        })
+            "subtasks": private_subtasks,
+        }, partial_context=partial_context)
         bridge_updates = []
         child_private_updates = []
         for spec, subtask in zip(subtasks, subtask_result.get("subtasks", [])):
@@ -4719,7 +4903,10 @@ def apply_private_changes(reminder_ckid, a, db=None, list_pk=None):
                         "status": bridge_update.get("status"),
                     })
         if subtask_specs_need_bridge(subtasks) and len(bridge_updates) < sum(1 for spec in subtasks if subtask_specs_need_bridge([spec])):
-            print("Error: private helper did not return subtask IDs for bridge metadata updates.", file=sys.stderr)
+            message = "private helper did not return subtask IDs for bridge metadata updates."
+            if partial_context is not None:
+                fail_private_add_partial(partial_context, "add_subtasks", message)
+            print(f"Error: {message}", file=sys.stderr)
             sys.exit(1)
         if bridge_updates:
             subtask_result["bridgeUpdates"] = bridge_updates
@@ -4734,7 +4921,7 @@ def apply_private_changes(reminder_ckid, a, db=None, list_pk=None):
             "id": reminder_ckid,
             "files": [],
             "images": images,
-        }))
+        }, partial_context=partial_context))
 
     flagged_value = getattr(a, "flagged", None)
     if flagged_value is None and getattr(a, "flag", False):
@@ -4744,14 +4931,14 @@ def apply_private_changes(reminder_ckid, a, db=None, list_pk=None):
             "action": "set_flagged",
             "id": reminder_ckid,
             "flagged": bool(flagged_value),
-        }))
+        }, partial_context=partial_context))
 
     if getattr(a, "urgent", None) is not None:
         results.append(private_action({
             "action": "set_urgent",
             "id": reminder_ckid,
             "urgent": bool(a.urgent),
-        }))
+        }, partial_context=partial_context))
 
     early_reminder = getattr(a, "early_reminder", None)
     if early_reminder is not None:
@@ -4768,11 +4955,14 @@ def apply_private_changes(reminder_ckid, a, db=None, list_pk=None):
         else:
             payload["unit"] = early["unit"]
             payload["count"] = early["count"]
-        results.append(private_action(payload))
+        results.append(private_action(payload, partial_context=partial_context))
 
     if getattr(a, "latitude", None) is not None or getattr(a, "longitude", None) is not None:
         if getattr(a, "latitude", None) is None or getattr(a, "longitude", None) is None:
-            print("Error: location alarms require both --latitude and --longitude", file=sys.stderr)
+            message = "location alarms require both --latitude and --longitude"
+            if partial_context is not None:
+                fail_private_add_partial(partial_context, "add_location_alarm", message)
+            print(f"Error: {message}", file=sys.stderr)
             sys.exit(1)
         proximity = 2 if getattr(a, "proximity", "arriving") == "leaving" else 1
         results.append(private_location_action({
@@ -4784,7 +4974,7 @@ def apply_private_changes(reminder_ckid, a, db=None, list_pk=None):
             "radius": getattr(a, "radius", None) or 100,
             "proximity": proximity,
             "address": getattr(a, "address", None),
-        }))
+        }, partial_context=partial_context))
 
     if getattr(a, "assign", None):
         if db is None:
@@ -4799,13 +4989,13 @@ def apply_private_changes(reminder_ckid, a, db=None, list_pk=None):
             "id": reminder_ckid,
             "assigneeId": _row_get(assignee, "ZCKIDENTIFIER"),
             "originatorId": _row_get(originator, "ZCKIDENTIFIER"),
-        }))
+        }, partial_context=partial_context))
 
     if getattr(a, "unassign", False):
         results.append(private_action({
             "action": "clear_assignment",
             "id": reminder_ckid,
-        }))
+        }, partial_context=partial_context))
 
     if getattr(a, "grocery", False):
         if db is None:
@@ -4813,7 +5003,9 @@ def apply_private_changes(reminder_ckid, a, db=None, list_pk=None):
         if list_pk is None:
             print("Error: --grocery requires a target list.", file=sys.stderr)
             sys.exit(1)
-        results.append(apply_private_grocery_categorization(db, list_pk, [reminder_ckid]))
+        results.append(apply_private_grocery_categorization(
+            db, list_pk, [reminder_ckid], partial_context=partial_context,
+        ))
 
     return results
 
@@ -5561,6 +5753,29 @@ def osa_by_id_try(list_name, rem_id, action, timeout=120):
     except subprocess.TimeoutExpired:
         return False
 
+
+def osa_flag_reminder_try(list_name, reminder_ckid, *, flagged=True, timeout=120):
+    """Set the real ZFLAGGED column via AppleScript without touching priority."""
+    if not reminder_ckid:
+        return False
+    rem_id = reminder_ckid if reminder_ckid.startswith("x-apple-reminder://") else f"x-apple-reminder://{reminder_ckid}"
+    action = "set flagged of r to true" if flagged else "set flagged of r to false"
+    if list_name:
+        return osa_by_id_try(list_name, rem_id, action, timeout=timeout)
+    script = (
+        f'tell application "Reminders"\n'
+        f'tell default list\n'
+        f'set r to (first reminder whose id is "{esc(rem_id)}")\n'
+        f'{action}\n'
+        f'end tell\n'
+        f'end tell'
+    )
+    try:
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=timeout)
+        return r.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
+
 def esc(s):
     """Escape a string for AppleScript double-quoted literals.
     Covers backslash, double-quote, and every kind of control/line-break
@@ -5832,7 +6047,13 @@ def due_spec_is_all_day(s):
     m = re.match(r"^(?:(next|this)\s+)?(\w+)(?:\s+(?:at\s+)?(.+))?$", sl)
     if m:
         _, day_name, time_text = m.groups()
-        return day_name in WEEKDAY_MAP and not time_text
+        if day_name in WEEKDAY_MAP and not time_text:
+            return True
+
+    if _cal:
+        _, status = _cal.parseDT(s)
+        if status > 0:
+            return status == 1
 
     return False
 
@@ -6341,11 +6562,11 @@ def smart_list_filter_payload_from_args(a, db):
             "proximity": getattr(a, "proximity", "enter"),
         }
     return build_supported_filter_payload(
-        match=getattr(a, "match", "all"),
+        match=getattr(a, "match", None) or "all",
         flagged=bool(getattr(a, "flagged", False)),
         priorities=_smart_list_csv_values(getattr(a, "priority", None)),
         tags=_smart_list_csv_values(getattr(a, "tags", None)),
-        tag_match=getattr(a, "tag_match", "any"),
+        tag_match=getattr(a, "tag_match", None) or "any",
         any_tag=bool(getattr(a, "any_tag", False)),
         untagged=bool(getattr(a, "untagged", False)),
         date_any=getattr(a, "date", None) == "any",
@@ -6411,6 +6632,13 @@ def cmd_smart_list_create(a):
         print("Error: smart-list-create requires --private.", file=sys.stderr)
         sys.exit(1)
     validate_list_appearance_args(a)
+    require_private_metadata(a)
+    if not getattr(a, "filter_json", None):
+        try:
+            validate_materializing_smart_list_args(a)
+        except SmartListFilterError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
     db = open_db()
     try:
         filter_payload = smart_list_filter_payload_from_args(a, db)
@@ -6418,8 +6646,6 @@ def cmd_smart_list_create(a):
     except SmartListFilterError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
-
-    require_private_metadata(a)
     if q_custom_smart_list_exact_name_count(db, a.name):
         print(
             f"Error: smart list already exists: {a.name}. Choose a unique test name.",
@@ -6471,8 +6697,29 @@ def cmd_smart_list_edit(a):
         for row in matches:
             print(f"  {row['Z_PK']}: {smart_list_display_name(row)}", file=sys.stderr)
         sys.exit(1)
-    has_filter_changes = smart_list_filter_changes_from_args(a)
+    has_non_match_filter_changes = smart_list_filter_changes_from_args(a)
+    has_match_flag_changes = (
+        getattr(a, "match", None) is not None
+        or getattr(a, "tag_match", None) is not None
+        or getattr(a, "list_match", None) is not None
+    )
+    has_filter_changes = has_non_match_filter_changes or has_match_flag_changes
     has_appearance_changes = list_appearance_changes_from_args(a)
+    if has_match_flag_changes and not has_non_match_filter_changes:
+        passed_match_flags = []
+        if getattr(a, "match", None) is not None:
+            passed_match_flags.append("--match")
+        if getattr(a, "tag_match", None) is not None:
+            passed_match_flags.append("--tag-match")
+        if getattr(a, "list_match", None) is not None:
+            passed_match_flags.append("--list-match")
+        flag_list = ", ".join(passed_match_flags)
+        print(
+            f"Error: {flag_list} modify how other filter options combine; "
+            "pass at least one filter option (for example --tags, --priority, or --date) with them.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if not has_filter_changes and not has_appearance_changes:
         print("Error: pass at least one smart-list filter or appearance option.", file=sys.stderr)
         sys.exit(1)
@@ -7657,6 +7904,11 @@ def cmd_add(a):
             sys.exit(1)
         require_grocery_list_target(db, target_list_pk)
 
+    if wants_private:
+        if db is None:
+            db = open_db()
+        validate_private_add_ready(a, db, target_list_pk)
+
     if a.tags and not wants_private:
         for t in a.tags.split(","):
             t = t.strip()
@@ -7678,7 +7930,6 @@ def cmd_add(a):
                 data["allDay"] = True
         if priority_value is not None:
             data["priority"] = priority_value
-        if a.flag and not wants_private: data["flagged"] = True
         if hasattr(a, 'url') and a.url and not wants_private: data["url"] = a.url
         if parsed_recurrence is not None:
             data["recurrence"] = parsed_recurrence
@@ -7692,18 +7943,43 @@ def cmd_add(a):
             if wants_private:
                 if db is None:
                     db = open_db()
+                try:
+                    created_row = q_reminder_by_identifier(db, result.get("id", ""))
+                except RemindersDBUnavailable:
+                    created_row = None
+                partial_context = {
+                    "id": result.get("id", ""),
+                    "numericId": created_row["Z_PK"] if created_row else None,
+                    "json": bool(getattr(a, "json", False)),
+                    "completed": [],
+                }
                 private_results = apply_private_changes(
                     result.get("id", ""),
                     a,
                     db=db,
                     list_pk=target_list_pk,
+                    partial_context=partial_context,
                 )
-            try:
-                if db is None:
-                    db = open_db()
-                created_row = q_reminder_by_identifier(db, result.get("id", ""))
-            except RemindersDBUnavailable:
-                created_row = None
+            else:
+                try:
+                    if db is None:
+                        db = open_db()
+                    created_row = q_reminder_by_identifier(db, result.get("id", ""))
+                except RemindersDBUnavailable:
+                    created_row = None
+            if a.flag and not wants_private:
+                flag_list_name = None
+                if created_row:
+                    flag_list_name = created_row["list_name"]
+                elif list_resolution:
+                    flag_list_name = list_resolution["title"]
+                else:
+                    flag_list_name = target_list_name
+                if not osa_flag_reminder_try(flag_list_name, result.get("id", "")):
+                    print(
+                        "Warning: created the reminder but failed to set the flag via AppleScript.",
+                        file=sys.stderr,
+                    )
             if a.json:
                 payload = {"status": "created", "id": result.get("id", ""), "title": title}
                 if list_resolution and list_resolution.get("method") != "exact":
@@ -7733,6 +8009,37 @@ def cmd_add(a):
             fail_bridge_write(bridge_result, operation="create the reminder")
         if wants_private or parsed_recurrence is not None or parsed_alarm is not None:
             fail_bridge_write(bridge_result, operation="create the reminder")
+
+    recovered_row = None
+    if bridge_result and bridge_result.get("returncode") != 0:
+        try:
+            if db is None:
+                db = open_db()
+            recovered_row = q_recent_reminder_by_title(db, title, list_pk=target_list_pk)
+        except RemindersDBUnavailable:
+            recovered_row = None
+    if recovered_row:
+        result = {"id": recovered_row["ZCKIDENTIFIER"] or "", "status": "created"}
+        created_row = recovered_row
+        if a.json:
+            payload = {"status": "created", "id": result.get("id", ""), "title": title}
+            if list_resolution and list_resolution.get("method") != "exact":
+                payload["resolvedList"] = {
+                    "requested": list_resolution.get("requested"),
+                    "title": list_resolution["title"],
+                    "id": list_resolution["id"],
+                    "method": list_resolution["method"],
+                }
+            if created_row:
+                payload["numericId"] = created_row["Z_PK"]
+            print(json.dumps(payload))
+        else:
+            print(f"Created: {safe_display(title)}")
+            if list_resolution and list_resolution.get("method") != "exact":
+                print(f"List: {safe_display(list_resolution['title'])} (resolved from {safe_display(list_resolution['requested'])})")
+            if created_row:
+                print(f"ID: #{created_row['Z_PK']}")
+        return
 
     if dt and due_all_day:
         message = "All-day due dates require remctl-bridge so Reminders can store date-only components."
@@ -8073,6 +8380,7 @@ def cmd_edit(a):
     # real dueDateComponents change.
     bridge_write_result = None
     bridge_write_attempted = False
+    nudge_succeeded = False
     if bridge_available() and r["ZCKIDENTIFIER"]:
         if dt_nudge is not None:
             nudge_data = {
@@ -8085,6 +8393,10 @@ def cmd_edit(a):
             nudge_result = bridge_call_result(nudge_data)
             if bridge_failure_is_access_error(nudge_result):
                 fail_bridge_write(nudge_result, operation="prepare the reminder edit")
+            elif bridge_result_ok(nudge_result, "updated"):
+                nudge_succeeded = True
+            else:
+                print(NUDGE_PREP_WARNING, file=sys.stderr)
         data = {"action": "update", "id": r["ZCKIDENTIFIER"]}
         has_changes = False
         if a.title: data["title"] = a.title; has_changes = True
@@ -8150,6 +8462,7 @@ def cmd_edit(a):
                         print(f"Private metadata: applied {len(private_results)} update{'s' if len(private_results) != 1 else ''}")
                 return
             if bridge_failure_is_access_error(bridge_write_result):
+                warn_if_nudged_due_stranded(r, nudge_succeeded, dt, due_all_day)
                 fail_bridge_write(bridge_write_result, operation="edit the reminder")
             if (
                 moving_to_different_list
@@ -8186,12 +8499,15 @@ def cmd_edit(a):
             or wants_private
         )
     ):
+        warn_if_nudged_due_stranded(r, nudge_succeeded, dt, due_all_day)
         fail_bridge_write(bridge_write_result, operation="edit the reminder")
 
     if carry_absolute_alarm or clear_matching_absolute_alarm:
+        warn_if_nudged_due_stranded(r, nudge_succeeded, dt, due_all_day)
         print("Error: this edit requires remctl-bridge to keep due/display/alarm state aligned.", file=sys.stderr)
         sys.exit(1)
     if dt is not None and due_all_day:
+        warn_if_nudged_due_stranded(r, nudge_succeeded, dt, due_all_day)
         print("Error: all-day due date edits require remctl-bridge so Reminders can store date-only components.", file=sys.stderr)
         sys.exit(1)
 
@@ -8236,6 +8552,7 @@ def cmd_edit(a):
         return
     if not r["ZCKIDENTIFIER"]:
         _refuse_unsafe_title_fallback(r, "edit it", "The reminder has no stable identifier")
+    warn_if_nudged_due_stranded(r, nudge_succeeded, dt, due_all_day)
     _refuse_unsafe_title_fallback(
         r,
         "edit it",
@@ -8427,6 +8744,13 @@ def cmd_info(a):
         else:
             print(f"  Due:       {effective_due.strftime('%b %d, %Y at %I:%M %p')}")
     early_reminders = due_date_delta_alerts_from_row(r, ts=ts)
+    if not early_reminders and r["ZCKIDENTIFIER"]:
+        try:
+            early_reminders = due_date_delta_alert_rows_to_json(
+                q_due_date_delta_alerts(db, r["ZCKIDENTIFIER"])
+            )
+        except (sqlite3.Error, ValueError):
+            early_reminders = []
     if early_reminders:
         labels = ", ".join(item["label"] for item in early_reminders)
         print(f"  Early:     {C.cyan(labels)}")
@@ -8521,7 +8845,8 @@ def cmd_sharees(a):
 
 def cmd_stats(a):
     db = open_db()
-    due_column = due_expr()
+    due_column = due_filter_expr(db)
+    sod = start_of_day()
     total = db.execute("SELECT COUNT(*) FROM ZREMCDREMINDER WHERE ZMARKEDFORDELETION = 0 AND ZACCOUNT IS NOT NULL").fetchone()[0]
     active = db.execute("SELECT COUNT(*) FROM ZREMCDREMINDER WHERE ZMARKEDFORDELETION = 0 AND ZCOMPLETED = 0 AND ZACCOUNT IS NOT NULL").fetchone()[0]
     flagged = db.execute("SELECT COUNT(*) FROM ZREMCDREMINDER WHERE ZMARKEDFORDELETION = 0 AND ZCOMPLETED = 0 AND ZFLAGGED = 1 AND ZACCOUNT IS NOT NULL").fetchone()[0]
@@ -8530,8 +8855,9 @@ def cmd_stats(a):
         f"AND r.ZCOMPLETED = 0 AND r.ZACCOUNT IS NOT NULL AND {urgent_where_clause(db)}"
     ).fetchone()[0]
     overdue = db.execute(
-        f"SELECT COUNT(*) FROM ZREMCDREMINDER r WHERE r.ZMARKEDFORDELETION = 0 AND r.ZCOMPLETED = 0 AND r.ZACCOUNT IS NOT NULL "
-        f"AND {due_column} IS NOT NULL AND {due_column} < {to_ts(datetime.now())}"
+        f"SELECT COUNT(*) FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l ON r.ZLIST = l.Z_PK "
+        f"WHERE r.ZMARKEDFORDELETION = 0 AND r.ZCOMPLETED = 0 AND r.ZACCOUNT IS NOT NULL "
+        f"AND l.Z_PK IS NOT NULL AND {due_column} IS NOT NULL AND {due_column} < {to_ts(sod)}"
     ).fetchone()[0]
     lists_count = len(q_lists(db))
     sections_count = len(q_sections(db))
@@ -8809,8 +9135,38 @@ def cmd_list_create(a):
     data = {"action": "create_list", "title": a.name}
     if hasattr(a, 'color') and a.color and is_supported_public_list_color(a.color):
         data["color"] = a.color
-    result = bridge_call(data) if bridge_available() else None
-    if not result or result.get("status") != "created":
+    bridge_result = None
+    result = None
+    if bridge_available():
+        bridge_result = bridge_call_result(data)
+        if bridge_result_ok(bridge_result, "created"):
+            result = bridge_result["payload"]
+        elif bridge_failure_is_access_error(bridge_result):
+            fail_bridge_write(bridge_result, operation="create the list")
+        elif bridge_failure_is_execution_error(bridge_result):
+            fail_bridge_write(bridge_result, operation="create the list")
+        else:
+            try:
+                db = open_db()
+                if q_list_exact_name_count(db, a.name):
+                    result = {"status": "created", "name": a.name}
+                else:
+                    if bridge_result.get("returncode") != 0:
+                        print(
+                            "Warning: remctl-bridge failed while creating the list; "
+                            f"falling back to AppleScript. Bridge error: {bridge_failure_message(bridge_result)}",
+                            file=sys.stderr,
+                        )
+                    result = create_list_with_applescript(a.name)
+            except RemindersDBUnavailable:
+                if bridge_result.get("returncode") != 0:
+                    print(
+                        "Warning: remctl-bridge failed while creating the list; "
+                        f"falling back to AppleScript. Bridge error: {bridge_failure_message(bridge_result)}",
+                        file=sys.stderr,
+                    )
+                result = create_list_with_applescript(a.name)
+    else:
         result = create_list_with_applescript(a.name)
     if result and result.get("status") == "created":
         if a.json:
@@ -9197,13 +9553,13 @@ def cmd_import(a):
     else:
         print(f"\nImported {created}/{len(data)} reminders ({errors} errors)")
 
-def add_smart_list_filter_arguments(parser):
-    parser.add_argument("--match", choices=["all", "any"], default="all", help="Match all or any supplied filters")
+def add_smart_list_filter_arguments(parser, *, match_default="all", tag_match_default="any"):
+    parser.add_argument("--match", choices=["all", "any"], default=match_default, help="Match all or any supplied filters")
     parser.add_argument("--filter-json", help="Advanced: raw official smart-list filter JSON or @path")
     parser.add_argument("--flagged", action="store_true", help="Filter to flagged reminders")
     parser.add_argument("--priority", help="Priority filter: high, medium, low, or comma-separated values")
     parser.add_argument("--tags", help="Selected tag filter, comma-separated; # prefix optional")
-    parser.add_argument("--tag-match", choices=["all", "any"], default="any", help="Selected tag matching mode")
+    parser.add_argument("--tag-match", choices=["all", "any"], default=tag_match_default, help="Selected tag matching mode")
     parser.add_argument("--any-tag", action="store_true", help="Filter to reminders with any tag")
     parser.add_argument("--untagged", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--date", choices=["any", "today"], help="Date filter")
@@ -10505,11 +10861,26 @@ def gather_doctor_checks():
 
     private_path = current_private_path()
     private_ok = private_path.exists() and os.access(private_path, os.X_OK)
+    private_detail = str(private_path)
+    private_fix = None
+    if private_ok:
+        probe = _probe_private_protocol_version()
+        if probe.get("ok"):
+            private_detail = f"{private_path} (protocol {probe['version']})"
+        elif probe.get("reason") == "outdated":
+            private_ok = False
+            version = probe.get("version", 0)
+            private_detail = f"{private_path} (protocol {version} < required {PRIVATE_PROTOCOL_VERSION})"
+            private_fix = "Re-run ./install.sh to rebuild remctl-private."
+        elif probe.get("message"):
+            private_detail = f"{private_path} ({probe['message']})"
+    else:
+        private_fix = "Run ./install.sh to compile remctl-private, or avoid --private writes."
     add(
         "private_helper",
         "ok" if private_ok else "warn",
-        str(private_path),
-        None if private_ok else "Run ./install.sh to compile remctl-private, or avoid --private writes.",
+        private_detail,
+        private_fix,
     )
 
     permissions_path = current_permissions_path()
@@ -10798,7 +11169,7 @@ def main():
             action="store_true",
             help=(
                 "Limited read-only EventKit fallback for hosts without Full Disk Access; "
-                "never the default, no RemCTL numeric ids, no sections/tags/private metadata"
+                "never the default, no RemCTL numeric ids, no sections/tags/private metadata; iCloud reminders only"
             ),
         )
 
@@ -10950,9 +11321,11 @@ def main():
             "With --private, --url creates a synced web rich link and -t/--tags creates synced Reminders tags.\n"
             "--assign USER requires a shared list and accepts a unique name, email/phone, numeric sharee ID, object UUID, or me.\n"
             "Use remctl sharees LIST --json before assignment when scripting or when names may collide.\n"
-            "Date-only due inputs such as today, tomorrow, YYYY-MM-DD, +3d, and next friday create all-day reminders.\n"
+            "Date-only due inputs such as today, tomorrow, YYYY-MM-DD, +3d, +1m (~30 days), and next friday create all-day reminders.\n"
             "Due inputs with explicit times create timed reminders.\n"
             "If -d/--due is present and cannot be parsed, add fails before creating the reminder.\n"
+            "Titles beginning with - require a separator: remctl add -- \"-title\".\n"
+            "If a private-metadata step fails after creation, the reminder is kept; re-run edit to finish (do not re-run add).\n"
             "Private metadata is unsupported by Apple and never writes SQLite directly."
         ),
         formatter_class=HelpFormatter,
@@ -10961,7 +11334,7 @@ def main():
     c.add_argument("--list-id", type=int, help="Create in a list by stable numeric ID")
     c.add_argument("-n", "--notes"); c.add_argument("-d", "--due", help="Due date; date-only forms create all-day reminders, explicit times create timed reminders")
     c.add_argument("-p", "--priority", help="high, medium, low")
-    c.add_argument("-f", "--flag", action="store_true")
+    c.add_argument("-f", "--flag", action="store_true", help="Set the reminder's real flagged state")
     c.add_argument("-t", "--tags", help="Comma-separated tags; inline #hashtags normally, synced Reminders tags with --private")
     c.add_argument("--url", help="URL; appended to notes normally, synced web rich link attachment with --private")
     c.add_argument("--recurrence", help="Recurrence: daily, weekly, 'weekly mon,wed,fri', 'monthly 1,15', yearly (bridge only)")
@@ -11030,14 +11403,14 @@ def main():
             "real flag state, urgent state, and location alarms require --private. "
             "A pure list move may return a new id plus oldId when RemCTL uses its verified clone-delete fallback across list/container boundaries. "
             "--assign USER accepts a unique name, email/phone, numeric sharee ID, object UUID, or me; use remctl sharees LIST --json before scripting. "
-            "Location alarms are saved through the EventKit bridge as structured-location alarms."
+            "Location alarms are saved through the EventKit bridge as structured-location alarms; replaces any existing location alarm."
         ),
         formatter_class=HelpFormatter,
     )
     c.add_argument("id", type=int); c.add_argument("--title")
     c.add_argument("-l", "--list", help="Move to a list by name; pure moves can use verified clone-delete fallback and return a new id")
     c.add_argument("--list-id", type=int, help="Move to a list by stable numeric ID; pure moves can use verified clone-delete fallback and return a new id")
-    c.add_argument("-n", "--notes"); c.add_argument("-d", "--due", help="YYYY-MM-DD or 'clear'")
+    c.add_argument("-n", "--notes"); c.add_argument("-d", "--due", help="Due date; date-only forms create all-day reminders, explicit times create timed reminders, or clear")
     c.add_argument("-p", "--priority")
     c.add_argument("--url", help="URL; appended to notes normally, synced web rich link attachment with --private")
     c.add_argument("--recurrence", help="Recurrence (bridge only)")
@@ -11191,6 +11564,8 @@ def main():
             "  remctl smart-list-edit \"#remctl Today\" --private --tags remctl --date today\n"
             "  remctl smart-list-edit \"Due Before June 1\" --private --color red --emoji 📆\n"
             "  remctl smart-list-edit --smart-list-id 170 --private --match any --priority high,medium --date today\n"
+            "\n"
+            "--match and --tag-match only adjust how other filter options combine; pass them with at least one filter option.\n"
         ),
         formatter_class=HelpFormatter,
     )
@@ -11200,7 +11575,7 @@ def main():
     c.add_argument("--color", help="Smart-list color name or #RRGGBB")
     c.add_argument("--symbol", help="Official Reminders list symbol name; run list-symbols")
     c.add_argument("--emoji", help="Private Reminders list emoji badge")
-    add_smart_list_filter_arguments(c)
+    add_smart_list_filter_arguments(c, match_default=None, tag_match_default=None)
     js(c)
 
     c = sub.add_parser(
@@ -11401,7 +11776,9 @@ def main():
             "If this is your first run on a new Mac, use `remctl onboard` first so macOS can\n"
             "show the Reminders and Automation permission prompts. Full Disk Access and\n"
             "Reminders/EventKit grants are scoped to the app or runner shown in the execution\n"
-            "context; Terminal can pass while an agent runner still fails."
+            "context; Terminal can pass while an agent runner still fails.\n"
+            "\n"
+            "doctor reports the remctl-private protocol version; re-run ./install.sh if it is outdated."
         ),
         formatter_class=HelpFormatter,
     ); js(c)

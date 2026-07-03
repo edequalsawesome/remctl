@@ -155,7 +155,7 @@ def preload_extras(db, pks):
     hashtag_rows = db.execute(
         f"SELECT o.ZREMINDER3, h.ZNAME FROM ZREMCDOBJECT o "
         f"JOIN ZREMCDHASHTAGLABEL h ON o.ZHASHTAGLABEL = h.Z_PK "
-        f"WHERE o.ZREMINDER3 IN ({placeholders})",
+        f"WHERE o.ZREMINDER3 IN ({placeholders}) AND o.ZMARKEDFORDELETION = 0",
         pks,
     ).fetchall()
     hashtags = {}

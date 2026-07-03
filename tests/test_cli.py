@@ -23,6 +23,16 @@ class CliTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.remctl = load_module("remctl_cli_test", "remctl")
+        cls._default_protocol_probe = mock.patch.object(
+            cls.remctl,
+            "_probe_private_protocol_version",
+            return_value={"ok": True, "version": 1},
+        )
+        cls._default_protocol_probe.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._default_protocol_probe.stop()
 
     @staticmethod
     def _bridge_result(payload, returncode=0):
@@ -100,6 +110,26 @@ class CliTests(unittest.TestCase):
         self.assertFalse(self.remctl.due_spec_is_all_day("2026-06-01 09:30"))
         self.assertFalse(self.remctl.due_spec_is_all_day("+2h"))
         self.assertFalse(self.remctl.due_spec_is_all_day("eod"))
+
+    def test_due_spec_is_all_day_uses_parsedatetime_status_fallback(self):
+        fake_date = self.remctl.datetime(2026, 3, 30, 0, 0)
+        fake_datetime = self.remctl.datetime(2026, 3, 30, 15, 0)
+
+        class FakeCal:
+            def __init__(self, status):
+                self._status = status
+
+            def parseDT(self, _s):
+                if self._status == 1:
+                    return fake_date, 1
+                return fake_datetime, self._status
+
+        with mock.patch.object(self.remctl, "_cal", FakeCal(1)):
+            self.assertTrue(self.remctl.due_spec_is_all_day("March 30"))
+        with mock.patch.object(self.remctl, "_cal", FakeCal(3)):
+            self.assertFalse(self.remctl.due_spec_is_all_day("March 30 at 3pm"))
+        with mock.patch.object(self.remctl, "_cal", None):
+            self.assertFalse(self.remctl.due_spec_is_all_day("March 30"))
 
     def test_add_passes_all_day_to_bridge_for_date_only_due(self):
         args = SimpleNamespace(
@@ -1527,12 +1557,16 @@ class CliTests(unittest.TestCase):
         args = SimpleNamespace(name="Project X", color="blue", private=False, symbol=None, emoji=None, json=True)
         with (
             mock.patch.object(self.remctl, "bridge_available", return_value=True),
-            mock.patch.object(self.remctl, "bridge_call", return_value={"status": "created"}) as bridge_call,
+            mock.patch.object(
+                self.remctl,
+                "bridge_call_result",
+                return_value=self._bridge_result({"status": "created"}),
+            ) as bridge_call_result,
             contextlib.redirect_stdout(io.StringIO()),
         ):
             self.remctl.cmd_list_create(args)
         self.assertEqual(
-            bridge_call.call_args.args[0],
+            bridge_call_result.call_args.args[0],
             {"action": "create_list", "title": "Project X", "color": "blue"},
         )
 
@@ -2291,16 +2325,20 @@ class CliTests(unittest.TestCase):
         self.assertIn("requires --private", stderr.getvalue())
 
     def test_smart_list_create_rejects_unsupported_filter_before_helper(self):
+        db = self._smart_list_db()
         args = SimpleNamespace(name="Nope", private=True, flagged=False, priority="none", json=True)
-        with (
-            mock.patch.object(self.remctl, "private_available") as private_available,
-            mock.patch.object(self.remctl, "private_call") as private_call,
-            contextlib.redirect_stderr(io.StringIO()) as stderr,
-            self.assertRaises(SystemExit),
-        ):
-            self.remctl.cmd_smart_list_create(args)
+        try:
+            with (
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(self.remctl, "private_call") as private_call,
+                contextlib.redirect_stderr(io.StringIO()) as stderr,
+                self.assertRaises(SystemExit),
+            ):
+                self.remctl.cmd_smart_list_create(args)
+        finally:
+            db.close()
 
-        private_available.assert_not_called()
         private_call.assert_not_called()
         self.assertIn("Unsupported smart list priority", stderr.getvalue())
 
@@ -3000,6 +3038,7 @@ class CliTests(unittest.TestCase):
             args,
             db=fake_db,
             list_pk=7,
+            partial_context=mock.ANY,
         )
         self.assertEqual(json.loads(stdout.getvalue())["private"][0]["status"], "updated")
 
@@ -3154,6 +3193,369 @@ class CliTests(unittest.TestCase):
         self.assertIn("EventKit access error", output)
         self.assertIn("remctl onboard", output)
         self.assertIn("remctl doctor --for-agent", output)
+
+    def test_subtask_spec_date_only_due_sets_all_day(self):
+        specs = self.remctl.parse_subtask_specs(['{"title":"X","due":"2026-07-03"}'])
+        self.assertEqual(specs[0]["due"], "2026-07-03T00:00:00")
+        self.assertTrue(specs[0]["allDay"])
+
+    def test_subtask_spec_timed_due_omits_all_day(self):
+        specs = self.remctl.parse_subtask_specs(['{"title":"X","due":"2026-07-03 15:00"}'])
+        self.assertEqual(specs[0]["due"], "2026-07-03T15:00:00")
+        self.assertNotIn("allDay", specs[0])
+
+    def test_bridge_update_subtask_passes_all_day_for_date_only_due(self):
+        with mock.patch.object(self.remctl, "bridge_call", return_value={"status": "updated"}) as bridge_call:
+            self.remctl.bridge_update_subtask(
+                "SUB-1",
+                {"title": "X", "due": "2026-07-03T00:00:00", "allDay": True},
+            )
+        payload = bridge_call.call_args.args[0]
+        self.assertEqual(payload["due"], "2026-07-03T00:00:00")
+        self.assertTrue(payload["allDay"])
+
+    def test_bridge_update_subtask_timed_due_omits_all_day(self):
+        with mock.patch.object(self.remctl, "bridge_call", return_value={"status": "updated"}) as bridge_call:
+            self.remctl.bridge_update_subtask(
+                "SUB-1",
+                {"title": "X", "due": "2026-07-03T15:00:00"},
+            )
+        payload = bridge_call.call_args.args[0]
+        self.assertEqual(payload["due"], "2026-07-03T15:00:00")
+        self.assertNotIn("allDay", payload)
+
+    def test_apply_private_changes_strips_all_day_from_subtask_payload(self):
+        args = SimpleNamespace(
+            private=True,
+            private_metadata=False,
+            tags=None,
+            url=None,
+            section=None,
+            section_id=None,
+            new_section=None,
+            subtask=[json.dumps({"title": "Child", "due": "2026-07-03"})],
+            image=None,
+            flag=False,
+            flagged=None,
+            urgent=None,
+            early_reminder=None,
+            location_title=None,
+            latitude=None,
+            longitude=None,
+            radius=100,
+            proximity="arriving",
+            address=None,
+        )
+        private_result = {
+            "status": "updated",
+            "action": "add_subtasks",
+            "subtasks": [{"id": "CHILD-ID", "title": "Child"}],
+        }
+        with (
+            mock.patch.object(self.remctl, "private_available", return_value=True),
+            mock.patch.object(self.remctl, "private_action", return_value=private_result) as private_action,
+            mock.patch.object(self.remctl, "bridge_call", return_value={"status": "updated"}),
+        ):
+            self.remctl.apply_private_changes("PARENT-ID", args)
+
+        private_payload = private_action.call_args.args[0]
+        self.assertNotIn("allDay", private_payload["subtasks"][0])
+
+    def test_list_create_timeout_fails_without_applescript_fallback(self):
+        args = SimpleNamespace(name="Project X", color=None, private=False, symbol=None, emoji=None, json=True)
+        bridge_result = self._bridge_result({"status": "timeout", "message": "timed out"}, returncode=-1)
+        with (
+            mock.patch.object(self.remctl, "bridge_available", return_value=True),
+            mock.patch.object(self.remctl, "bridge_call_result", return_value=bridge_result),
+            mock.patch.object(self.remctl, "create_list_with_applescript") as applescript,
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            self.assertRaises(SystemExit),
+        ):
+            self.remctl.cmd_list_create(args)
+
+        applescript.assert_not_called()
+        self.assertIn("remctl-bridge failed while trying to create the list", stderr.getvalue())
+
+    def test_list_create_recovers_when_list_present_after_generic_bridge_error(self):
+        args = SimpleNamespace(name="Project X", color=None, private=False, symbol=None, emoji=None, json=True)
+        bridge_result = self._bridge_result({"status": "error", "message": "Save failed"}, returncode=1)
+        db = self._list_db(["Project X"])
+        try:
+            with (
+                mock.patch.object(self.remctl, "bridge_available", return_value=True),
+                mock.patch.object(self.remctl, "bridge_call_result", return_value=bridge_result),
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(self.remctl, "q_list_exact_name_count", return_value=1),
+                mock.patch.object(self.remctl, "create_list_with_applescript") as applescript,
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.remctl.cmd_list_create(args)
+        finally:
+            db.close()
+
+        applescript.assert_not_called()
+        self.assertEqual(json.loads(stdout.getvalue())["status"], "created")
+
+    def test_list_create_falls_back_to_applescript_when_list_absent_after_generic_bridge_error(self):
+        args = SimpleNamespace(name="Project X", color=None, private=False, symbol=None, emoji=None, json=True)
+        bridge_result = self._bridge_result({"status": "error", "message": "Save failed"}, returncode=1)
+        with (
+            mock.patch.object(self.remctl, "bridge_available", return_value=True),
+            mock.patch.object(self.remctl, "bridge_call_result", return_value=bridge_result),
+            mock.patch.object(self.remctl, "open_db", return_value=object()),
+            mock.patch.object(self.remctl, "q_list_exact_name_count", return_value=0),
+            mock.patch.object(
+                self.remctl,
+                "create_list_with_applescript",
+                return_value={"status": "created", "id": "LIST-1", "fallback": "applescript"},
+            ) as applescript,
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.remctl.cmd_list_create(args)
+
+        applescript.assert_called_once_with("Project X")
+        self.assertEqual(json.loads(stdout.getvalue())["status"], "created")
+
+    def test_cmd_add_recovers_when_reminder_present_after_generic_bridge_error(self):
+        db = self._due_window_db()
+        db.execute("DELETE FROM ZREMCDBASELIST")
+        db.execute("INSERT INTO ZREMCDBASELIST (Z_PK, ZNAME) VALUES (1, 'Work')")
+        self._insert_lookup_reminder(db, 99, "Dup test", list_pk=1, ckid="RECOVERED-ID")
+        args = SimpleNamespace(
+            title="Dup test",
+            list="Work",
+            list_id=None,
+            notes=None,
+            due=None,
+            priority=None,
+            flag=False,
+            tags=None,
+            url=None,
+            recurrence=None,
+            alarm=None,
+            private=False,
+            private_metadata=False,
+            grocery=False,
+            section=None,
+            section_id=None,
+            new_section=None,
+            subtask=None,
+            image=None,
+            json=True,
+            flagged=None,
+            urgent=None,
+            early_reminder=None,
+            location_title=None,
+            latitude=None,
+            longitude=None,
+            radius=100,
+            proximity="arriving",
+            address=None,
+        )
+        bridge_result = self._bridge_result({"status": "error", "message": "Save failed"}, returncode=1)
+        try:
+            with (
+                mock.patch.object(self.remctl, "bridge_available", return_value=True),
+                mock.patch.object(self.remctl, "bridge_call_result", return_value=bridge_result),
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(
+                    self.remctl,
+                    "resolve_list_or_die",
+                    return_value={"id": 1, "title": "Work", "requested": "Work", "method": "exact"},
+                ),
+                mock.patch.object(self.remctl, "osa") as osa,
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.remctl.cmd_add(args)
+        finally:
+            db.close()
+
+        osa.assert_not_called()
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["status"], "created")
+        self.assertEqual(payload["id"], "RECOVERED-ID")
+        self.assertEqual(payload["numericId"], 99)
+
+    def test_cmd_add_falls_back_to_applescript_when_reminder_absent_after_generic_bridge_error(self):
+        db = self._due_window_db()
+        args = SimpleNamespace(
+            title="Fresh task",
+            list=None,
+            list_id=None,
+            notes=None,
+            due=None,
+            priority=None,
+            flag=False,
+            tags=None,
+            url=None,
+            recurrence=None,
+            alarm=None,
+            private=False,
+            private_metadata=False,
+            grocery=False,
+            section=None,
+            section_id=None,
+            new_section=None,
+            subtask=None,
+            image=None,
+            json=True,
+            flagged=None,
+            urgent=None,
+            early_reminder=None,
+            location_title=None,
+            latitude=None,
+            longitude=None,
+            radius=100,
+            proximity="arriving",
+            address=None,
+        )
+        bridge_result = self._bridge_result({"status": "error", "message": "Save failed"}, returncode=1)
+        try:
+            with (
+                mock.patch.object(self.remctl, "bridge_available", return_value=True),
+                mock.patch.object(self.remctl, "bridge_call_result", return_value=bridge_result),
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(self.remctl, "osa", return_value="NEW-ID") as osa,
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                self.remctl.cmd_add(args)
+        finally:
+            db.close()
+
+        osa.assert_called_once()
+        self.assertEqual(json.loads(stdout.getvalue())["status"], "created")
+
+    def test_cmd_add_flag_skips_bridge_flagged_and_uses_applescript(self):
+        db = self._due_window_db()
+        db.execute("DELETE FROM ZREMCDBASELIST")
+        db.execute("INSERT INTO ZREMCDBASELIST (Z_PK, ZNAME) VALUES (1, 'Work')")
+        self._insert_lookup_reminder(db, 42, "Flagged task", list_pk=1, ckid="FLAG-ID")
+        args = SimpleNamespace(
+            title="Flagged task",
+            list="Work",
+            list_id=None,
+            notes=None,
+            due=None,
+            priority=None,
+            flag=True,
+            tags=None,
+            url=None,
+            recurrence=None,
+            alarm=None,
+            private=False,
+            private_metadata=False,
+            grocery=False,
+            section=None,
+            section_id=None,
+            new_section=None,
+            subtask=None,
+            image=None,
+            json=True,
+            flagged=None,
+            urgent=None,
+            early_reminder=None,
+            location_title=None,
+            latitude=None,
+            longitude=None,
+            radius=100,
+            proximity="arriving",
+            address=None,
+        )
+        try:
+            with (
+                mock.patch.object(self.remctl, "bridge_available", return_value=True),
+                mock.patch.object(
+                    self.remctl,
+                    "bridge_call_result",
+                    return_value=self._bridge_result({"status": "created", "id": "FLAG-ID"}),
+                ) as bridge_call_result,
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(
+                    self.remctl,
+                    "resolve_list_or_die",
+                    return_value={"id": 1, "title": "Work", "requested": "Work", "method": "exact"},
+                ),
+                mock.patch.object(self.remctl, "osa_flag_reminder_try", return_value=True) as flag_try,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.remctl.cmd_add(args)
+        finally:
+            db.close()
+
+        bridge_payload = bridge_call_result.call_args.args[0]
+        self.assertNotIn("flagged", bridge_payload)
+        flag_try.assert_called_once_with("Work", "FLAG-ID")
+
+    def test_cmd_add_flag_applescript_failure_warns_without_failing(self):
+        args = SimpleNamespace(
+            title="Flagged task",
+            list="Work",
+            list_id=None,
+            notes=None,
+            due=None,
+            priority=None,
+            flag=True,
+            tags=None,
+            url=None,
+            recurrence=None,
+            alarm=None,
+            private=False,
+            private_metadata=False,
+            grocery=False,
+            section=None,
+            section_id=None,
+            new_section=None,
+            subtask=None,
+            image=None,
+            json=False,
+            flagged=None,
+            urgent=None,
+            early_reminder=None,
+            location_title=None,
+            latitude=None,
+            longitude=None,
+            radius=100,
+            proximity="arriving",
+            address=None,
+        )
+        with (
+            mock.patch.object(self.remctl, "bridge_available", return_value=True),
+            mock.patch.object(
+                self.remctl,
+                "bridge_call_result",
+                return_value=self._bridge_result({"status": "created", "id": "FLAG-ID"}),
+            ),
+            mock.patch.object(self.remctl, "open_db", return_value=object()),
+            mock.patch.object(
+                self.remctl,
+                "resolve_list_or_die",
+                return_value={"id": 1, "title": "Work", "requested": "Work", "method": "exact"},
+            ),
+            mock.patch.object(self.remctl, "q_reminder_by_identifier", return_value=None),
+            mock.patch.object(self.remctl, "osa_flag_reminder_try", return_value=False),
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+        ):
+            self.remctl.cmd_add(args)
+
+        self.assertIn("Created:", stdout.getvalue())
+        self.assertIn("failed to set the flag via AppleScript", stderr.getvalue())
+
+    def test_q_recent_reminder_by_title_returns_sqlite_row_without_get(self):
+        db = self._due_window_db()
+        db.execute("DELETE FROM ZREMCDBASELIST")
+        db.execute("INSERT INTO ZREMCDBASELIST (Z_PK, ZNAME) VALUES (1, 'Work')")
+        self._insert_lookup_reminder(db, 99, "Dup test", list_pk=1, ckid="RECOVERED-ID")
+        try:
+            row = self.remctl.q_recent_reminder_by_title(db, "Dup test", list_pk=1)
+            self.assertIsInstance(row, sqlite3.Row)
+            self.assertFalse(hasattr(row, "get"))
+            self.assertEqual(row["ZCKIDENTIFIER"], "RECOVERED-ID")
+            self.assertEqual(row["list_name"], "Work")
+        finally:
+            db.close()
 
     def test_subtask_accepts_json_metadata(self):
         specs = self.remctl.parse_subtask_specs([
@@ -3699,6 +4101,128 @@ class CliTests(unittest.TestCase):
             self.remctl.cmd_add(args)
         bridge_call.assert_not_called()
         self.assertIn("public http or https", stderr.getvalue())
+
+    def _cmd_add_private_args(self, **overrides):
+        args = {
+            "title": "Research",
+            "list": "Projects",
+            "list_id": None,
+            "notes": None,
+            "due": None,
+            "priority": None,
+            "flag": False,
+            "tags": "remctl",
+            "url": None,
+            "recurrence": None,
+            "alarm": None,
+            "private": True,
+            "private_metadata": False,
+            "grocery": False,
+            "section": None,
+            "section_id": None,
+            "new_section": None,
+            "subtask": None,
+            "image": None,
+            "flagged": None,
+            "urgent": None,
+            "early_reminder": None,
+            "location_title": None,
+            "latitude": None,
+            "longitude": None,
+            "radius": 100,
+            "proximity": "arriving",
+            "address": None,
+            "assign": None,
+            "unassign": False,
+            "set_tags": None,
+            "clear_tags": False,
+            "remove_tag": None,
+            "json": True,
+        }
+        args.update(overrides)
+        return SimpleNamespace(**args)
+
+    def test_cmd_add_private_partial_failure_json_reports_created_id(self):
+        fake_row = {"Z_PK": 23880, "ZCKIDENTIFIER": "ABC-123", "list_name": "Projects"}
+        with (
+            mock.patch.object(self.remctl, "bridge_available", return_value=True),
+            mock.patch.object(self.remctl, "private_available", return_value=True),
+            mock.patch.object(self.remctl, "open_db", return_value=object()),
+            mock.patch.object(
+                self.remctl,
+                "resolve_list_or_die",
+                return_value={"id": 7, "title": "Projects", "requested": "Projects", "method": "exact"},
+            ),
+            mock.patch.object(
+                self.remctl,
+                "bridge_call_result",
+                return_value=self._bridge_result({"status": "created", "id": "ABC-123"}),
+            ) as bridge_call_result,
+            mock.patch.object(self.remctl, "q_reminder_by_identifier", return_value=fake_row),
+            mock.patch.object(
+                self.remctl,
+                "private_call",
+                return_value={"status": "error", "message": "private helper blew up"},
+            ),
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit),
+        ):
+            self.remctl.cmd_add(self._cmd_add_private_args())
+
+        bridge_call_result.assert_called_once()
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["status"], "partial")
+        self.assertEqual(payload["id"], "ABC-123")
+        self.assertEqual(payload["numericId"], 23880)
+        self.assertEqual(payload["failed"], "add_private_metadata")
+        self.assertEqual(payload["error"], "private helper blew up")
+
+    def test_cmd_add_private_partial_failure_text_warns_against_duplicate_add(self):
+        fake_row = {"Z_PK": 23880, "ZCKIDENTIFIER": "ABC-123", "list_name": "Projects"}
+        with (
+            mock.patch.object(self.remctl, "bridge_available", return_value=True),
+            mock.patch.object(self.remctl, "private_available", return_value=True),
+            mock.patch.object(self.remctl, "open_db", return_value=object()),
+            mock.patch.object(
+                self.remctl,
+                "resolve_list_or_die",
+                return_value={"id": 7, "title": "Projects", "requested": "Projects", "method": "exact"},
+            ),
+            mock.patch.object(
+                self.remctl,
+                "bridge_call_result",
+                return_value=self._bridge_result({"status": "created", "id": "ABC-123"}),
+            ),
+            mock.patch.object(self.remctl, "q_reminder_by_identifier", return_value=fake_row),
+            mock.patch.object(
+                self.remctl,
+                "private_call",
+                return_value={"status": "error", "message": "private helper blew up"},
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            self.assertRaises(SystemExit),
+        ):
+            self.remctl.cmd_add(self._cmd_add_private_args(json=False))
+
+        message = stderr.getvalue()
+        self.assertIn("#23880", message)
+        self.assertIn("Do NOT re-run add", message)
+        self.assertIn("add_private_metadata", message)
+
+    def test_cmd_add_private_unsafe_url_skips_bridge_call_result(self):
+        with (
+            mock.patch.object(self.remctl, "bridge_available", return_value=True),
+            mock.patch.object(self.remctl, "private_available", return_value=True),
+            mock.patch.object(self.remctl, "bridge_call_result") as bridge_call_result,
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit),
+        ):
+            self.remctl.cmd_add(self._cmd_add_private_args(url="http://127.0.0.1:631/"))
+
+        bridge_call_result.assert_not_called()
 
     def test_resolve_setup_shell_auto_skips_unsupported_shells(self):
         with mock.patch.dict("os.environ", {"SHELL": "/bin/tcsh"}, clear=False):
@@ -5151,6 +5675,166 @@ class CliTests(unittest.TestCase):
         self.assertEqual(real_payload["due"], "2026-06-21T00:00:00")
         self.assertTrue(real_payload["allDay"])
 
+    def _cmd_edit_private_args(self, **overrides):
+        args = {
+            "id": 1,
+            "json": True,
+            "title": None,
+            "notes": None,
+            "priority": None,
+            "due": None,
+            "url": None,
+            "recurrence": None,
+            "alarm": None,
+            "private": True,
+            "private_metadata": False,
+            "tags": "remctl",
+            "grocery": False,
+            "section": None,
+            "section_id": None,
+            "new_section": None,
+            "subtask": None,
+            "image": None,
+            "flagged": None,
+            "urgent": None,
+            "early_reminder": None,
+            "location_title": None,
+            "latitude": None,
+            "longitude": None,
+            "radius": 100,
+            "proximity": "arriving",
+            "address": None,
+            "assign": None,
+            "unassign": False,
+            "list": None,
+            "list_id": None,
+            "set_tags": None,
+            "clear_tags": False,
+            "remove_tag": None,
+        }
+        args.update(overrides)
+        return SimpleNamespace(**args)
+
+    def _cmd_edit_reminder_row(self, *, due_ts, ckid="DEAD-BEEF-0000-0000-0000-000000000000", pk=1, list_pk=7, list_name="Emails"):
+        db = self._due_window_db()
+        try:
+            db.execute("DELETE FROM ZREMCDBASELIST")
+            db.execute("INSERT INTO ZREMCDBASELIST (Z_PK, ZNAME) VALUES (?, ?)", (list_pk, list_name))
+            db.execute(
+                "INSERT INTO ZREMCDREMINDER "
+                "(Z_PK, ZTITLE, ZNOTES, ZCOMPLETED, ZFLAGGED, ZPRIORITY, "
+                "ZISURGENTSTATEENABLEDFORCURRENTUSER, ZDUEDATEDELTAALERTSDATA, "
+                "ZDUEDATE, ZDISPLAYDATEDATE, ZALLDAY, ZCOMPLETIONDATE, ZCREATIONDATE, "
+                "ZPARENTREMINDER, ZLIST, ZICSURL, ZCKIDENTIFIER, ZACCOUNT, ZMARKEDFORDELETION) "
+                "VALUES (?, 'test', NULL, 0, 0, 0, 0, NULL, ?, ?, 0, NULL, NULL, NULL, ?, NULL, ?, 1, 0)",
+                (pk, due_ts, due_ts, list_pk, ckid),
+            )
+            row = self.remctl.q_reminder(db, pk)
+        finally:
+            db.close()
+        self.assertIsInstance(row, sqlite3.Row)
+        self.assertFalse(hasattr(row, "get"))
+        return row
+
+    def test_cmd_edit_rolls_back_nudged_due_when_bridge_only_edit_fails(self):
+        from datetime import datetime
+
+        target = datetime(2026, 4, 20, 9, 0, 0)
+        due_ts = target.timestamp() - 978307200
+        reminder = self._cmd_edit_reminder_row(due_ts=due_ts)
+        bridge_responses = [
+            self._bridge_result({"status": "updated", "id": reminder["ZCKIDENTIFIER"]}),
+            self._bridge_result({"status": "error", "message": "Save failed"}, returncode=1),
+            self._bridge_result({"status": "updated", "id": reminder["ZCKIDENTIFIER"]}),
+        ]
+        with (
+            mock.patch.object(self.remctl, "open_db", return_value=None),
+            mock.patch.object(self.remctl, "q_reminder", return_value=reminder),
+            mock.patch.object(self.remctl, "bridge_available", return_value=True),
+            mock.patch.object(self.remctl, "private_available", return_value=True),
+            mock.patch.object(
+                self.remctl, "bridge_call_result", side_effect=bridge_responses,
+            ) as bridge_call_result,
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit),
+        ):
+            self.remctl.cmd_edit(self._cmd_edit_private_args(due="2026-04-20 09:00"))
+
+        self.assertEqual(bridge_call_result.call_count, 3)
+        nudge_payload, main_payload, rollback_payload = (
+            bridge_call_result.call_args_list[i].args[0] for i in range(3)
+        )
+        self.assertEqual(nudge_payload["due"], "2026-04-20T10:00:00")
+        self.assertEqual(main_payload["due"], "2026-04-20T09:00:00")
+        self.assertEqual(rollback_payload["due"], "2026-04-20T09:00:00")
+
+    def test_cmd_edit_nudge_rollback_failure_warns_about_wrong_due_date(self):
+        from datetime import datetime
+
+        target = datetime(2026, 4, 20, 9, 0, 0)
+        due_ts = target.timestamp() - 978307200
+        reminder = self._cmd_edit_reminder_row(due_ts=due_ts)
+        bridge_responses = [
+            self._bridge_result({"status": "updated", "id": reminder["ZCKIDENTIFIER"]}),
+            self._bridge_result({"status": "error", "message": "Save failed"}, returncode=1),
+            self._bridge_result({"status": "error", "message": "Rollback failed"}, returncode=1),
+        ]
+        with (
+            mock.patch.object(self.remctl, "open_db", return_value=None),
+            mock.patch.object(self.remctl, "q_reminder", return_value=reminder),
+            mock.patch.object(self.remctl, "bridge_available", return_value=True),
+            mock.patch.object(self.remctl, "private_available", return_value=True),
+            mock.patch.object(
+                self.remctl, "bridge_call_result", side_effect=bridge_responses,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            self.assertRaises(SystemExit),
+        ):
+            self.remctl.cmd_edit(self._cmd_edit_private_args(due="2026-04-20 09:00"))
+
+        warning = stderr.getvalue()
+        self.assertIn("due date may be wrong", warning)
+        self.assertIn(reminder["ZCKIDENTIFIER"], warning)
+
+    def test_cmd_edit_nudge_failure_warns_and_still_attempts_main_update(self):
+        from datetime import datetime
+
+        target = datetime(2026, 4, 20, 9, 0, 0)
+        reminder = dict(self._FAKE_REMINDER)
+        reminder["ZDUEDATE"] = target.timestamp() - 978307200
+        bridge_responses = [
+            self._bridge_result({"status": "timeout", "message": "timed out"}, returncode=-1),
+            self._bridge_result({"status": "updated", "id": reminder["ZCKIDENTIFIER"]}),
+        ]
+        with (
+            mock.patch.object(self.remctl, "open_db", return_value=None),
+            mock.patch.object(self.remctl, "q_reminder", return_value=reminder),
+            mock.patch.object(self.remctl, "bridge_available", return_value=True),
+            mock.patch.object(self.remctl, "private_available", return_value=True),
+            mock.patch.object(
+                self.remctl, "bridge_call_result", side_effect=bridge_responses,
+            ) as bridge_call_result,
+            mock.patch.object(
+                self.remctl,
+                "apply_private_changes",
+                return_value=[{"status": "updated", "action": "add_private_metadata"}],
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+        ):
+            self.remctl.cmd_edit(self._cmd_edit_private_args(due="2026-04-20 09:00"))
+
+        self.assertEqual(bridge_call_result.call_count, 2)
+        nudge_payload, main_payload = (
+            bridge_call_result.call_args_list[0].args[0],
+            bridge_call_result.call_args_list[1].args[0],
+        )
+        self.assertEqual(nudge_payload["due"], "2026-04-20T10:00:00")
+        self.assertEqual(main_payload["due"], "2026-04-20T09:00:00")
+        self.assertIn("due-date sync workaround", stderr.getvalue())
+
     def test_cmd_edit_rejects_unparseable_due(self):
         """An unparseable due-date string must exit non-zero rather than
         silently dropping the field and letting the rest of the update proceed."""
@@ -5476,6 +6160,19 @@ class CliTests(unittest.TestCase):
             (pk, title, due_ts, display_ts, 1 if all_day else 0, f"CK-{pk}"),
         )
 
+    def _insert_lookup_reminder(self, db, pk, title, *, list_pk=1, ckid=None, creation_ts=None):
+        if creation_ts is None:
+            creation_ts = self.remctl.to_ts(self.remctl.datetime.now())
+        db.execute(
+            "INSERT INTO ZREMCDREMINDER "
+            "(Z_PK, ZTITLE, ZNOTES, ZCOMPLETED, ZFLAGGED, ZPRIORITY, "
+            "ZISURGENTSTATEENABLEDFORCURRENTUSER, ZDUEDATEDELTAALERTSDATA, "
+            "ZDUEDATE, ZDISPLAYDATEDATE, ZALLDAY, ZCOMPLETIONDATE, ZCREATIONDATE, "
+            "ZPARENTREMINDER, ZLIST, ZICSURL, ZCKIDENTIFIER, ZACCOUNT, ZMARKEDFORDELETION) "
+            "VALUES (?, ?, NULL, 0, 0, 0, 0, NULL, NULL, NULL, 0, NULL, ?, NULL, ?, NULL, ?, 1, 0)",
+            (pk, title, creation_ts, list_pk, ckid or f"CK-{pk}"),
+        )
+
     def test_all_day_reminders_bucket_and_render_by_display_date_west_of_utc(self):
         from datetime import datetime, timedelta, timezone
 
@@ -5544,6 +6241,68 @@ class CliTests(unittest.TestCase):
             else:
                 os.environ["TZ"] = prev_tz
             time.tzset()
+
+    def test_stats_overdue_count_matches_q_overdue(self):
+        from datetime import datetime, timedelta
+
+        db = self._due_window_db()
+        try:
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            yesterday = today - timedelta(days=1)
+
+            timed_today = self.remctl.to_ts(today.replace(hour=9))
+            self._insert_due_reminder(
+                db, 1, "Timed Earlier Today",
+                due_ts=timed_today,
+                display_ts=timed_today,
+                all_day=False,
+            )
+            self._insert_due_reminder(
+                db, 2, "AllDay Today",
+                due_ts=self.remctl.to_ts(today),
+                display_ts=self.remctl.to_ts(today),
+                all_day=True,
+            )
+            self._insert_due_reminder(
+                db, 3, "Due Yesterday",
+                due_ts=self.remctl.to_ts(yesterday.replace(hour=9)),
+                display_ts=self.remctl.to_ts(yesterday.replace(hour=9)),
+                all_day=False,
+            )
+
+            overdue_rows = self.remctl.q_overdue(db)
+            self.assertEqual([row["ZTITLE"] for row in overdue_rows], ["Due Yesterday"])
+
+            with (
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(self.remctl, "q_lists", return_value=[]),
+                mock.patch.object(self.remctl, "q_sections", return_value=[]),
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.remctl.cmd_stats(SimpleNamespace(json=True))
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["overdue"], len(overdue_rows))
+        finally:
+            db.close()
+
+    def test_orphaned_reminder_excluded_from_read_queries(self):
+        db = self._due_window_db()
+        try:
+            db.execute(
+                "INSERT INTO ZREMCDREMINDER "
+                "(Z_PK, ZTITLE, ZNOTES, ZCOMPLETED, ZFLAGGED, ZPRIORITY, "
+                "ZISURGENTSTATEENABLEDFORCURRENTUSER, ZDUEDATEDELTAALERTSDATA, "
+                "ZDUEDATE, ZDISPLAYDATEDATE, ZALLDAY, ZLIST, ZCKIDENTIFIER, "
+                "ZACCOUNT, ZMARKEDFORDELETION) "
+                "VALUES (99, 'Orphan', NULL, 0, 0, 0, 0, NULL, NULL, NULL, 0, 999, 'ORPHAN', 1, 0)"
+            )
+
+            self.assertEqual(self.remctl.q_reminders(db), [])
+            self.assertIsNone(self.remctl.q_reminder(db, 99))
+            self.assertIsNone(self.remctl.q_reminder_by_identifier(db, "ORPHAN"))
+        finally:
+            db.close()
 
     def test_cmd_info_json_includes_private_rich_link_url(self):
         reminder = {
@@ -5918,6 +6677,72 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload["earlyReminder"]["identifier"], str(alert_uuid).upper())
         self.assertIn("Early: 1 hour before", self.remctl._strip_ansi(formatted))
 
+    def test_cmd_info_text_shows_early_reminder_from_delta_alert_table(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        reminder_uuid = uuid.UUID("339DDE31-8F53-46BD-8469-CF42CA5C8CAB")
+        alert_uuid = uuid.UUID("2C0EDC64-6294-488A-814F-46B44C8ABBD3")
+        conn.execute(
+            "CREATE TABLE ZREMCDDUEDATEDELTAALERT ("
+            "Z_PK INTEGER, ZIDENTIFIER BLOB, ZREMINDERIDENTIFIER BLOB, "
+            "ZDUEDATEDELTAUNIT INTEGER, ZDUEDATEDELTACOUNT INTEGER, "
+            "ZMINIMUMSUPPORTEDAPPVERSION INTEGER, ZCREATIONDATE REAL, "
+            "ZACKNOWLEDGEDDATE REAL, ZSORTORDER INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO ZREMCDDUEDATEDELTAALERT VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (1, alert_uuid.bytes, reminder_uuid.bytes, 1, -1, 0, 800786817.653489, None, 1),
+        )
+        reminder = {
+            "Z_PK": 42,
+            "ZTITLE": "Taxes",
+            "ZNOTES": None,
+            "ZCOMPLETED": 0,
+            "ZFLAGGED": 0,
+            "ZPRIORITY": 0,
+            "ZISURGENTSTATEENABLEDFORCURRENTUSER": 0,
+            "ZDUEDATEDELTAALERTSDATA": None,
+            "ZDUEDATE": 800798400,
+            "ZDISPLAYDATEDATE": None,
+            "ZALLDAY": 0,
+            "ZCOMPLETIONDATE": None,
+            "ZCREATIONDATE": None,
+            "ZPARENTREMINDER": None,
+            "ZLIST": 1,
+            "ZICSURL": None,
+            "ZCKIDENTIFIER": str(reminder_uuid),
+            "list_name": "Work",
+            "recurrence_frequency": None,
+            "recurrence_interval": None,
+            "recurrence_count": None,
+            "recurrence_end_date": None,
+            "recurrence_days_of_week": None,
+            "recurrence_days_of_month": None,
+            "recurrence_months_of_year": None,
+            "recurrence_days_of_year": None,
+            "recurrence_weeks_of_year": None,
+            "recurrence_set_positions": None,
+        }
+        try:
+            with (
+                mock.patch.object(self.remctl, "open_db", return_value=conn),
+                mock.patch.object(self.remctl, "q_reminder", return_value=reminder),
+                mock.patch.object(self.remctl, "q_reminders", return_value=[]),
+                mock.patch.object(self.remctl, "q_attachments", return_value=[]),
+                mock.patch.object(self.remctl, "q_alarms", return_value=[]),
+                mock.patch.object(self.remctl, "q_hashtags", return_value=[]),
+                mock.patch.object(self.remctl, "q_section_memberships", return_value={}),
+                mock.patch.object(self.remctl, "q_rich_link", return_value=None),
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.remctl.cmd_info(SimpleNamespace(id=42, json=False))
+        finally:
+            conn.close()
+
+        plain = self.remctl._strip_ansi(stdout.getvalue())
+        self.assertIn("Early:", plain)
+        self.assertIn("1 hour before", plain)
+
     def test_existing_early_reminder_identifiers_fall_back_to_delta_alert_table(self):
         row = {"Z_PK": 1, "ZDUEDATEDELTAALERTSDATA": None}
         alert_row = {
@@ -5989,7 +6814,7 @@ class CliTests(unittest.TestCase):
             "action": "set_tags",
             "id": "REM-1",
             "tags": ["work", "home"],
-        })
+        }, partial_context=None)
 
     def test_apply_private_changes_clears_synced_tags(self):
         args = self._private_edit_args(clear_tags=True)
@@ -6003,7 +6828,7 @@ class CliTests(unittest.TestCase):
             "action": "set_tags",
             "id": "REM-1",
             "tags": [],
-        })
+        }, partial_context=None)
 
     def test_apply_private_changes_removes_selected_synced_tags(self):
         args = self._private_edit_args(remove_tag=["#work", "archive"])
@@ -6024,7 +6849,60 @@ class CliTests(unittest.TestCase):
             "action": "set_tags",
             "id": "REM-1",
             "tags": ["Home"],
-        })
+        }, partial_context=None)
+
+    def test_q_hashtags_excludes_soft_deleted_tag_links(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE ZREMCDHASHTAGLABEL (Z_PK INTEGER, ZNAME TEXT)")
+        conn.execute(
+            "CREATE TABLE ZREMCDOBJECT ("
+            "Z_PK INTEGER, ZREMINDER3 INTEGER, ZHASHTAGLABEL INTEGER, ZMARKEDFORDELETION INTEGER)"
+        )
+        conn.execute(
+            "CREATE TABLE ZREMCDREMINDER ("
+            "ZPARENTREMINDER INTEGER, ZMARKEDFORDELETION INTEGER, ZCOMPLETED INTEGER)"
+        )
+        conn.execute("INSERT INTO ZREMCDHASHTAGLABEL VALUES (1, 'Work'), (2, 'Deleted')")
+        conn.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES (1, 42, 1, 0), (2, 42, 2, 1)"
+        )
+
+        tags = [row["ZNAME"] for row in self.remctl.q_hashtags(conn, 42)]
+        _, hashtags = self.remctl.preload_extras(conn, [42])
+        conn.close()
+
+        self.assertEqual(tags, ["Work"])
+        self.assertEqual(hashtags.get(42), ["Work"])
+
+    def test_apply_private_changes_remove_tag_ignores_soft_deleted_tags(self):
+        args = self._private_edit_args(remove_tag=["work"])
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        db.execute("CREATE TABLE ZREMCDHASHTAGLABEL (Z_PK INTEGER, ZNAME TEXT)")
+        db.execute(
+            "CREATE TABLE ZREMCDOBJECT ("
+            "Z_PK INTEGER, ZREMINDER3 INTEGER, ZHASHTAGLABEL INTEGER, ZMARKEDFORDELETION INTEGER)"
+        )
+        db.execute("INSERT INTO ZREMCDHASHTAGLABEL VALUES (1, 'Work'), (2, 'Home'), (3, 'Archive')")
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "(1, 42, 1, 0), (2, 42, 2, 0), (3, 42, 3, 1)"
+        )
+        try:
+            with (
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(self.remctl, "private_action", return_value={"status": "updated"}) as private_action,
+            ):
+                self.remctl.apply_private_changes("REM-1", args, db=db)
+        finally:
+            db.close()
+
+        private_action.assert_called_once_with({
+            "action": "set_tags",
+            "id": "REM-1",
+            "tags": ["Home"],
+        }, partial_context=None)
 
     def test_tag_replacement_rejects_additive_tags(self):
         args = self._private_edit_args(tags="new", set_tags="work")
@@ -6079,6 +6957,285 @@ class CliTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["status"], "created")
         self.assertEqual(payload["name"], "Research")
+
+    def test_apply_private_changes_new_section_includes_existing_section_order(self):
+        db = self._list_db(["Projects"])
+        self._insert_section(db, 10, "Inbox", "SECTION-1")
+        self._insert_section(db, 11, "Active", "SECTION-2")
+        args = self._private_edit_args(new_section="Research")
+        try:
+            with (
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(self.remctl, "private_action", return_value={"status": "updated"}) as private_action,
+            ):
+                self.remctl.apply_private_changes("REM-1", args, db=db, list_pk=1)
+        finally:
+            db.close()
+
+        private_action.assert_called_once_with({
+            "action": "add_section_and_assign",
+            "id": "REM-1",
+            "name": "Research",
+            "existingSectionIds": ["SECTION-1", "SECTION-2"],
+        }, partial_context=None)
+
+    def test_apply_private_changes_new_section_passes_empty_existing_section_ids(self):
+        db = self._list_db(["Projects"])
+        args = self._private_edit_args(new_section="Research")
+        try:
+            with (
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(self.remctl, "private_action", return_value={"status": "updated"}) as private_action,
+            ):
+                self.remctl.apply_private_changes("REM-1", args, db=db, list_pk=1)
+        finally:
+            db.close()
+
+        private_action.assert_called_once_with({
+            "action": "add_section_and_assign",
+            "id": "REM-1",
+            "name": "Research",
+            "existingSectionIds": [],
+        }, partial_context=None)
+
+    def test_require_private_metadata_accepts_protocol_version_one(self):
+        self._default_protocol_probe.stop()
+        self.remctl._private_protocol_probe = None
+        try:
+            with (
+                mock.patch.object(self.remctl, "private_metadata_enabled", return_value=True),
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(
+                    self.remctl,
+                    "private_call_result",
+                    return_value={
+                        "returncode": 0,
+                        "stdout": json.dumps({"status": "ok", "protocolVersion": 1}),
+                        "stderr": "",
+                        "payload": {"status": "ok", "protocolVersion": 1},
+                    },
+                ) as private_call_result,
+            ):
+                self.remctl.require_private_metadata(SimpleNamespace(private=True))
+        finally:
+            self.remctl._private_protocol_probe = None
+            self._default_protocol_probe.start()
+
+        private_call_result.assert_called_once_with({"action": "protocol_version"}, timeout=5)
+
+    def test_require_private_metadata_rejects_outdated_helper_unknown_action(self):
+        self._default_protocol_probe.stop()
+        self.remctl._private_protocol_probe = None
+        try:
+            with (
+                mock.patch.object(self.remctl, "private_metadata_enabled", return_value=True),
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(
+                    self.remctl,
+                    "private_call_result",
+                    return_value={
+                        "returncode": 1,
+                        "stdout": json.dumps({"status": "error", "message": "Unknown action"}),
+                        "stderr": "",
+                        "payload": {"status": "error", "message": "Unknown action"},
+                    },
+                ),
+                self.assertRaises(SystemExit),
+                contextlib.redirect_stderr(io.StringIO()) as stderr,
+            ):
+                self.remctl.require_private_metadata(SimpleNamespace(private=True))
+        finally:
+            self.remctl._private_protocol_probe = None
+            self._default_protocol_probe.start()
+
+        self.assertIn("remctl-private is outdated", stderr.getvalue())
+        self.assertIn("protocol 0 < required 1", stderr.getvalue())
+
+    def test_require_private_metadata_memoizes_protocol_probe(self):
+        self._default_protocol_probe.stop()
+        self.remctl._private_protocol_probe = None
+        try:
+            with (
+                mock.patch.object(self.remctl, "private_metadata_enabled", return_value=True),
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(
+                    self.remctl,
+                    "private_call_result",
+                    return_value={
+                        "returncode": 0,
+                        "stdout": json.dumps({"status": "ok", "protocolVersion": 1}),
+                        "stderr": "",
+                        "payload": {"status": "ok", "protocolVersion": 1},
+                    },
+                ) as private_call_result,
+            ):
+                self.remctl.require_private_metadata(SimpleNamespace(private=True))
+                self.remctl.require_private_metadata(SimpleNamespace(private=True))
+        finally:
+            self.remctl._private_protocol_probe = None
+            self._default_protocol_probe.start()
+
+        private_call_result.assert_called_once_with({"action": "protocol_version"}, timeout=5)
+
+    def test_smart_list_edit_match_with_tags_updates_filter_payload(self):
+        db = self._smart_list_db()
+        args = SimpleNamespace(
+            name="High Priority",
+            smart_list_id=None,
+            private=True,
+            match="any",
+            flagged=False,
+            priority=None,
+            tags="work,home",
+            tag_match="any",
+            any_tag=False,
+            untagged=False,
+            date=None,
+            date_today_include_past_due=False,
+            date_on=None,
+            date_before=None,
+            date_after=None,
+            date_range=None,
+            date_relative=None,
+            time=None,
+            include_list=None,
+            exclude_list=None,
+            include_list_id=None,
+            exclude_list_id=None,
+            list_match=None,
+            vehicle=None,
+            location_title=None,
+            latitude=None,
+            longitude=None,
+            radius=100.0,
+            proximity="enter",
+            filter_json=None,
+            json=True,
+        )
+        try:
+            with (
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(
+                    self.remctl,
+                    "private_call",
+                    return_value={"status": "updated", "id": "CUSTOM-1"},
+                ) as private_call,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.remctl.cmd_smart_list_edit(args)
+        finally:
+            db.close()
+
+        payload = private_call.call_args.args[0]
+        decoded = json.loads(base64.b64decode(payload["filterData"]).decode("utf-8"))
+        self.assertEqual(decoded["operation"], "or")
+        self.assertEqual(
+            decoded["hashtags"],
+            {"hashtags": {"operation": "or", "include": ["work", "home"], "exclude": []}},
+        )
+
+    def test_smart_list_edit_match_only_reports_clear_error(self):
+        db = self._smart_list_db()
+        args = SimpleNamespace(
+            name="High Priority",
+            smart_list_id=None,
+            private=True,
+            match="any",
+            flagged=False,
+            priority=None,
+            tags=None,
+            tag_match=None,
+            any_tag=False,
+            untagged=False,
+            date=None,
+            date_today_include_past_due=False,
+            date_on=None,
+            date_before=None,
+            date_after=None,
+            date_range=None,
+            date_relative=None,
+            time=None,
+            include_list=None,
+            exclude_list=None,
+            include_list_id=None,
+            exclude_list_id=None,
+            list_match=None,
+            vehicle=None,
+            location_title=None,
+            latitude=None,
+            longitude=None,
+            radius=100.0,
+            proximity="enter",
+            filter_json=None,
+            json=True,
+        )
+        try:
+            with (
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(self.remctl, "private_call") as private_call,
+                self.assertRaises(SystemExit),
+                contextlib.redirect_stderr(io.StringIO()) as stderr,
+            ):
+                self.remctl.cmd_smart_list_edit(args)
+        finally:
+            db.close()
+
+        private_call.assert_not_called()
+        self.assertIn("--match", stderr.getvalue())
+        self.assertIn("filter option", stderr.getvalue())
+
+    def test_smart_list_create_without_match_flags_builds_unchanged_payload(self):
+        db = self._smart_list_db()
+        args = SimpleNamespace(
+            name="Flagged Review",
+            private=True,
+            flagged=True,
+            priority=None,
+            tags=None,
+            tag_match="any",
+            any_tag=False,
+            untagged=False,
+            date=None,
+            date_today_include_past_due=False,
+            date_on=None,
+            date_before=None,
+            date_after=None,
+            date_range=None,
+            date_relative=None,
+            time=None,
+            include_list=None,
+            exclude_list=None,
+            include_list_id=None,
+            exclude_list_id=None,
+            list_match=None,
+            vehicle=None,
+            location_title=None,
+            latitude=None,
+            longitude=None,
+            radius=100.0,
+            proximity="enter",
+            filter_json=None,
+            json=True,
+        )
+        try:
+            with (
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(
+                    self.remctl,
+                    "private_call",
+                    return_value={"status": "created", "id": "SMART-1"},
+                ) as private_call,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.remctl.cmd_smart_list_create(args)
+        finally:
+            db.close()
+
+        payload = private_call.call_args.args[0]
+        self.assertEqual(payload["filterData"], "eyJmbGFnZ2VkIjp0cnVlfQ==")
 
     def test_section_create_refuses_duplicate_name_before_private_call(self):
         db = self._list_db(["Projects"])
