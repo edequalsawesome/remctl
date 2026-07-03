@@ -1929,7 +1929,8 @@ def q_reminders(db, list_pk=None, completed=False, parent_pk=None, top_level=Fal
     elif top_level: c.append("(r.ZPARENTREMINDER IS NULL OR r.ZPARENTREMINDER = 0)")
     return db.execute(
         f"SELECT {rem_cols(db)} FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l "
-        f"ON r.ZLIST = l.Z_PK WHERE {' AND '.join(c)} ORDER BY r.Z_PK LIMIT ?",
+        f"ON r.ZLIST = l.Z_PK WHERE {' AND '.join(c)} AND l.Z_PK IS NOT NULL "
+        f"ORDER BY r.Z_PK LIMIT ?",
         params + [limit]
     ).fetchall()
 
@@ -1956,7 +1957,8 @@ def q_reminder(db, pk):
     return db.execute(
         f"SELECT {rem_cols(db)} FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l "
         f"ON r.ZLIST = l.Z_PK "
-        f"WHERE r.Z_PK = ? AND r.ZMARKEDFORDELETION = 0 AND r.ZACCOUNT IS NOT NULL",
+        f"WHERE r.Z_PK = ? AND r.ZMARKEDFORDELETION = 0 AND r.ZACCOUNT IS NOT NULL "
+        f"AND l.Z_PK IS NOT NULL",
         (pk,)
     ).fetchone()
 
@@ -1967,7 +1969,7 @@ def q_reminder_by_identifier(db, identifier):
         f"SELECT {rem_cols(db)} FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l "
         f"ON r.ZLIST = l.Z_PK "
         f"WHERE lower(r.ZCKIDENTIFIER) = lower(?) AND r.ZMARKEDFORDELETION = 0 AND r.ZACCOUNT IS NOT NULL "
-        f"ORDER BY r.Z_PK DESC LIMIT 1",
+        f"AND l.Z_PK IS NOT NULL ORDER BY r.Z_PK DESC LIMIT 1",
         (identifier,)
     ).fetchone()
 
@@ -2131,7 +2133,8 @@ def q_rich_link(db, pk):
 def q_hashtags(db, pk):
     return db.execute(
         "SELECT h.ZNAME FROM ZREMCDOBJECT o JOIN ZREMCDHASHTAGLABEL h "
-        "ON o.ZHASHTAGLABEL = h.Z_PK WHERE o.ZREMINDER3 = ?", (pk,)
+        "ON o.ZHASHTAGLABEL = h.Z_PK WHERE o.ZREMINDER3 = ? AND o.ZMARKEDFORDELETION = 0",
+        (pk,),
     ).fetchall()
 
 
@@ -5832,7 +5835,13 @@ def due_spec_is_all_day(s):
     m = re.match(r"^(?:(next|this)\s+)?(\w+)(?:\s+(?:at\s+)?(.+))?$", sl)
     if m:
         _, day_name, time_text = m.groups()
-        return day_name in WEEKDAY_MAP and not time_text
+        if day_name in WEEKDAY_MAP and not time_text:
+            return True
+
+    if _cal:
+        _, status = _cal.parseDT(s)
+        if status > 0:
+            return status == 1
 
     return False
 
@@ -6411,6 +6420,13 @@ def cmd_smart_list_create(a):
         print("Error: smart-list-create requires --private.", file=sys.stderr)
         sys.exit(1)
     validate_list_appearance_args(a)
+    require_private_metadata(a)
+    if not getattr(a, "filter_json", None):
+        try:
+            validate_materializing_smart_list_args(a)
+        except SmartListFilterError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
     db = open_db()
     try:
         filter_payload = smart_list_filter_payload_from_args(a, db)
@@ -6418,8 +6434,6 @@ def cmd_smart_list_create(a):
     except SmartListFilterError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
-
-    require_private_metadata(a)
     if q_custom_smart_list_exact_name_count(db, a.name):
         print(
             f"Error: smart list already exists: {a.name}. Choose a unique test name.",
@@ -8427,6 +8441,13 @@ def cmd_info(a):
         else:
             print(f"  Due:       {effective_due.strftime('%b %d, %Y at %I:%M %p')}")
     early_reminders = due_date_delta_alerts_from_row(r, ts=ts)
+    if not early_reminders and r["ZCKIDENTIFIER"]:
+        try:
+            early_reminders = due_date_delta_alert_rows_to_json(
+                q_due_date_delta_alerts(db, r["ZCKIDENTIFIER"])
+            )
+        except (sqlite3.Error, ValueError):
+            early_reminders = []
     if early_reminders:
         labels = ", ".join(item["label"] for item in early_reminders)
         print(f"  Early:     {C.cyan(labels)}")
@@ -8521,7 +8542,8 @@ def cmd_sharees(a):
 
 def cmd_stats(a):
     db = open_db()
-    due_column = due_expr()
+    due_column = due_filter_expr(db)
+    sod = start_of_day()
     total = db.execute("SELECT COUNT(*) FROM ZREMCDREMINDER WHERE ZMARKEDFORDELETION = 0 AND ZACCOUNT IS NOT NULL").fetchone()[0]
     active = db.execute("SELECT COUNT(*) FROM ZREMCDREMINDER WHERE ZMARKEDFORDELETION = 0 AND ZCOMPLETED = 0 AND ZACCOUNT IS NOT NULL").fetchone()[0]
     flagged = db.execute("SELECT COUNT(*) FROM ZREMCDREMINDER WHERE ZMARKEDFORDELETION = 0 AND ZCOMPLETED = 0 AND ZFLAGGED = 1 AND ZACCOUNT IS NOT NULL").fetchone()[0]
@@ -8530,8 +8552,9 @@ def cmd_stats(a):
         f"AND r.ZCOMPLETED = 0 AND r.ZACCOUNT IS NOT NULL AND {urgent_where_clause(db)}"
     ).fetchone()[0]
     overdue = db.execute(
-        f"SELECT COUNT(*) FROM ZREMCDREMINDER r WHERE r.ZMARKEDFORDELETION = 0 AND r.ZCOMPLETED = 0 AND r.ZACCOUNT IS NOT NULL "
-        f"AND {due_column} IS NOT NULL AND {due_column} < {to_ts(datetime.now())}"
+        f"SELECT COUNT(*) FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l ON r.ZLIST = l.Z_PK "
+        f"WHERE r.ZMARKEDFORDELETION = 0 AND r.ZCOMPLETED = 0 AND r.ZACCOUNT IS NOT NULL "
+        f"AND l.Z_PK IS NOT NULL AND {due_column} IS NOT NULL AND {due_column} < {to_ts(sod)}"
     ).fetchone()[0]
     lists_count = len(q_lists(db))
     sections_count = len(q_sections(db))

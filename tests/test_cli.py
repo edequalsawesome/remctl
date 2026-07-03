@@ -101,6 +101,26 @@ class CliTests(unittest.TestCase):
         self.assertFalse(self.remctl.due_spec_is_all_day("+2h"))
         self.assertFalse(self.remctl.due_spec_is_all_day("eod"))
 
+    def test_due_spec_is_all_day_uses_parsedatetime_status_fallback(self):
+        fake_date = self.remctl.datetime(2026, 3, 30, 0, 0)
+        fake_datetime = self.remctl.datetime(2026, 3, 30, 15, 0)
+
+        class FakeCal:
+            def __init__(self, status):
+                self._status = status
+
+            def parseDT(self, _s):
+                if self._status == 1:
+                    return fake_date, 1
+                return fake_datetime, self._status
+
+        with mock.patch.object(self.remctl, "_cal", FakeCal(1)):
+            self.assertTrue(self.remctl.due_spec_is_all_day("March 30"))
+        with mock.patch.object(self.remctl, "_cal", FakeCal(3)):
+            self.assertFalse(self.remctl.due_spec_is_all_day("March 30 at 3pm"))
+        with mock.patch.object(self.remctl, "_cal", None):
+            self.assertFalse(self.remctl.due_spec_is_all_day("March 30"))
+
     def test_add_passes_all_day_to_bridge_for_date_only_due(self):
         args = SimpleNamespace(
             title="Test",
@@ -2291,16 +2311,20 @@ class CliTests(unittest.TestCase):
         self.assertIn("requires --private", stderr.getvalue())
 
     def test_smart_list_create_rejects_unsupported_filter_before_helper(self):
+        db = self._smart_list_db()
         args = SimpleNamespace(name="Nope", private=True, flagged=False, priority="none", json=True)
-        with (
-            mock.patch.object(self.remctl, "private_available") as private_available,
-            mock.patch.object(self.remctl, "private_call") as private_call,
-            contextlib.redirect_stderr(io.StringIO()) as stderr,
-            self.assertRaises(SystemExit),
-        ):
-            self.remctl.cmd_smart_list_create(args)
+        try:
+            with (
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(self.remctl, "private_call") as private_call,
+                contextlib.redirect_stderr(io.StringIO()) as stderr,
+                self.assertRaises(SystemExit),
+            ):
+                self.remctl.cmd_smart_list_create(args)
+        finally:
+            db.close()
 
-        private_available.assert_not_called()
         private_call.assert_not_called()
         self.assertIn("Unsupported smart list priority", stderr.getvalue())
 
@@ -5545,6 +5569,68 @@ class CliTests(unittest.TestCase):
                 os.environ["TZ"] = prev_tz
             time.tzset()
 
+    def test_stats_overdue_count_matches_q_overdue(self):
+        from datetime import datetime, timedelta
+
+        db = self._due_window_db()
+        try:
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            yesterday = today - timedelta(days=1)
+
+            timed_today = self.remctl.to_ts(today.replace(hour=9))
+            self._insert_due_reminder(
+                db, 1, "Timed Earlier Today",
+                due_ts=timed_today,
+                display_ts=timed_today,
+                all_day=False,
+            )
+            self._insert_due_reminder(
+                db, 2, "AllDay Today",
+                due_ts=self.remctl.to_ts(today),
+                display_ts=self.remctl.to_ts(today),
+                all_day=True,
+            )
+            self._insert_due_reminder(
+                db, 3, "Due Yesterday",
+                due_ts=self.remctl.to_ts(yesterday.replace(hour=9)),
+                display_ts=self.remctl.to_ts(yesterday.replace(hour=9)),
+                all_day=False,
+            )
+
+            overdue_rows = self.remctl.q_overdue(db)
+            self.assertEqual([row["ZTITLE"] for row in overdue_rows], ["Due Yesterday"])
+
+            with (
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(self.remctl, "q_lists", return_value=[]),
+                mock.patch.object(self.remctl, "q_sections", return_value=[]),
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.remctl.cmd_stats(SimpleNamespace(json=True))
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["overdue"], len(overdue_rows))
+        finally:
+            db.close()
+
+    def test_orphaned_reminder_excluded_from_read_queries(self):
+        db = self._due_window_db()
+        try:
+            db.execute(
+                "INSERT INTO ZREMCDREMINDER "
+                "(Z_PK, ZTITLE, ZNOTES, ZCOMPLETED, ZFLAGGED, ZPRIORITY, "
+                "ZISURGENTSTATEENABLEDFORCURRENTUSER, ZDUEDATEDELTAALERTSDATA, "
+                "ZDUEDATE, ZDISPLAYDATEDATE, ZALLDAY, ZLIST, ZCKIDENTIFIER, "
+                "ZACCOUNT, ZMARKEDFORDELETION) "
+                "VALUES (99, 'Orphan', NULL, 0, 0, 0, 0, NULL, NULL, NULL, 0, 999, 'ORPHAN', 1, 0)"
+            )
+
+            self.assertEqual(self.remctl.q_reminders(db), [])
+            self.assertIsNone(self.remctl.q_reminder(db, 99))
+            self.assertIsNone(self.remctl.q_reminder_by_identifier(db, "ORPHAN"))
+        finally:
+            db.close()
+
     def test_cmd_info_json_includes_private_rich_link_url(self):
         reminder = {
             "Z_PK": 42,
@@ -5918,6 +6004,72 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload["earlyReminder"]["identifier"], str(alert_uuid).upper())
         self.assertIn("Early: 1 hour before", self.remctl._strip_ansi(formatted))
 
+    def test_cmd_info_text_shows_early_reminder_from_delta_alert_table(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        reminder_uuid = uuid.UUID("339DDE31-8F53-46BD-8469-CF42CA5C8CAB")
+        alert_uuid = uuid.UUID("2C0EDC64-6294-488A-814F-46B44C8ABBD3")
+        conn.execute(
+            "CREATE TABLE ZREMCDDUEDATEDELTAALERT ("
+            "Z_PK INTEGER, ZIDENTIFIER BLOB, ZREMINDERIDENTIFIER BLOB, "
+            "ZDUEDATEDELTAUNIT INTEGER, ZDUEDATEDELTACOUNT INTEGER, "
+            "ZMINIMUMSUPPORTEDAPPVERSION INTEGER, ZCREATIONDATE REAL, "
+            "ZACKNOWLEDGEDDATE REAL, ZSORTORDER INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO ZREMCDDUEDATEDELTAALERT VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (1, alert_uuid.bytes, reminder_uuid.bytes, 1, -1, 0, 800786817.653489, None, 1),
+        )
+        reminder = {
+            "Z_PK": 42,
+            "ZTITLE": "Taxes",
+            "ZNOTES": None,
+            "ZCOMPLETED": 0,
+            "ZFLAGGED": 0,
+            "ZPRIORITY": 0,
+            "ZISURGENTSTATEENABLEDFORCURRENTUSER": 0,
+            "ZDUEDATEDELTAALERTSDATA": None,
+            "ZDUEDATE": 800798400,
+            "ZDISPLAYDATEDATE": None,
+            "ZALLDAY": 0,
+            "ZCOMPLETIONDATE": None,
+            "ZCREATIONDATE": None,
+            "ZPARENTREMINDER": None,
+            "ZLIST": 1,
+            "ZICSURL": None,
+            "ZCKIDENTIFIER": str(reminder_uuid),
+            "list_name": "Work",
+            "recurrence_frequency": None,
+            "recurrence_interval": None,
+            "recurrence_count": None,
+            "recurrence_end_date": None,
+            "recurrence_days_of_week": None,
+            "recurrence_days_of_month": None,
+            "recurrence_months_of_year": None,
+            "recurrence_days_of_year": None,
+            "recurrence_weeks_of_year": None,
+            "recurrence_set_positions": None,
+        }
+        try:
+            with (
+                mock.patch.object(self.remctl, "open_db", return_value=conn),
+                mock.patch.object(self.remctl, "q_reminder", return_value=reminder),
+                mock.patch.object(self.remctl, "q_reminders", return_value=[]),
+                mock.patch.object(self.remctl, "q_attachments", return_value=[]),
+                mock.patch.object(self.remctl, "q_alarms", return_value=[]),
+                mock.patch.object(self.remctl, "q_hashtags", return_value=[]),
+                mock.patch.object(self.remctl, "q_section_memberships", return_value={}),
+                mock.patch.object(self.remctl, "q_rich_link", return_value=None),
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.remctl.cmd_info(SimpleNamespace(id=42, json=False))
+        finally:
+            conn.close()
+
+        plain = self.remctl._strip_ansi(stdout.getvalue())
+        self.assertIn("Early:", plain)
+        self.assertIn("1 hour before", plain)
+
     def test_existing_early_reminder_identifiers_fall_back_to_delta_alert_table(self):
         row = {"Z_PK": 1, "ZDUEDATEDELTAALERTSDATA": None}
         alert_row = {
@@ -6020,6 +6172,59 @@ class CliTests(unittest.TestCase):
             self.remctl.apply_private_changes("REM-1", args, db=db)
 
         q_hashtags.assert_called_once_with(db, 42)
+        private_action.assert_called_once_with({
+            "action": "set_tags",
+            "id": "REM-1",
+            "tags": ["Home"],
+        })
+
+    def test_q_hashtags_excludes_soft_deleted_tag_links(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE ZREMCDHASHTAGLABEL (Z_PK INTEGER, ZNAME TEXT)")
+        conn.execute(
+            "CREATE TABLE ZREMCDOBJECT ("
+            "Z_PK INTEGER, ZREMINDER3 INTEGER, ZHASHTAGLABEL INTEGER, ZMARKEDFORDELETION INTEGER)"
+        )
+        conn.execute(
+            "CREATE TABLE ZREMCDREMINDER ("
+            "ZPARENTREMINDER INTEGER, ZMARKEDFORDELETION INTEGER, ZCOMPLETED INTEGER)"
+        )
+        conn.execute("INSERT INTO ZREMCDHASHTAGLABEL VALUES (1, 'Work'), (2, 'Deleted')")
+        conn.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES (1, 42, 1, 0), (2, 42, 2, 1)"
+        )
+
+        tags = [row["ZNAME"] for row in self.remctl.q_hashtags(conn, 42)]
+        _, hashtags = self.remctl.preload_extras(conn, [42])
+        conn.close()
+
+        self.assertEqual(tags, ["Work"])
+        self.assertEqual(hashtags.get(42), ["Work"])
+
+    def test_apply_private_changes_remove_tag_ignores_soft_deleted_tags(self):
+        args = self._private_edit_args(remove_tag=["work"])
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        db.execute("CREATE TABLE ZREMCDHASHTAGLABEL (Z_PK INTEGER, ZNAME TEXT)")
+        db.execute(
+            "CREATE TABLE ZREMCDOBJECT ("
+            "Z_PK INTEGER, ZREMINDER3 INTEGER, ZHASHTAGLABEL INTEGER, ZMARKEDFORDELETION INTEGER)"
+        )
+        db.execute("INSERT INTO ZREMCDHASHTAGLABEL VALUES (1, 'Work'), (2, 'Home'), (3, 'Archive')")
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "(1, 42, 1, 0), (2, 42, 2, 0), (3, 42, 3, 1)"
+        )
+        try:
+            with (
+                mock.patch.object(self.remctl, "private_available", return_value=True),
+                mock.patch.object(self.remctl, "private_action", return_value={"status": "updated"}) as private_action,
+            ):
+                self.remctl.apply_private_changes("REM-1", args, db=db)
+        finally:
+            db.close()
+
         private_action.assert_called_once_with({
             "action": "set_tags",
             "id": "REM-1",
