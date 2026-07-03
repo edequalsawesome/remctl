@@ -1973,6 +1973,30 @@ def q_reminder_by_identifier(db, identifier):
         (identifier,)
     ).fetchone()
 
+
+def q_recent_reminder_by_title(db, title, *, list_pk=None, within_seconds=10):
+    if not title:
+        return None
+    cutoff = to_ts(datetime.now()) - within_seconds
+    clauses = [
+        "r.ZMARKEDFORDELETION = 0",
+        "r.ZACCOUNT IS NOT NULL",
+        "l.Z_PK IS NOT NULL",
+        "lower(r.ZTITLE) = lower(?)",
+        "r.ZCREATIONDATE IS NOT NULL",
+        "r.ZCREATIONDATE >= ?",
+    ]
+    params = [title, cutoff]
+    if list_pk is not None:
+        clauses.append("r.ZLIST = ?")
+        params.append(list_pk)
+    return db.execute(
+        f"SELECT {rem_cols(db)} FROM ZREMCDREMINDER r LEFT JOIN ZREMCDBASELIST l "
+        f"ON r.ZLIST = l.Z_PK WHERE {' AND '.join(clauses)} "
+        f"ORDER BY r.Z_PK DESC LIMIT 1",
+        params,
+    ).fetchone()
+
 def q_subtask_count(db, pk):
     return db.execute(
         "SELECT COUNT(*) FROM ZREMCDREMINDER WHERE ZPARENTREMINDER = ? "
@@ -3669,7 +3693,8 @@ def parse_subtask_specs(values):
             normalized["notes"] = spec["notes"]
 
         if spec.get("due"):
-            dt = parse_due(str(spec["due"]))
+            due_text = str(spec["due"])
+            dt = parse_due(due_text)
             if not dt:
                 print(
                     f"Error: could not parse subtask due date {spec['due']!r}. "
@@ -3678,6 +3703,8 @@ def parse_subtask_specs(values):
                 )
                 sys.exit(1)
             normalized["due"] = dt.isoformat()
+            if due_spec_is_all_day(due_text):
+                normalized["allDay"] = True
 
         if spec.get("priority"):
             priority = str(spec["priority"]).lower()
@@ -3802,6 +3829,8 @@ def bridge_update_subtask(subtask_id, spec):
         data["notes"] = spec["notes"]
     if "due" in spec:
         data["due"] = spec["due"]
+        if spec.get("allDay"):
+            data["allDay"] = True
     if "priority" in spec:
         data["priority"] = pm[spec["priority"]]
     if "alarm" in spec:
@@ -4697,10 +4726,14 @@ def apply_private_changes(reminder_ckid, a, db=None, list_pk=None):
 
     subtasks = parse_subtask_specs(getattr(a, "subtask", None))
     if subtasks:
+        private_subtasks = [
+            {key: value for key, value in spec.items() if key != "allDay"}
+            for spec in subtasks
+        ]
         subtask_result = private_action({
             "action": "add_subtasks",
             "id": reminder_ckid,
-            "subtasks": subtasks,
+            "subtasks": private_subtasks,
         })
         bridge_updates = []
         child_private_updates = []
@@ -5553,6 +5586,29 @@ def osa_by_id_try(list_name, rem_id, action, timeout=120):
     script = (
         f'tell application "Reminders"\n'
         f'tell list "{esc(list_name)}"\n'
+        f'set r to (first reminder whose id is "{esc(rem_id)}")\n'
+        f'{action}\n'
+        f'end tell\n'
+        f'end tell'
+    )
+    try:
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=timeout)
+        return r.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def osa_flag_reminder_try(list_name, reminder_ckid, *, flagged=True, timeout=120):
+    """Set the real ZFLAGGED column via AppleScript without touching priority."""
+    if not reminder_ckid:
+        return False
+    rem_id = reminder_ckid if reminder_ckid.startswith("x-apple-reminder://") else f"x-apple-reminder://{reminder_ckid}"
+    action = "set flagged of r to true" if flagged else "set flagged of r to false"
+    if list_name:
+        return osa_by_id_try(list_name, rem_id, action, timeout=timeout)
+    script = (
+        f'tell application "Reminders"\n'
+        f'tell default list\n'
         f'set r to (first reminder whose id is "{esc(rem_id)}")\n'
         f'{action}\n'
         f'end tell\n'
@@ -7692,7 +7748,6 @@ def cmd_add(a):
                 data["allDay"] = True
         if priority_value is not None:
             data["priority"] = priority_value
-        if a.flag and not wants_private: data["flagged"] = True
         if hasattr(a, 'url') and a.url and not wants_private: data["url"] = a.url
         if parsed_recurrence is not None:
             data["recurrence"] = parsed_recurrence
@@ -7718,6 +7773,19 @@ def cmd_add(a):
                 created_row = q_reminder_by_identifier(db, result.get("id", ""))
             except RemindersDBUnavailable:
                 created_row = None
+            if a.flag and not wants_private:
+                flag_list_name = None
+                if created_row:
+                    flag_list_name = created_row["list_name"]
+                elif list_resolution:
+                    flag_list_name = list_resolution["title"]
+                else:
+                    flag_list_name = target_list_name
+                if not osa_flag_reminder_try(flag_list_name, result.get("id", "")):
+                    print(
+                        "Warning: created the reminder but failed to set the flag via AppleScript.",
+                        file=sys.stderr,
+                    )
             if a.json:
                 payload = {"status": "created", "id": result.get("id", ""), "title": title}
                 if list_resolution and list_resolution.get("method") != "exact":
@@ -7747,6 +7815,37 @@ def cmd_add(a):
             fail_bridge_write(bridge_result, operation="create the reminder")
         if wants_private or parsed_recurrence is not None or parsed_alarm is not None:
             fail_bridge_write(bridge_result, operation="create the reminder")
+
+    recovered_row = None
+    if bridge_result and bridge_result.get("returncode") != 0:
+        try:
+            if db is None:
+                db = open_db()
+            recovered_row = q_recent_reminder_by_title(db, title, list_pk=target_list_pk)
+        except RemindersDBUnavailable:
+            recovered_row = None
+    if recovered_row:
+        result = {"id": recovered_row["ZCKIDENTIFIER"] or "", "status": "created"}
+        created_row = recovered_row
+        if a.json:
+            payload = {"status": "created", "id": result.get("id", ""), "title": title}
+            if list_resolution and list_resolution.get("method") != "exact":
+                payload["resolvedList"] = {
+                    "requested": list_resolution.get("requested"),
+                    "title": list_resolution["title"],
+                    "id": list_resolution["id"],
+                    "method": list_resolution["method"],
+                }
+            if created_row:
+                payload["numericId"] = created_row["Z_PK"]
+            print(json.dumps(payload))
+        else:
+            print(f"Created: {safe_display(title)}")
+            if list_resolution and list_resolution.get("method") != "exact":
+                print(f"List: {safe_display(list_resolution['title'])} (resolved from {safe_display(list_resolution['requested'])})")
+            if created_row:
+                print(f"ID: #{created_row['Z_PK']}")
+        return
 
     if dt and due_all_day:
         message = "All-day due dates require remctl-bridge so Reminders can store date-only components."
@@ -8832,8 +8931,38 @@ def cmd_list_create(a):
     data = {"action": "create_list", "title": a.name}
     if hasattr(a, 'color') and a.color and is_supported_public_list_color(a.color):
         data["color"] = a.color
-    result = bridge_call(data) if bridge_available() else None
-    if not result or result.get("status") != "created":
+    bridge_result = None
+    result = None
+    if bridge_available():
+        bridge_result = bridge_call_result(data)
+        if bridge_result_ok(bridge_result, "created"):
+            result = bridge_result["payload"]
+        elif bridge_failure_is_access_error(bridge_result):
+            fail_bridge_write(bridge_result, operation="create the list")
+        elif bridge_failure_is_execution_error(bridge_result):
+            fail_bridge_write(bridge_result, operation="create the list")
+        else:
+            try:
+                db = open_db()
+                if q_list_exact_name_count(db, a.name):
+                    result = {"status": "created", "name": a.name}
+                else:
+                    if bridge_result.get("returncode") != 0:
+                        print(
+                            "Warning: remctl-bridge failed while creating the list; "
+                            f"falling back to AppleScript. Bridge error: {bridge_failure_message(bridge_result)}",
+                            file=sys.stderr,
+                        )
+                    result = create_list_with_applescript(a.name)
+            except RemindersDBUnavailable:
+                if bridge_result.get("returncode") != 0:
+                    print(
+                        "Warning: remctl-bridge failed while creating the list; "
+                        f"falling back to AppleScript. Bridge error: {bridge_failure_message(bridge_result)}",
+                        file=sys.stderr,
+                    )
+                result = create_list_with_applescript(a.name)
+    else:
         result = create_list_with_applescript(a.name)
     if result and result.get("status") == "created":
         if a.json:
