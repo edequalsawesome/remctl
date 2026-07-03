@@ -1778,6 +1778,9 @@ int main(int argc, const char * argv[]) {
             id originatorObjectID = [REMObjectID objectIDWithURL:shareeURL(originatorID)];
             if (!assigneeObjectID) fail(@"Could not build ReminderKit assignee object ID");
             if (!originatorObjectID) fail(@"Could not build ReminderKit originator object ID");
+            if (![assignmentContext respondsToSelector:@selector(removeAllAssignments)]) {
+                fail(@"ReminderKit reminder change item does not support assignment");
+            }
             [assignmentContext removeAllAssignments];
             id assignment = [(REMReminderAssignmentContextChangeItem *)assignmentContext addAssignmentWithAssigneeID:assigneeObjectID originatorID:originatorObjectID status:1];
             if (!assignment) fail(@"Could not create ReminderKit assignment");
@@ -1816,10 +1819,18 @@ int main(int argc, const char * argv[]) {
                 addedImages += 1;
             }
         } else if ([action isEqualToString:@"set_flagged"]) {
-            [[change flaggedContext] setFlagged:[cmd[@"flagged"] boolValue] ? 1 : 0];
+            id flaggedContext = [change flaggedContext];
+            if (!flaggedContext || ![flaggedContext respondsToSelector:@selector(setFlagged:)]) {
+                fail(@"ReminderKit flagged context unavailable");
+            }
+            [flaggedContext setFlagged:[cmd[@"flagged"] boolValue] ? 1 : 0];
             details[@"flagged"] = @([cmd[@"flagged"] boolValue]);
         } else if ([action isEqualToString:@"set_urgent"]) {
-            [[change urgentAlarmContext] setIsUrgentStateEnabledForCurrentUser:[cmd[@"urgent"] boolValue]];
+            id urgentContext = [change urgentAlarmContext];
+            if (!urgentContext || ![urgentContext respondsToSelector:@selector(setIsUrgentStateEnabledForCurrentUser:)]) {
+                fail(@"ReminderKit urgent context unavailable");
+            }
+            [urgentContext setIsUrgentStateEnabledForCurrentUser:[cmd[@"urgent"] boolValue]];
             details[@"urgent"] = @([cmd[@"urgent"] boolValue]);
         } else if ([action isEqualToString:@"set_early_reminder"]) {
             id context = [change dueDateDeltaAlertContext];
