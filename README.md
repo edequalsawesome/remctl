@@ -43,7 +43,9 @@ remctl today
 
 `--bootstrap` copies the CLI and helpers, compiles the Swift helpers when `swiftc` is available, creates RemCTL's config directory, and installs shell completion when supported. For zsh, `setup` prints the `fpath` lines to add to `~/.zshrc` when your config does not already load the completion directory.
 
-If the installer says `PATH action required`, add the printed PATH line and open a new Terminal window before typing `remctl`.
+The installer also creates two aliases in your bin directory — `rctl` and `reminders` — that behave identically to `remctl`. Any command in this README works with any of the three names.
+
+If the installer says `PATH action required`, add the printed PATH line and open a new Terminal window before typing `remctl`, `rctl`, or `reminders`.
 
 If you install to `~/.local/bin`, use the same prefix every time:
 

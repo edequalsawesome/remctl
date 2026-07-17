@@ -123,6 +123,33 @@ safe_config_dir() {
     [[ "$(basename "$path")" == "remctl" ]] || return 1
 }
 
+ALIASES=(
+    rctl
+    reminders
+)
+
+remove_alias_symlink() {
+    local bin_dir="$1"
+    local alias_name="$2"
+    local alias_path="$bin_dir/$alias_name"
+    if [[ -L "$alias_path" ]]; then
+        local target
+        target="$(readlink "$alias_path")" || return 0
+        # Only remove if it's a relative or absolute symlink to remctl in the same directory
+        if [[ "$target" == "remctl" || "$(basename "$target")" == "remctl" ]]; then
+            if [[ "$DRY_RUN" -eq 1 ]]; then
+                echo -e "  ${YELLOW}would remove alias${RESET} $alias_path"
+            else
+                rm -f -- "$alias_path"
+                echo -e "  ${GREEN}removed alias${RESET} $alias_path"
+            fi
+            REMOVED=$((REMOVED + 1))
+        else
+            echo -e "  ${DIM}left unrelated symlink${RESET} $alias_path"
+        fi
+    fi
+}
+
 for bin_dir in "${BIN_DIRS[@]}"; do
     if [[ ! -d "$bin_dir" ]]; then
         echo -e "${DIM}Skipping missing $bin_dir${RESET}"
@@ -131,6 +158,9 @@ for bin_dir in "${BIN_DIRS[@]}"; do
     echo -e "${BLUE}->${RESET} Checking $bin_dir"
     for file in "${FILES[@]}"; do
         remove_file "$bin_dir/$file"
+    done
+    for alias_name in "${ALIASES[@]}"; do
+        remove_alias_symlink "$bin_dir" "$alias_name"
     done
     remove_empty_dir "$bin_dir/completions"
 done

@@ -19,7 +19,7 @@ Options:
   -h, --help                  Show this help text
 
 Notes:
-  The installer copies binaries into ~/bin by default.
+  The installer copies binaries into ~/bin by default and creates rctl and reminders aliases.
   Use PREFIX="$HOME/.local" if you want ~/.local/bin instead.
   remctl-private is optional and only used by explicit --private writes.
   Run `remctl onboard`, then `remctl permissions full-disk-access` for EventKit and database access.
@@ -87,6 +87,12 @@ cp "$SCRIPT_DIR/remctl" "$BIN_DIR/remctl"
 chmod +x "$BIN_DIR/remctl"
 echo -e "  ${GREEN}✓${RESET} remctl → $BIN_DIR/remctl"
 
+echo -e "${BLUE}→${RESET} Installing aliases..."
+ln -sf "remctl" "$BIN_DIR/rctl"
+ln -sf "remctl" "$BIN_DIR/reminders"
+echo -e "  ${GREEN}✓${RESET} rctl → $BIN_DIR/rctl"
+echo -e "  ${GREEN}✓${RESET} reminders → $BIN_DIR/reminders"
+
 echo -e "${BLUE}→${RESET} Installing shared runtime helpers..."
 cp "$SCRIPT_DIR/remctl_runtime.py" "$BIN_DIR/remctl_runtime.py"
 chmod 644 "$BIN_DIR/remctl_runtime.py"
@@ -102,13 +108,15 @@ cp "$SCRIPT_DIR/remctl_smart_lists.py" "$BIN_DIR/remctl_smart_lists.py"
 chmod 644 "$BIN_DIR/remctl_smart_lists.py"
 echo -e "  ${GREEN}✓${RESET} remctl_smart_lists.py → $BIN_DIR/remctl_smart_lists.py"
 
-echo -e "${BLUE}→${RESET} Installing zsh completion source..."
+echo -e "${BLUE}→${RESET} Installing shell completion sources..."
 mkdir -p "$BIN_DIR/completions"
-completion_tmp="$BIN_DIR/completions/_remctl.tmp"
-"$BIN_DIR/remctl" completion zsh > "$completion_tmp"
-mv "$completion_tmp" "$BIN_DIR/completions/_remctl"
-chmod 644 "$BIN_DIR/completions/_remctl"
-echo -e "  ${GREEN}✓${RESET} _remctl → $BIN_DIR/completions/_remctl"
+for name in remctl rctl reminders; do
+    completion_tmp="$BIN_DIR/completions/_${name}.tmp"
+    "$BIN_DIR/$name" completion zsh > "$completion_tmp"
+    mv "$completion_tmp" "$BIN_DIR/completions/_${name}"
+    chmod 644 "$BIN_DIR/completions/_${name}"
+    echo -e "  ${GREEN}✓${RESET} _${name} → $BIN_DIR/completions/_${name}"
+done
 
 # 2. Compile and install helpers
 COMPILE_LOG="$(mktemp -t remctl-compile)"
@@ -195,6 +203,15 @@ if [[ "$SETUP_SHELL" != "skip" ]]; then
     echo -e "${BLUE}→${RESET} Running remctl setup..."
     SETUP_ARGS=("$BIN_DIR/remctl" "setup" "--shell" "$SETUP_SHELL")
     "${SETUP_ARGS[@]}"
+
+    echo -e "${BLUE}→${RESET} Installing completions for aliases..."
+    for alias_name in rctl reminders; do
+        if "$BIN_DIR/$alias_name" setup --shell "$SETUP_SHELL" >/dev/null 2>&1; then
+            echo -e "  ${GREEN}✓${RESET} _${alias_name} installed"
+        else
+            echo -e "  ${YELLOW}⚠${RESET} _${alias_name} setup skipped"
+        fi
+    done
 fi
 
 if [[ "$RUN_DOCTOR" -eq 1 ]]; then
@@ -216,5 +233,6 @@ fi
 if [[ "$PATH_NEEDS_UPDATE" -eq 1 ]]; then
     echo -e "${YELLOW}${BOLD}Reminder:${RESET}${YELLOW} open a new Terminal window after adding $BIN_DIR to PATH, or run commands with the full path:${RESET}"
     echo -e "  ${BOLD}$BIN_DIR/remctl onboard${RESET}"
+    echo -e "  Aliases also work: ${BOLD}$BIN_DIR/rctl${RESET} and ${BOLD}$BIN_DIR/reminders${RESET}"
 fi
 echo ""

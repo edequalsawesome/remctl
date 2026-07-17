@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""remctl — Power-user Reminders CLI v1.3.0
+"""remctl — Power-user Reminders CLI v1.4.1
 
 Reads from the iCloud Reminders CoreData database (sections, subtasks, tags,
 attachments, completion status, list colors). Writes via remctl-bridge (EventKit)
@@ -7,6 +7,8 @@ with AppleScript fallback. Zero Python dependencies with small shared helpers.
 """
 
 import argparse, base64, csv, html as html_lib, io, json, os, platform, plistlib, re, shlex, shutil, sqlite3, subprocess, sys, tempfile, time, unicodedata, uuid
+
+CLI_NAME = os.path.basename(sys.argv[0])
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,7 +46,7 @@ try:
 except ImportError:
     _cal = None
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 PRIVATE_PROTOCOL_VERSION = 1
 _private_protocol_probe = None
 
@@ -166,7 +168,7 @@ def show_splash():
     print(C.dim("    templates   Saved templates              template-info Inspect template"))
     print(C.dim("    sections    Inspect sections             section-*   Manage sections"))
     print()
-    print(C.dim("  remctl --help for full command reference"))
+    print(C.dim(f"  {CLI_NAME} --help for full command reference"))
     print()
 
 # ── Database ─────────────────────────────────────────────────────────────────
@@ -10354,13 +10356,13 @@ complete -c remctl -n "__fish_seen_subcommand_from edit" -l clear-tags -d "Remov
 complete -c remctl -n "__fish_seen_subcommand_from edit" -l remove-tag -d "Remove one synced tag with --private" -r
 '''
 
-def get_completion_script(shell):
+def get_completion_script(shell, command_name="remctl"):
     if shell == "zsh":
-        return ZSH_COMPLETION
+        return ZSH_COMPLETION.replace("remctl", command_name)
     if shell == "bash":
-        return BASH_COMPLETION
+        return BASH_COMPLETION.replace("remctl", command_name)
     if shell == "fish":
-        return FISH_COMPLETION
+        return FISH_COMPLETION.replace("remctl", command_name)
     raise ValueError(f"Unsupported shell '{shell}'")
 
 
@@ -10371,18 +10373,18 @@ def detect_shell_name():
 
 def completion_target_path(shell):
     if shell == "zsh":
-        return Path.home() / ".zsh" / "completions" / "_remctl"
+        return Path.home() / ".zsh" / "completions" / f"_{CLI_NAME}"
     if shell == "bash":
-        return Path.home() / ".local" / "share" / "bash-completion" / "completions" / "remctl"
+        return Path.home() / ".local" / "share" / "bash-completion" / "completions" / CLI_NAME
     if shell == "fish":
-        return Path.home() / ".config" / "fish" / "completions" / "remctl.fish"
+        return Path.home() / ".config" / "fish" / "completions" / f"{CLI_NAME}.fish"
     raise ValueError(f"Unsupported shell '{shell}'")
 
 
 def install_completion(shell):
     target = completion_target_path(shell)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(get_completion_script(shell))
+    target.write_text(get_completion_script(shell, command_name=CLI_NAME))
     return target
 
 
@@ -10442,6 +10444,9 @@ def resolve_setup_shell(requested_shell):
 
 
 def current_cli_path():
+    discovered = shutil.which(CLI_NAME)
+    if discovered:
+        return Path(discovered).resolve()
     discovered = shutil.which("remctl")
     if discovered:
         return Path(discovered).resolve()
@@ -10774,7 +10779,7 @@ def run_handler_with_fallback(args, handler):
 def cmd_completion(a):
     shell = a.shell if hasattr(a, 'shell') and a.shell else "zsh"
     try:
-        sys.stdout.write(get_completion_script(shell))
+        sys.stdout.write(get_completion_script(shell, command_name=CLI_NAME))
     except ValueError as exc:
         print(f"Error: {exc}. Use bash, zsh, or fish.", file=sys.stderr)
         sys.exit(1)
@@ -10830,7 +10835,7 @@ def gather_doctor_checks():
         )
 
     cli_path = current_cli_path()
-    cli_on_path = shutil.which("remctl") is not None
+    cli_on_path = shutil.which(CLI_NAME) is not None
     add(
         "cli",
         "ok" if cli_path.exists() else "fail",
@@ -11121,24 +11126,24 @@ def suggest_command(command, choices):
 
 def main():
     p = argparse.ArgumentParser(
-        prog="remctl",
+        prog=CLI_NAME,
         description="Power-user Reminders CLI — reads sections/subtasks/tags/attachments/colors, "
                     "writes via remctl-bridge (EventKit) with AppleScript fallback.",
         epilog=(
             "Normal setup flow:\n"
             "  1. ./install.sh --bootstrap   # copy files, create config, install completions\n"
-            "  2. remctl onboard             # trigger Reminders and Automation prompts\n"
-            "  3. remctl permissions full-disk-access   # visual Full Disk Access setup\n"
-            "  4. remctl doctor              # verify the CLI\n"
+            f"  2. {CLI_NAME} onboard             # trigger Reminders and Automation prompts\n"
+            f"  3. {CLI_NAME} permissions full-disk-access   # visual Full Disk Access setup\n"
+            f"  4. {CLI_NAME} doctor              # verify the CLI\n"
             "\n"
             "Examples:\n"
-            "  remctl onboard\n"
-            "  remctl today\n"
-            "  remctl add \"Buy milk\" -d tomorrow\n"
-            "  remctl setup --shell auto --doctor\n"
-            "  remctl permissions full-disk-access\n"
+            f"  {CLI_NAME} onboard\n"
+            f"  {CLI_NAME} today\n"
+            f"  {CLI_NAME} add \"Buy milk\" -d tomorrow\n"
+            f"  {CLI_NAME} setup --shell auto --doctor\n"
+            f"  {CLI_NAME} permissions full-disk-access\n"
             "\n"
-            "Use `remctl onboard --help`, `remctl permissions --help`, `remctl setup --help`, and `remctl doctor --help`\n"
+            f"Use `{CLI_NAME} onboard --help`, `{CLI_NAME} permissions --help`, `{CLI_NAME} setup --help`, and `{CLI_NAME} doctor --help`\n"
             "for onboarding details.\n"
             "\n"
             "Private metadata writes are unsupported and opt-in: pass --private on "

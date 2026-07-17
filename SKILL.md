@@ -7,9 +7,11 @@ description: Use when an agent needs to read, create, edit, complete, inspect, o
 
 RemCTL is a power-user Apple Reminders CLI. It reads the local Reminders CoreData database for fast, detailed output and writes normally through `remctl-bridge` using EventKit. Unsupported private metadata writes are available only when explicitly requested with `--private`; those go through `remctl-private` and Apple's private ReminderKit APIs. It is CLI-only: there is no local API server, token, launch agent, or service command.
 
+The installed command can be invoked as `remctl`, `rctl`, or `reminders`; all three names behave identically and produce the same output.
+
 ## Default Workflow
 
-- Use the installed command for user tasks: `remctl ...`.
+- Use the installed command for user tasks: `remctl ...` (or `rctl ...` / `reminders ...`).
 - Prefer JSON for automation and verification: `remctl today --json`, `remctl show Work --json`, `remctl info <id> --json`.
 - Never write directly to the Reminders SQLite database.
 - Do not use `--via-eventkit` by default. It is a limited read-only fallback for `show`, `search`, `today`, and `upcoming` when Full Disk Access blocks a basic read and the task can tolerate missing Reminders metadata.

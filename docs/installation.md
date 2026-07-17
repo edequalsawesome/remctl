@@ -31,13 +31,13 @@ Install to `~/.local/bin`:
 PREFIX="$HOME/.local" ./install.sh --bootstrap
 ```
 
-`--bootstrap` copies files, compiles `remctl-bridge` and `remctl-permissions` when `swiftc` is available, compiles the optional `remctl-private` helper when `clang` is available, creates `~/.config/remctl`, and installs shell completion when supported.
+`--bootstrap` copies files, compiles `remctl-bridge` and `remctl-permissions` when `swiftc` is available, compiles the optional `remctl-private` helper when `clang` is available, creates `~/.config/remctl`, installs shell completion when supported, and creates `rctl` and `reminders` aliases that behave identically to `remctl`.
 
 It does not grant macOS permissions. Apple requires those grants to happen interactively.
 
 It also does not run `doctor` by default. A new user should grant permissions first, then verify with `doctor` so the first health report is meaningful. For upgrades on an already-authorized Mac, use `./install.sh --doctor` if you want an immediate health check.
 
-If the installer says `PATH action required`, add the printed line to your shell profile, then open a new Terminal window before typing `remctl`. The current Terminal keeps its old PATH until you start a new session. You can also run commands with the full installed path, such as `~/bin/remctl onboard`.
+If the installer says `PATH action required`, add the printed line to your shell profile, then open a new Terminal window before typing `remctl`, `rctl`, or `reminders`. The current Terminal keeps its old PATH until you start a new session. You can also run commands with the full installed path, such as `~/bin/remctl onboard`.
 
 ## First Run
 
@@ -132,11 +132,15 @@ hash -r
 
 ```bash
 which remctl
+which rctl
+which reminders
 remctl --version
+rctl --version
+reminders --version
 remctl doctor
 ```
 
-If `which remctl` does not find RemCTL after install, add the installer's PATH line to your shell profile, then open a new Terminal window. If `which remctl` points at `~/.local/bin/remctl`, keep using `PREFIX="$HOME/.local"` for upgrades.
+If `which remctl` does not find RemCTL after install, add the installer's PATH line to your shell profile, then open a new Terminal window. If `which remctl` points at `~/.local/bin/remctl`, keep using `PREFIX="$HOME/.local"` for upgrades. The `rctl` and `reminders` aliases are installed in the same directory and require the same PATH entry.
 
 ## Shell Completion
 
