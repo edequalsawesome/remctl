@@ -35,6 +35,7 @@ from remctl_serialization import (
     due_date_delta_alerts_from_row,
     preload_attachments,
     preload_extras as shared_preload_extras,
+    preload_indicators as shared_preload_indicators,
     recurrence_from_row,
     serialize_reminder,
     serialize_reminders,
@@ -2566,6 +2567,9 @@ def fmt_due(v, colored=True, all_day=False):
 def preload_extras(db, pks):
     return shared_preload_extras(db, pks)
 
+def preload_indicators(db, pks):
+    return shared_preload_indicators(db, pks)
+
 def _color_priority(pri_val):
     """Color a priority marker based on level."""
     p = PRI.get(pri_val or 0, "")
@@ -2679,6 +2683,36 @@ def _assignment_from_item(item, db=None):
     return _item_get(item, "assignment")
 
 
+def _badges_from_item(item, db=None, _ind=None):
+    """Trailing one-liner badge flags {"image": bool, "link": bool}.
+
+    Consumes the preload_indicators batch map; only when the map is None AND
+    db is real does it fall back to two direct guarded queries (mirrors the
+    _sc/_ht fallback shape).
+    """
+    none = {"image": False, "link": False}
+    if not _item_has(item, "Z_PK"):
+        return none
+    pk = item["Z_PK"]
+    if _ind is not None:
+        return _ind.get(pk, none)
+    if db is None:
+        return none
+    image = False
+    try:
+        for a in q_attachments(db, pk):
+            if _row_get(a, "ZATTACHMENTTYPERAWVALUE") == "image":
+                image = True
+                break
+    except Exception:
+        image = False
+    try:
+        link = bool(q_rich_links(db, pk))
+    except Exception:
+        link = False
+    return {"image": image, "link": link}
+
+
 RECURRENCE_DAY_NAMES = {
     1: "Sun",
     2: "Mon",
@@ -2738,7 +2772,7 @@ def recurrence_badge(item):
     return C.magenta(f"↻ {summary}") if summary else ""
 
 
-def fmt(r, db=None, verbose=False, indent="", _sc=None, _ht=None, _img=None):
+def fmt(r, db=None, verbose=False, indent="", _sc=None, _ht=None, _img=None, _ind=None):
     completed = r["ZCOMPLETED"] if _item_has(r, "ZCOMPLETED") else bool(_item_get(r, "completed"))
     if completed:
         status = C.green("[x]")
@@ -2751,6 +2785,9 @@ def fmt(r, db=None, verbose=False, indent="", _sc=None, _ht=None, _img=None):
     tags = _tags_from_item(r, db=db, _ht=_ht)
     tag_str = " " + " ".join(f"#{safe_display(t)}" for t in tags) if tags else ""
     sub_str = f" [{sc} subtask{'s' if sc != 1 else ''}]" if sc > 0 else ""
+    badges = _badges_from_item(r, db=db, _ind=_ind)
+    # Rich link first (reads better next to tags), then the image marker.
+    badge_str = (" 🔗" if badges["link"] else "") + (" 🌄" if badges["image"] else "")
     pri_str = f" {_color_priority(pri_val)}" if PRI.get(pri_val, "") else ""
     assignment = _assignment_from_item(r, db)
     assign_str = ""
@@ -2769,7 +2806,7 @@ def fmt(r, db=None, verbose=False, indent="", _sc=None, _ht=None, _img=None):
         tag_str = C.dim(tag_str)
         sub_str = C.dim(sub_str)
         assign_str = C.dim(assign_str)
-    parts = [f"{indent}{status} {id_str}{pri_str}{marker_str} {title}{due_str}{recur_str}{assign_str}{tag_str}{sub_str}"]
+    parts = [f"{indent}{status} {id_str}{pri_str}{marker_str} {title}{due_str}{recur_str}{assign_str}{tag_str}{sub_str}{badge_str}"]
     if verbose:
         list_name = _list_name_from_item(r)
         if list_name:
@@ -7878,6 +7915,7 @@ def cmd_show_group(a, db, group_ref):
     pks = [item["Z_PK"] for item in items]
     sc, ht = preload_extras(db, pks)
     att = preload_attachments(db, pks)
+    ind = preload_indicators(db, pks)
     memberships_by_list = {}
     for child in children:
         sections = q_sections(db, child["Z_PK"])
@@ -7929,16 +7967,16 @@ def cmd_show_group(a, db, group_ref):
                 else:
                     unsectioned.append(item)
             for item in unsectioned:
-                print(fmt(item, db, verbose=a.verbose, indent="    ", _sc=sc, _ht=ht, _img=img))
+                print(fmt(item, db, verbose=a.verbose, indent="    ", _sc=sc, _ht=ht, _img=img, _ind=ind))
             for section_name in [section["ZDISPLAYNAME"] for section in secs]:
                 if section_name in sec_items:
                     heading = safe_display(format_grocery_section_name(section_name, is_groceries=bool(child_ref.get("isGroceries"))))
                     print(f"\n    {C.bold(f'[{heading}]')}")
                     for item in sec_items[section_name]:
-                        print(fmt(item, db, verbose=a.verbose, indent="    ", _sc=sc, _ht=ht, _img=img))
+                        print(fmt(item, db, verbose=a.verbose, indent="    ", _sc=sc, _ht=ht, _img=img, _ind=ind))
         else:
             for item in child_items:
-                print(fmt(item, db, verbose=a.verbose, indent="    ", _sc=sc, _ht=ht, _img=img))
+                print(fmt(item, db, verbose=a.verbose, indent="    ", _sc=sc, _ht=ht, _img=img, _ind=ind))
     print(f"\n{len(items)} reminder{'s' if len(items) != 1 else ''}")
 
 
@@ -7962,6 +8000,7 @@ def cmd_show(a):
     pks = [i["Z_PK"] for i in items]
     sc, ht = preload_extras(db, pks)
     att = preload_attachments(db, pks)
+    ind = preload_indicators(db, pks)
     secs = q_sections(db, pk)
     memberships = q_section_memberships(db, pk) if secs else {}
     if a.json:
@@ -7997,16 +8036,16 @@ def cmd_show(a):
             else:
                 unsectioned.append(item)
         for item in unsectioned:
-            print(fmt(item, db, verbose=a.verbose, _sc=sc, _ht=ht, _img=img))
+            print(fmt(item, db, verbose=a.verbose, _sc=sc, _ht=ht, _img=img, _ind=ind))
         for sn in [s["ZDISPLAYNAME"] for s in secs]:
             if sn in sec_items:
                 heading = safe_display(format_grocery_section_name(sn, is_groceries=bool(list_ref.get("isGroceries"))))
                 print(f"\n  {C.bold(f'[{heading}]')}")
                 for item in sec_items[sn]:
-                    print(fmt(item, db, verbose=a.verbose, indent="  ", _sc=sc, _ht=ht, _img=img))
+                    print(fmt(item, db, verbose=a.verbose, indent="  ", _sc=sc, _ht=ht, _img=img, _ind=ind))
     else:
         for item in items:
-            print(fmt(item, db, verbose=a.verbose, _sc=sc, _ht=ht, _img=img))
+            print(fmt(item, db, verbose=a.verbose, _sc=sc, _ht=ht, _img=img, _ind=ind))
     print(f"\n{len(items)} reminder{'s' if len(items) != 1 else ''}")
 
 def cmd_add(a):
@@ -8730,6 +8769,7 @@ def cmd_search(a):
     pks = [i["Z_PK"] for i in items]
     sc, ht = preload_extras(db, pks)
     att = preload_attachments(db, pks)
+    ind = preload_indicators(db, pks)
     if a.json:
         print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht, _att=att) for i in items], indent=2))
         return
@@ -8742,7 +8782,7 @@ def cmd_search(a):
     print(f"Search: {C.bold(safe_display(a.query))}")
     img = _image_render_config_verbose(a)
     for i in items:
-        print(fmt(i, db, verbose=a.verbose, _sc=sc, _ht=ht, _img=img))
+        print(fmt(i, db, verbose=a.verbose, _sc=sc, _ht=ht, _img=img, _ind=ind))
     print(f"\n{len(items)} result{'s' if len(items) != 1 else ''}")
 
 def cmd_today(a):
@@ -8754,6 +8794,7 @@ def cmd_today(a):
     pks = [i["Z_PK"] for i in items]
     sc, ht = preload_extras(db, pks)
     att = preload_attachments(db, pks)
+    ind = preload_indicators(db, pks)
     if a.json:
         print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht, _att=att) for i in items], indent=2))
         return
@@ -8771,12 +8812,12 @@ def cmd_today(a):
     if overdue:
         print(C.red(f"Overdue ({len(overdue)}):"))
         for i in overdue:
-            print(fmt(i, db, indent="  ", _sc=sc, _ht=ht, _img=img))
+            print(fmt(i, db, indent="  ", _sc=sc, _ht=ht, _img=img, _ind=ind))
         print()
     if due:
         print(C.bold(f"Due Today ({len(due)}):"))
         for i in due:
-            print(fmt(i, db, indent="  ", _sc=sc, _ht=ht, _img=img))
+            print(fmt(i, db, indent="  ", _sc=sc, _ht=ht, _img=img, _ind=ind))
     print(f"\n{len(items)} total")
 
 def cmd_flagged(a):
@@ -8785,6 +8826,7 @@ def cmd_flagged(a):
     pks = [i["Z_PK"] for i in items]
     sc, ht = preload_extras(db, pks)
     att = preload_attachments(db, pks)
+    ind = preload_indicators(db, pks)
     if a.json:
         print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht, _att=att) for i in items], indent=2))
         return
@@ -8797,7 +8839,7 @@ def cmd_flagged(a):
     print(C.bold("Flagged:"))
     img = _image_render_config_verbose(a)
     for i in items:
-        print(fmt(i, db, verbose=a.verbose, indent="  ", _sc=sc, _ht=ht, _img=img))
+        print(fmt(i, db, verbose=a.verbose, indent="  ", _sc=sc, _ht=ht, _img=img, _ind=ind))
     print(f"\n{len(items)} flagged")
 
 def cmd_urgent(a):
@@ -8806,6 +8848,7 @@ def cmd_urgent(a):
     pks = [i["Z_PK"] for i in items]
     sc, ht = preload_extras(db, pks)
     att = preload_attachments(db, pks)
+    ind = preload_indicators(db, pks)
     if a.json:
         print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht, _att=att) for i in items], indent=2))
         return
@@ -8818,7 +8861,7 @@ def cmd_urgent(a):
     print(C.bold("Urgent:"))
     img = _image_render_config_verbose(a)
     for i in items:
-        print(fmt(i, db, verbose=a.verbose, indent="  ", _sc=sc, _ht=ht, _img=img))
+        print(fmt(i, db, verbose=a.verbose, indent="  ", _sc=sc, _ht=ht, _img=img, _ind=ind))
     print(f"\n{len(items)} urgent")
 
 def cmd_tags(a):
@@ -8847,6 +8890,7 @@ def cmd_subtasks(a):
     sub_pks = [s["Z_PK"] for s in subs]
     sc, ht = preload_extras(db, sub_pks)
     att = preload_attachments(db, [a.id, *sub_pks])
+    ind = preload_indicators(db, sub_pks)
     if a.json:
         d = to_dict(parent, db, _att=att)
         d["subtasks"] = [to_dict(s, db, _sc=sc, _ht=ht, _att=att) for s in subs]
@@ -8858,7 +8902,7 @@ def cmd_subtasks(a):
     else:
         img = _image_render_config_verbose(a)
         for s in subs:
-            print(fmt(s, db, indent="  ", _sc=sc, _ht=ht, _img=img))
+            print(fmt(s, db, indent="  ", _sc=sc, _ht=ht, _img=img, _ind=ind))
         print(f"\n{len(subs)} subtask{'s' if len(subs) != 1 else ''}")
 
 def cmd_info(a):
@@ -8945,9 +8989,10 @@ def cmd_info(a):
         print(f"  Subtasks ({len(subs)}):")
         sub_pks = [s["Z_PK"] for s in subs]
         sc, ht = preload_extras(db, sub_pks)
+        ind = preload_indicators(db, sub_pks)
         image_cfg = _image_render_config(a)
         for s in subs:
-            print(fmt(s, db, indent="    ", _sc=sc, _ht=ht))
+            print(fmt(s, db, indent="    ", _sc=sc, _ht=ht, _ind=ind))
             if image_cfg:
                 mode, width = image_cfg
                 try:
@@ -9215,6 +9260,7 @@ def cmd_upcoming(a):
     pks = [i["Z_PK"] for i in items]
     sc, ht = preload_extras(db, pks)
     att = preload_attachments(db, pks)
+    ind = preload_indicators(db, pks)
     if a.json:
         print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht, _att=att) for i in items], indent=2))
         return
@@ -9241,7 +9287,7 @@ def cmd_upcoming(a):
         print(f"\n  {C.bold(day_label)}:")
         img = _image_render_config_verbose(a)
         for i in day_items:
-            print(fmt(i, db, indent="    ", _sc=sc, _ht=ht, _img=img))
+            print(fmt(i, db, indent="    ", _sc=sc, _ht=ht, _img=img, _ind=ind))
     print(f"\n{len(items)} upcoming")
 
 def cmd_overdue(a):
@@ -9250,6 +9296,7 @@ def cmd_overdue(a):
     pks = [i["Z_PK"] for i in items]
     sc, ht = preload_extras(db, pks)
     att = preload_attachments(db, pks)
+    ind = preload_indicators(db, pks)
     if a.json:
         print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht, _att=att) for i in items], indent=2))
         return
@@ -9262,7 +9309,7 @@ def cmd_overdue(a):
     print(C.red(C.bold(f"Overdue ({len(items)}):")))
     img = _image_render_config_verbose(a)
     for i in items:
-        print(fmt(i, db, verbose=getattr(a, 'verbose', False), indent="  ", _sc=sc, _ht=ht, _img=img))
+        print(fmt(i, db, verbose=getattr(a, 'verbose', False), indent="  ", _sc=sc, _ht=ht, _img=img, _ind=ind))
     print(f"\n{len(items)} overdue")
 
 def cmd_list_create(a):
@@ -9854,7 +9901,7 @@ _remctl() {
                 '--via-eventkit[Limited read-only EventKit fallback; no numeric ids or private metadata]' \
                 '(-v --verbose)'{-v,--verbose}'[Verbose output]' \
                 '--images[Render image attachments inline]' \
-                '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock ascii none)' \
+                '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock none)' \
                 '--image-width[Image render width in cells]:width:' \
                 '--json[JSON output]'
             return
@@ -9865,7 +9912,7 @@ _remctl() {
                 '--via-eventkit[Limited read-only EventKit fallback; no numeric ids or private metadata]' \
                 '(-v --verbose)'{-v,--verbose}'[Verbose output]' \
                 '--images[Render image attachments inline]' \
-                '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock ascii none)' \
+                '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock none)' \
                 '--image-width[Image render width in cells]:width:' \
                 '--json[JSON output]'
             return
@@ -9876,7 +9923,7 @@ _remctl() {
                 '--via-eventkit[Limited read-only EventKit fallback; no numeric ids or private metadata]' \
                 '(-v --verbose)'{-v,--verbose}'[Verbose output]' \
                 '--images[Render image attachments inline]' \
-                '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock ascii none)' \
+                '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock none)' \
                 '--image-width[Image render width in cells]:width:' \
                 '--json[JSON output]'
             return
@@ -9886,7 +9933,7 @@ _remctl() {
                 '--via-eventkit[Limited read-only EventKit fallback; no numeric ids or private metadata]' \
                 '(-v --verbose)'{-v,--verbose}'[Verbose output]' \
                 '--images[Render image attachments inline]' \
-                '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock ascii none)' \
+                '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock none)' \
                 '--image-width[Image render width in cells]:width:' \
                 '--json[JSON output]'
             return
@@ -9895,7 +9942,7 @@ _remctl() {
             _arguments \
                 '(-v --verbose)'{-v,--verbose}'[Verbose output]' \
                 '--images[Render image attachments inline]' \
-                '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock ascii none)' \
+                '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock none)' \
                 '--image-width[Image render width in cells]:width:' \
                 '--json[JSON output]'
             return
@@ -9904,7 +9951,7 @@ _remctl() {
             _arguments \
                 '(-v --verbose)'{-v,--verbose}'[Verbose output]' \
                 '--images[Render image attachments inline]' \
-                '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock ascii none)' \
+                '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock none)' \
                 '--image-width[Image render width in cells]:width:' \
                 '--json[JSON output]'
             return
@@ -9912,7 +9959,7 @@ _remctl() {
         info)
             _arguments \
                 '--images[Render image attachments inline]' \
-                '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock ascii none)' \
+                '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock none)' \
                 '--image-width[Image render width in cells]:width:' \
                 '--json[JSON output]'
             return
@@ -10248,7 +10295,7 @@ _remctl() {
     _describe 'command' commands
     _arguments \
         '--images[Render image attachments inline]' \
-        '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock ascii none)' \
+        '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock none)' \
         '--image-width[Image render width in cells]:width:'
 }
 compdef _remctl remctl
@@ -10422,7 +10469,7 @@ complete -c remctl -n "__fish_use_subcommand" -a setup -d "Install shell complet
 complete -c remctl -n "__fish_use_subcommand" -a permissions -d "Open guided macOS permission helper"
 complete -c remctl -n "__fish_use_subcommand" -a completion -d "Generate shell completions"
 complete -c remctl -l images -d "Render image attachments inline"
-complete -c remctl -l image-mode -d "Image rendering protocol" -x -a "kitty iterm2 halfblock ascii none"
+complete -c remctl -l image-mode -d "Image rendering protocol" -x -a "kitty iterm2 halfblock none"
 complete -c remctl -l image-width -d "Image render width in cells" -x
 complete -c remctl -n "__fish_seen_subcommand_from doctor" -l for-agent -d "Print agent-focused context and TCC guidance"
 complete -c remctl -n "__fish_seen_subcommand_from show" -l list-id -d "Show list by stable numeric ID" -r

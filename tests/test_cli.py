@@ -7996,13 +7996,13 @@ class InlineImageTests(unittest.TestCase):
             self._detect_mode({"TERM": "xterm-truecolor"}), "halfblock"
         )
 
-    def test_detect_image_mode_tty_and_non_tty_fallback(self):
+    def test_detect_image_mode_unknown_terminal_returns_none(self):
         with mock.patch.dict(os.environ, clear=False):
             for key in self._IMAGE_ENV_KEYS:
                 os.environ.pop(key, None)
             os.environ["TERM"] = "xterm"
             with mock.patch.object(sys.stdout, "isatty", return_value=True):
-                self.assertEqual(self.images.detect_image_mode(), "ascii")
+                self.assertIsNone(self.images.detect_image_mode())
             with mock.patch.object(sys.stdout, "isatty", return_value=False):
                 self.assertIsNone(self.images.detect_image_mode())
 
@@ -8054,36 +8054,26 @@ class InlineImageTests(unittest.TestCase):
         self.assertIn("▀", rendered)
         self.assertIn("\x1b[0m", rendered)
 
-    def test_render_ascii_uses_luminance_ramp(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "tiny.png"
-            path.write_bytes(_tiny_png_bytes())
-            rendered = self.images.render_attachment(path, "ascii", 4)
-        self.assertIsNotNone(rendered)
-        lines = rendered.split("\n")
-        self.assertEqual(len(lines), 2)
-        for line in lines:
-            self.assertEqual(len(line), 4)
-            self.assertTrue(set(line) <= set(self.images._ASCII_RAMP))
-        # Red (lum ~54) must map lower on the ramp than blue (lum ~18) check:
-        # red row characters rank higher in the ramp than blue row characters.
-        ramp = self.images._ASCII_RAMP
-        self.assertGreater(ramp.index(lines[0][0]), ramp.index(lines[1][0]))
-
     def test_render_attachment_never_raises_on_unrenderable_input(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "notes.txt"
             path.write_text("plain text, not an image")
-            for mode in ("halfblock", "ascii"):
-                self.assertIsNone(self.images.render_attachment(path, mode, 8))
+            self.assertIsNone(self.images.render_attachment(path, "halfblock", 8))
             missing = Path(tmp) / "missing.png"
-            for mode in ("kitty", "iterm2", "halfblock", "ascii"):
+            for mode in ("kitty", "iterm2", "halfblock"):
                 self.assertIsNone(self.images.render_attachment(missing, mode, 8))
         self.assertIsNone(self.images.render_attachment("/tmp/x.png", "nope", 8))
         self.assertIsNone(self.images.render_attachment("/tmp/x.png", "kitty", 0))
         self.assertIsNone(
             self.images.render_attachment("/tmp/x.png", "kitty", "wide")
         )
+
+    def test_render_attachment_rejects_removed_ascii_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tiny.png"
+            path.write_bytes(_tiny_png_bytes())
+            self.assertIsNone(self.images.render_attachment(path, "ascii", 8))
+        self.assertNotIn("ascii", self.images.IMAGE_MODES)
 
     # ── 6. sips/BMP stdlib path ─────────────────────────────────────────
 
@@ -8414,7 +8404,7 @@ class InlineImageTests(unittest.TestCase):
                 flagged = self._run_cmd_info(
                     self._reminder_row(),
                     db,
-                    self._info_args(images=True, image_mode="ascii"),
+                    self._info_args(images=True, image_mode="halfblock"),
                 )
         finally:
             db.close()
@@ -8513,7 +8503,7 @@ class InlineImageTests(unittest.TestCase):
             path.write_bytes(content)
             real_stat = os.stat(path).st_size
             with mock.patch.object(self.images, "MAX_IMAGE_BYTES", real_stat - 1):
-                for mode in ("kitty", "iterm2", "halfblock", "ascii"):
+                for mode in ("kitty", "iterm2", "halfblock"):
                     self.assertIsNone(self.images.render_attachment(path, mode, 8))
                 # Hashing is capped too: resolution fails, JSON keeps metadata.
                 self.assertIsNone(self.images._sha512_of(path))
@@ -8607,7 +8597,8 @@ class InlineImageTests(unittest.TestCase):
             sql
             for sql in counting.queries
             if sql.lstrip().upper().startswith("SELECT")
-            and ("ZREMCDSAVEDATTACHMENT" in sql or "ZREMINDER2" in sql)
+            and "ZFILENAME" in sql
+            and "ZATTACHMENTTYPERAWVALUE" in sql
         ]
         # Batch path: one query per backing table regardless of page size.
         self.assertLessEqual(len(attachment_queries), 2)
@@ -8711,18 +8702,24 @@ class ImageFlagParsingTests(unittest.TestCase):
         self.assertEqual(a.image_width, 48)
 
     def test_image_flags_equals_form_before_subcommand(self):
-        a = self._parse(["--image-mode=ascii", "--image-width=24", "today"])
-        self.assertEqual(a.image_mode, "ascii")
+        a = self._parse(["--image-mode=iterm2", "--image-width=24", "today"])
+        self.assertEqual(a.image_mode, "iterm2")
         self.assertEqual(a.image_width, 24)
         self.assertEqual(a.cmd, "today")
 
     def test_before_and_after_combine_last_wins(self):
         a = self._parse(
-            ["--images", "--image-mode", "kitty", "info", "847", "--image-mode", "ascii"]
+            ["--images", "--image-mode", "kitty", "info", "847", "--image-mode", "halfblock"]
         )
         self.assertTrue(a.images)
-        self.assertEqual(a.image_mode, "ascii")
+        self.assertEqual(a.image_mode, "halfblock")
         self.assertEqual(a.cmd, "info")
+
+    def test_removed_ascii_image_mode_is_rejected(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as ctx:
+            self._parse(["--image-mode", "ascii", "today"])
+        self.assertEqual(ctx.exception.code, 2)
 
     def test_defaults_unset_when_no_image_flags(self):
         a = self._parse(["today"])
@@ -8736,6 +8733,419 @@ class ImageFlagParsingTests(unittest.TestCase):
             self._parse(["frobnicate"])
         self.assertEqual(ctx.exception.code, 2)
         self.assertIn("unknown command", stderr.getvalue())
+
+
+class TrailingBadgeTests(unittest.TestCase):
+    """Trailing 🔗/🌄 one-liner badges: human output only, batch loaded."""
+
+    IMAGE_EMOJI = "\U0001F304"
+    LINK_EMOJI = "\U0001F517"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.remctl = load_module("remctl_badge_test", "remctl")
+
+    def setUp(self):
+        self._color_enabled = self.remctl.C.enabled
+        self.remctl.C.enabled = False
+        self.remctl._attachment_sha_capability_cache.clear()
+
+    def tearDown(self):
+        self.remctl.C.enabled = self._color_enabled
+        self.remctl._attachment_sha_capability_cache.clear()
+
+    @staticmethod
+    def _reminder_row(pk=42, title="Badge target"):
+        return {
+            "Z_PK": pk,
+            "ZTITLE": title,
+            "ZNOTES": None,
+            "ZCOMPLETED": 0,
+            "ZFLAGGED": 0,
+            "ZPRIORITY": 0,
+            "ZISURGENTSTATEENABLEDFORCURRENTUSER": 0,
+            "ZDUEDATEDELTAALERTSDATA": None,
+            "ZDUEDATE": None,
+            "ZDISPLAYDATEDATE": None,
+            "ZALLDAY": 0,
+            "ZCOMPLETIONDATE": None,
+            "ZCREATIONDATE": None,
+            "ZPARENTREMINDER": None,
+            "ZLIST": 1,
+            "ZICSURL": None,
+            "ZCKIDENTIFIER": f"REM-{pk}",
+            "list_name": "Projects",
+            "recurrence_frequency": None,
+            "recurrence_interval": None,
+            "recurrence_count": None,
+            "recurrence_end_date": None,
+            "recurrence_days_of_week": None,
+            "recurrence_days_of_month": None,
+            "recurrence_months_of_year": None,
+            "recurrence_days_of_year": None,
+            "recurrence_weeks_of_year": None,
+            "recurrence_set_positions": None,
+        }
+
+    @staticmethod
+    def _badge_db(*, minimal=False):
+        """In-memory fixture with attachment/url/subtask/hashtag tables."""
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        db.execute(
+            "CREATE TABLE ZREMCDREMINDER ("
+            "Z_PK INTEGER, ZPARENTREMINDER INTEGER, "
+            "ZMARKEDFORDELETION INTEGER, ZCOMPLETED INTEGER)"
+        )
+        if minimal:
+            return db
+        db.execute(
+            "CREATE TABLE ZREMCDSAVEDATTACHMENT ("
+            "ZFILENAME TEXT, ZUTI TEXT, ZATTACHMENTTYPERAWVALUE TEXT, "
+            "ZSHA512SUM TEXT, ZREMINDER INTEGER, ZMARKEDFORDELETION INTEGER)"
+        )
+        db.execute(
+            "CREATE TABLE ZREMCDOBJECT ("
+            "Z_PK INTEGER, ZFILENAME TEXT, ZUTI TEXT, ZWIDTH INTEGER, ZHEIGHT INTEGER, "
+            "ZSHA512SUM TEXT, ZURL TEXT, ZREMINDER2 INTEGER, ZREMINDER3 INTEGER, "
+            "ZHASHTAGLABEL INTEGER, ZMARKEDFORDELETION INTEGER)"
+        )
+        db.execute(
+            "CREATE TABLE ZREMCDHASHTAGLABEL (Z_PK INTEGER, ZNAME TEXT)"
+        )
+        return db
+
+    def _fmt(self, row, db, pks=None):
+        pks = pks if pks is not None else [row["Z_PK"]]
+        sc, ht = self.remctl.preload_extras(db, pks)
+        ind = self.remctl.preload_indicators(db, pks)
+        # Fully populate the maps the way list call sites do: key-present
+        # maps mean fmt never falls back to per-item queries.
+        sc = {pk: sc.get(pk, 0) for pk in pks}
+        ht = {pk: ht.get(pk, []) for pk in pks}
+        return self.remctl._strip_ansi(
+            self.remctl.fmt(row, db=db, verbose=False, _sc=sc, _ht=ht, _ind=ind)
+        )
+
+    def test_fmt_badge_for_image_attachment(self):
+        db = self._badge_db()
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "(1, 'photo.png', 'public.png', 640, 480, NULL, NULL, 42, NULL, NULL, 0)"
+        )
+        try:
+            line = self._fmt(self._reminder_row(), db)
+        finally:
+            db.close()
+        self.assertIn(self.IMAGE_EMOJI, line)
+        self.assertNotIn(self.LINK_EMOJI, line)
+        self.assertTrue(line.endswith(f" {self.IMAGE_EMOJI}"))
+
+    def test_fmt_badge_for_saved_image_attachment(self):
+        db = self._badge_db()
+        db.execute(
+            "INSERT INTO ZREMCDSAVEDATTACHMENT VALUES "
+            "('scan.png', 'public.png', 'image', NULL, 42, 0)"
+        )
+        try:
+            line = self._fmt(self._reminder_row(), db)
+        finally:
+            db.close()
+        self.assertIn(self.IMAGE_EMOJI, line)
+        self.assertNotIn(self.LINK_EMOJI, line)
+
+    def test_fmt_badge_for_rich_link_row(self):
+        db = self._badge_db()
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "(2, NULL, NULL, NULL, NULL, NULL, 'https://example.com', 42, NULL, NULL, 0)"
+        )
+        try:
+            line = self._fmt(self._reminder_row(), db)
+        finally:
+            db.close()
+        self.assertIn(self.LINK_EMOJI, line)
+        self.assertNotIn(self.IMAGE_EMOJI, line)
+
+    def test_fmt_badge_for_legacy_url_saved_attachment(self):
+        db = self._badge_db()
+        db.execute(
+            "INSERT INTO ZREMCDSAVEDATTACHMENT VALUES "
+            "(NULL, NULL, 'url', NULL, 42, 0)"
+        )
+        try:
+            line = self._fmt(self._reminder_row(), db)
+        finally:
+            db.close()
+        self.assertIn(self.LINK_EMOJI, line)
+        self.assertNotIn(self.IMAGE_EMOJI, line)
+
+    def test_fmt_badges_both_in_link_then_image_order(self):
+        db = self._badge_db()
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "(1, 'photo.png', 'public.png', 640, 480, NULL, NULL, 42, NULL, NULL, 0)"
+        )
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "(2, NULL, NULL, NULL, NULL, NULL, 'https://example.com', 42, NULL, NULL, 0)"
+        )
+        try:
+            line = self._fmt(self._reminder_row(), db)
+        finally:
+            db.close()
+        self.assertTrue(
+            line.endswith(f" {self.LINK_EMOJI} {self.IMAGE_EMOJI}"), line
+        )
+
+    def test_fmt_no_badges_without_attachments_or_links(self):
+        db = self._badge_db()
+        db.execute(
+            "INSERT INTO ZREMCDSAVEDATTACHMENT VALUES "
+            "('doc.pdf', 'com.adobe.pdf', 'file', NULL, 42, 0)"
+        )
+        try:
+            line = self._fmt(self._reminder_row(), db)
+        finally:
+            db.close()
+        self.assertNotIn(self.IMAGE_EMOJI, line)
+        self.assertNotIn(self.LINK_EMOJI, line)
+
+    def test_fmt_badges_come_after_subtask_count(self):
+        db = self._badge_db()
+        db.execute(
+            "INSERT INTO ZREMCDREMINDER VALUES (100, 42, 0, 0)"
+        )
+        db.execute(
+            "INSERT INTO ZREMCDSAVEDATTACHMENT VALUES "
+            "('scan.png', 'public.png', 'image', NULL, 42, 0)"
+        )
+        try:
+            line = self._fmt(self._reminder_row(), db)
+        finally:
+            db.close()
+        self.assertIn("[1 subtask]", line)
+        self.assertTrue(
+            line.endswith(f"[1 subtask] {self.IMAGE_EMOJI}"), line
+        )
+
+    def test_fmt_badges_present_on_completed_reminder(self):
+        db = self._badge_db()
+        db.execute(
+            "INSERT INTO ZREMCDSAVEDATTACHMENT VALUES "
+            "('scan.png', 'public.png', 'image', NULL, 42, 0)"
+        )
+        row = self._reminder_row()
+        row["ZCOMPLETED"] = 1
+        try:
+            line = self._fmt(row, db)
+        finally:
+            db.close()
+        self.assertIn("[x]", line)
+        self.assertTrue(line.endswith(f" {self.IMAGE_EMOJI}"), line)
+
+    def test_fmt_badge_fallback_queries_when_map_is_none(self):
+        db = self._badge_db()
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "(2, NULL, NULL, NULL, NULL, NULL, 'https://example.com', 42, NULL, NULL, 0)"
+        )
+        try:
+            line = self.remctl._strip_ansi(
+                self.remctl.fmt(
+                    self._reminder_row(), db=db, verbose=False,
+                    _sc={42: 0}, _ht={42: []},
+                )
+            )
+        finally:
+            db.close()
+        self.assertIn(self.LINK_EMOJI, line)
+
+    def test_preload_indicators_flags_and_soft_deletes(self):
+        db = self._badge_db()
+        # Image for 42, link for 43, soft-deleted rows for 44 ignored.
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "(1, 'a.png', 'public.png', 10, 10, NULL, NULL, 42, NULL, NULL, 0)"
+        )
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "(2, NULL, NULL, NULL, NULL, NULL, 'https://x.example', 43, NULL, NULL, 0)"
+        )
+        db.execute(
+            "INSERT INTO ZREMCDSAVEDATTACHMENT VALUES "
+            "('b.png', 'public.png', 'image', NULL, 44, 1)"
+        )
+        try:
+            ind = self.remctl.preload_indicators(db, [42, 43, 44])
+        finally:
+            db.close()
+        self.assertEqual(ind.get(42), {"image": True, "link": False})
+        self.assertEqual(ind.get(43), {"image": False, "link": True})
+        self.assertNotIn(44, ind)
+
+    def test_preload_crash_safety_minimal_fixture(self):
+        # Missing attachment/url/hashtag tables: no badges, no exception,
+        # subtask counts still work.
+        db = self._badge_db(minimal=True)
+        db.execute("INSERT INTO ZREMCDREMINDER VALUES (100, 42, 0, 0)")
+        try:
+            sc, ht = self.remctl.preload_extras(db, [42])
+            ind = self.remctl.preload_indicators(db, [42])
+            line = self._fmt(self._reminder_row(), db)
+        finally:
+            db.close()
+        self.assertEqual(sc, {42: 1})
+        self.assertEqual(ht, {})
+        self.assertEqual(ind, {})
+        self.assertIn("[1 subtask]", line)
+        self.assertNotIn(self.IMAGE_EMOJI, line)
+        self.assertNotIn(self.LINK_EMOJI, line)
+
+    def test_show_json_payload_has_no_badge_emoji(self):
+        db = self._badge_db()
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "(1, 'photo.png', 'public.png', 640, 480, NULL, NULL, 42, NULL, NULL, 0)"
+        )
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "(2, NULL, NULL, NULL, NULL, NULL, 'https://example.com', 42, NULL, NULL, 0)"
+        )
+        rows = [self._reminder_row()]
+        try:
+            with (
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(
+                    self.remctl,
+                    "resolve_required_list_target_or_die",
+                    return_value={"id": 1, "title": "Projects"},
+                ),
+                mock.patch.object(self.remctl, "q_reminders", return_value=rows),
+                mock.patch.object(self.remctl, "q_sections", return_value=[]),
+                mock.patch.object(self.remctl, "q_rich_link", return_value=None),
+                mock.patch.object(self.remctl, "q_assignment", return_value=None),
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.remctl.cmd_show(
+                    SimpleNamespace(
+                        list="Projects",
+                        list_id=None,
+                        completed=False,
+                        json=True,
+                        format=None,
+                        verbose=False,
+                        images=False,
+                        image_mode=None,
+                        image_width=32,
+                    )
+                )
+        finally:
+            db.close()
+        payload = stdout.getvalue()
+        json.loads(payload)
+        self.assertNotIn(self.IMAGE_EMOJI, payload)
+        self.assertNotIn(self.LINK_EMOJI, payload)
+
+    def test_table_mode_has_no_badge_emoji(self):
+        db = self._badge_db()
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "(1, 'photo.png', 'public.png', 640, 480, NULL, NULL, 42, NULL, NULL, 0)"
+        )
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "(2, NULL, NULL, NULL, NULL, NULL, 'https://example.com', 42, NULL, NULL, 0)"
+        )
+        try:
+            rows_data = self.remctl.reminders_to_table_data(
+                [self._reminder_row()], db=db
+            )
+            table = self.remctl.fmt_table(rows_data)
+        finally:
+            db.close()
+        self.assertNotIn(self.IMAGE_EMOJI, table)
+        self.assertNotIn(self.LINK_EMOJI, table)
+
+    def test_list_render_uses_constant_indicator_queries(self):
+        db = self._badge_db()
+        pks = (42, 43, 44, 45, 46)
+        for pk in pks:
+            db.execute(
+                "INSERT INTO ZREMCDOBJECT VALUES "
+                f"({pk}, 'photo{pk}.png', 'public.png', 640, 480, NULL, NULL, {pk}, NULL, NULL, 0)"
+            )
+            db.execute(
+                "INSERT INTO ZREMCDOBJECT VALUES "
+                f"({pk} + 1000, NULL, NULL, NULL, NULL, NULL, 'https://example.com/{pk}', {pk}, NULL, NULL, 0)"
+            )
+        rows = [self._reminder_row(pk=pk) for pk in pks]
+
+        class CountingConnection:
+            def __init__(self, inner):
+                self._inner = inner
+                self.queries = []
+
+            def execute(self, sql, *args, **kwargs):
+                self.queries.append(sql)
+                return self._inner.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        counting = CountingConnection(db)
+        try:
+            with (
+                mock.patch.object(self.remctl, "open_db", return_value=counting),
+                mock.patch.object(
+                    self.remctl,
+                    "resolve_required_list_target_or_die",
+                    return_value={"id": 1, "title": "Projects"},
+                ),
+                mock.patch.object(self.remctl, "q_reminders", return_value=rows),
+                mock.patch.object(self.remctl, "q_sections", return_value=[]),
+                mock.patch.object(self.remctl, "q_assignment", return_value=None),
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.remctl.cmd_show(
+                    SimpleNamespace(
+                        list="Projects",
+                        list_id=None,
+                        completed=False,
+                        json=False,
+                        format=None,
+                        verbose=False,
+                        images=False,
+                        image_mode=None,
+                        image_width=32,
+                    )
+                )
+        finally:
+            db.close()
+        out = self.remctl._strip_ansi(stdout.getvalue())
+        # Every rendered row carries both badges (link first, then image).
+        badge_lines = [
+            line for line in out.splitlines()
+            if self.LINK_EMOJI in line or self.IMAGE_EMOJI in line
+        ]
+        self.assertEqual(len(badge_lines), len(pks))
+        for line in badge_lines:
+            self.assertTrue(
+                line.rstrip().endswith(f"{self.LINK_EMOJI} {self.IMAGE_EMOJI}"),
+                line,
+            )
+        indicator_queries = [
+            sql
+            for sql in counting.queries
+            if sql.lstrip().upper().startswith("SELECT")
+            and ("ZATTACHMENTTYPERAWVALUE" not in sql)
+            and (
+                "FROM ZREMCDSAVEDATTACHMENT" in sql
+                or ("FROM ZREMCDOBJECT" in sql and "ZURL" in sql)
+            )
+        ]
+        # O(1): one query per backing table regardless of page size.
+        self.assertLessEqual(len(indicator_queries), 2)
 
 
 if __name__ == "__main__":

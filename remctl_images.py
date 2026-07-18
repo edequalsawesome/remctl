@@ -2,7 +2,7 @@
 
 Pure stdlib at import time. Pillow is used only when available, imported
 lazily inside functions behind try/except ImportError; otherwise macOS `sips`
-plus a small BMP parser provide pixels for half-block/ascii rendering.
+plus a small BMP parser provide pixels for half-block rendering.
 """
 
 from __future__ import annotations
@@ -14,11 +14,10 @@ import re
 import shutil
 import struct
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
-IMAGE_MODES = ("kitty", "iterm2", "halfblock", "ascii", "none")
+IMAGE_MODES = ("kitty", "iterm2", "halfblock", "none")
 
 _UTI_EXTENSIONS = {
     "public.png": ".png",
@@ -32,8 +31,6 @@ _UTI_EXTENSIONS = {
 }
 _FALLBACK_EXTS = (".png", ".jpg", ".jpeg", ".heic")
 
-_ASCII_RAMP = " .:-=+*#%@"
-
 
 def _truthy(value) -> bool:
     return value is not None and str(value).strip().lower() in {"1", "true", "yes", "on"}
@@ -42,7 +39,7 @@ def _truthy(value) -> bool:
 def detect_image_mode() -> str | None:
     """Pick the best rendering protocol for the current terminal.
 
-    REMCTL_IMAGE_MODE overrides detection (kitty/iterm2/halfblock/ascii/none).
+    REMCTL_IMAGE_MODE overrides detection (kitty/iterm2/halfblock/none).
     """
     override = os.environ.get("REMCTL_IMAGE_MODE", "").strip().lower()
     if override in IMAGE_MODES:
@@ -60,8 +57,6 @@ def detect_image_mode() -> str | None:
     term = os.environ.get("TERM", "").strip().lower()
     if colorterm in {"truecolor", "24bit"} or "truecolor" in term or "256color" in term:
         return "halfblock"
-    if sys.stdout.isatty():
-        return "ascii"
     return None
 
 
@@ -389,23 +384,6 @@ def _render_halfblock(path: Path, width_cells: int) -> str | None:
     return "\n".join(lines) if lines else None
 
 
-def _render_ascii(path: Path, width_cells: int) -> str | None:
-    pixels = _pixel_rows(path, width_cells)
-    if not pixels:
-        return None
-    w, h, rows = pixels
-    ramp = _ASCII_RAMP
-    last = len(ramp) - 1
-    lines = []
-    for row in rows:
-        line = []
-        for r, g, b in row:
-            lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
-            line.append(ramp[min(last, int(lum * (last + 1) / 256))])
-        lines.append("".join(line))
-    return "\n".join(lines) if lines else None
-
-
 def render_attachment(path, mode, width_cells: int = 32) -> str | None:
     """Render an image file for a terminal protocol; None when not renderable.
 
@@ -415,7 +393,7 @@ def render_attachment(path, mode, width_cells: int = 32) -> str | None:
         width_cells = int(width_cells)
     except (TypeError, ValueError):
         return None
-    if mode not in {"kitty", "iterm2", "halfblock", "ascii"} or width_cells < 1:
+    if mode not in {"kitty", "iterm2", "halfblock"} or width_cells < 1:
         return None
     try:
         source = Path(path)
@@ -432,6 +410,6 @@ def render_attachment(path, mode, width_cells: int = 32) -> str | None:
             return _render_iterm2(source, width_cells)
         if mode == "halfblock":
             return _render_halfblock(source, width_cells)
-        return _render_ascii(source, width_cells)
+        return None
     except Exception:
         return None

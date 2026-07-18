@@ -141,10 +141,16 @@ def due_date_delta_alerts_from_row(row, *, ts=None):
 
 
 def preload_extras(db, pks):
-    """Batch-load subtask counts and hashtags to avoid N+1 queries."""
+    """Batch-load subtask counts and hashtags to avoid N+1 queries.
+
+    Each table is queried under its own try/except so a minimal fixture
+    missing one table still gets the other extra.
+    """
     if not pks:
         return {}, {}
     placeholders = ",".join("?" * len(pks))
+    subtask_counts = {}
+    hashtags = {}
     try:
         subtask_rows = db.execute(
             f"SELECT ZPARENTREMINDER, COUNT(*) FROM ZREMCDREMINDER "
@@ -152,19 +158,21 @@ def preload_extras(db, pks):
             f"AND ZCOMPLETED = 0 GROUP BY ZPARENTREMINDER",
             pks,
         ).fetchall()
+        subtask_counts = {row[0]: row[1] for row in subtask_rows}
+    except Exception:
+        # Minimal test fixtures omit this table; extras are best-effort.
+        pass
+    try:
         hashtag_rows = db.execute(
             f"SELECT o.ZREMINDER3, h.ZNAME FROM ZREMCDOBJECT o "
             f"JOIN ZREMCDHASHTAGLABEL h ON o.ZHASHTAGLABEL = h.Z_PK "
             f"WHERE o.ZREMINDER3 IN ({placeholders}) AND o.ZMARKEDFORDELETION = 0",
             pks,
         ).fetchall()
+        for row in hashtag_rows:
+            hashtags.setdefault(row[0], []).append(row[1])
     except Exception:
-        # Minimal test fixtures omit these tables; extras are best-effort.
-        return {}, {}
-    subtask_counts = {row[0]: row[1] for row in subtask_rows}
-    hashtags = {}
-    for row in hashtag_rows:
-        hashtags.setdefault(row[0], []).append(row[1])
+        pass
     return subtask_counts, hashtags
 
 
@@ -214,6 +222,62 @@ def preload_attachments(db, pks):
     for pk in grouped:
         grouped[pk].sort(key=lambda row: row[1] or "")
     return grouped
+
+
+def preload_indicators(db, pks):
+    """Batch-load one-liner badge flags: {pk: {"image": bool, "link": bool}}.
+
+    image: the reminder has at least one image attachment (ZREMCDSAVEDATTACHMENT
+    row typed 'image', or a ZREMCDOBJECT file row with dimensions).
+    link: the reminder has at least one rich link (ZREMCDOBJECT row with ZURL)
+    or a legacy saved attachment typed 'url'.
+
+    Independent of preload_attachments: a reminder can carry a link without any
+    attachment rows. Each table pair is queried under its own try/except so a
+    minimal fixture missing a table degrades to False flags, never an error.
+    """
+    if not pks or db is None:
+        return {}
+    placeholders = ",".join("?" * len(pks))
+    image_pks = set()
+    link_pks = set()
+    try:
+        saved_rows = db.execute(
+            f"SELECT ZREMINDER, ZATTACHMENTTYPERAWVALUE FROM ZREMCDSAVEDATTACHMENT "
+            f"WHERE ZREMINDER IN ({placeholders}) AND ZMARKEDFORDELETION = 0",
+            pks,
+        ).fetchall()
+        for row in saved_rows:
+            raw = (_row_get(row, "ZATTACHMENTTYPERAWVALUE") or "").strip().lower()
+            if raw == "url":
+                link_pks.add(row[0])
+            elif raw == "image":
+                image_pks.add(row[0])
+    except Exception:
+        pass
+    try:
+        object_rows = db.execute(
+            f"SELECT ZREMINDER2, ZWIDTH, ZHEIGHT, ZURL, ZFILENAME FROM ZREMCDOBJECT "
+            f"WHERE ZREMINDER2 IN ({placeholders}) AND ZMARKEDFORDELETION = 0 "
+            f"AND ((ZURL IS NOT NULL AND ZURL != '') OR (ZFILENAME IS NOT NULL AND ZFILENAME != ''))",
+            pks,
+        ).fetchall()
+        for row in object_rows:
+            url = _row_get(row, "ZURL")
+            if url:
+                link_pks.add(row[0])
+            filename = _row_get(row, "ZFILENAME")
+            if filename and (
+                _row_get(row, "ZWIDTH") is not None
+                or _row_get(row, "ZHEIGHT") is not None
+            ):
+                image_pks.add(row[0])
+    except Exception:
+        pass
+    return {
+        pk: {"image": pk in image_pks, "link": pk in link_pks}
+        for pk in image_pks | link_pks
+    }
 
 
 def serialize_reminder(
