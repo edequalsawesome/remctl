@@ -8708,6 +8708,14 @@ class ImageFlagParsingTests(unittest.TestCase):
         parser, sub = self.remctl.build_parser()
         return self.remctl.parse_cli_args(parser, sub, argv)
 
+    def test_root_help_formats_literal_image_width_percentage(self):
+        parser, _ = self.remctl.build_parser()
+
+        help_text = parser.format_help()
+
+        self.assertIn("default: ~40% of", help_text)
+        self.assertIn("terminal width, capped 24-100", help_text)
+
     def test_images_before_subcommand_survives_redeclaration(self):
         for argv in (
             ["--images", "info", "847"],

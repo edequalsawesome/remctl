@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.1 — 2026-07-18
+
+- Fixed a startup crash on Python 3.14 caused by the literal percentage in the `--image-width` help text being interpreted as an argparse formatting token. Root help, diagnostics, and normal commands now construct the parser correctly across supported Python versions.
+- Added regression coverage for formatting the root help text with the literal `~40%` default intact.
+
 ## 1.5.0 — 2026-07-18
 
 Inline image attachments: reminders' images are now first-class data — as verified local file paths in JSON for agents, and as inline terminal previews for people.
