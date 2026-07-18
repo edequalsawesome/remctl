@@ -109,7 +109,28 @@ def _candidate_extensions(filename: str | None, uti: str | None) -> list[str]:
     return exts
 
 
+# Files larger than this are never hashed or fed to the escape-mode
+# renderers (kitty/iterm2 read the whole file into memory). JSON output
+# still reports their metadata; terminal rendering skips them.
+MAX_IMAGE_BYTES = 16 * 1024 * 1024
+
+# Per-process memo of verified files: (path, mtime_ns, size) -> matches-sha.
+# Verification is pure I/O on immutable-in-practice attachment blobs, so a
+# stat-keyed memo is safe and avoids re-hashing the same file per command.
+_sha512_memo: dict = {}
+_SHA512_MEMO_MAX = 256
+
+
 def _sha512_of(path: Path) -> str | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if st.st_size > MAX_IMAGE_BYTES:
+        return None
+    memo_key = (str(path), st.st_mtime_ns, st.st_size)
+    if memo_key in _sha512_memo:
+        return _sha512_memo[memo_key]
     digest = hashlib.sha512()
     try:
         with open(path, "rb") as fh:
@@ -117,7 +138,11 @@ def _sha512_of(path: Path) -> str | None:
                 digest.update(chunk)
     except OSError:
         return None
-    return digest.hexdigest()
+    hexdigest = digest.hexdigest()
+    if len(_sha512_memo) >= _SHA512_MEMO_MAX:
+        _sha512_memo.clear()
+    _sha512_memo[memo_key] = hexdigest
+    return hexdigest
 
 
 def resolve_attachment_file(store_dir, sha512sum, filename=None, uti=None) -> str | None:
@@ -300,8 +325,12 @@ def _kitty_escape(payload: bytes, width_cells: int, fmt: int) -> str | None:
     parts = []
     for index, chunk in enumerate(chunks):
         more = 1 if index < len(chunks) - 1 else 0
+        # q=2 on the first chunk suppresses the terminal's response; without
+        # it Ghostty/Kitty/WezTerm answer a=T into the app's input buffer and
+        # the reply leaks into the user's shell after the CLI exits.
+        quiet = ",q=2" if index == 0 else ""
         parts.append(
-            f"\x1b_Ga=T,t=d,f={fmt},c={width_cells},m={more};{chunk}\x1b\\"
+            f"\x1b_Ga=T,t=d,f={fmt},c={width_cells}{quiet},m={more};{chunk}\x1b\\"
         )
     return "".join(parts)
 
@@ -344,8 +373,10 @@ def _render_halfblock(path: Path, width_cells: int) -> str | None:
         return None
     w, h, rows = pixels
     lines = []
-    for y in range(0, h - 1, 2):
-        top, bottom = rows[y], rows[y + 1]
+    for y in range(0, h, 2):
+        top = rows[y]
+        # Odd heights pair the last row with black rather than dropping it.
+        bottom = rows[y + 1] if y + 1 < h else [(0, 0, 0)] * w
         line = []
         for x in range(w):
             tr, tg, tb = top[x]
@@ -389,6 +420,11 @@ def render_attachment(path, mode, width_cells: int = 32) -> str | None:
     try:
         source = Path(path)
         if not source.is_file():
+            return None
+        try:
+            if source.stat().st_size > MAX_IMAGE_BYTES:
+                return None
+        except OSError:
             return None
         if mode == "kitty":
             return _render_kitty(source, width_cells)

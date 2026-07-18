@@ -45,6 +45,18 @@ This exposes fields EventKit does not expose cleanly for fast list views:
 
 RemCTL opens the database read-only. It never writes to SQLite.
 
+### Attachment Resolution and Rendering
+
+Attachment rows live in the store's attachment tables (`ZREMCDATTACHMENT` on parent reminders, saved-attachment rows for subtasks). Each row records a filename, UTI, pixel dimensions, and a `ZSHA512SUM` digest of the file's contents. The files themselves live outside the database:
+
+```text
+~/Library/Group Containers/group.com.apple.reminders/Container_v1/Files/Account-*/Attachments/<ZSHA512SUM><ext>
+```
+
+Resolution and rendering both live on the read side, in `remctl_images.py`. RemCTL maps a row to its on-disk file by trying candidate extensions (from the filename, the UTI, then a small fallback set) and trusting the file only when its sha512 matches `ZSHA512SUM`. The verified path is what JSON exposes as `attachments[].path` alongside `resolved`, `uti`, `width`, and `height`. Legacy rows have a NULL sha and no local file; they serialize as `path: null` with `resolved: false` instead of guessing a path that cannot be verified. Subtask attachments are resolved the same way but only surface through `info`.
+
+Inline rendering (`--images`) is purely a read-side display concern: it never involves `remctl-bridge` or `remctl-private`, and it only runs on a real TTY. RemCTL auto-detects the best protocol — Kitty graphics on Ghostty/Kitty/WezTerm/Konsole, iTerm2's inline protocol on iTerm2 and Blink, truecolor half-blocks elsewhere, ASCII as the last resort — with `--image-mode`/`REMCTL_IMAGE_MODE` and `--image-width`/`REMCTL_IMAGE_WIDTH` as overrides. The pipeline stays stdlib-only: Pillow is used when importable, otherwise macOS `sips` decodes pixels through a small stdlib BMP reader. Nothing about images adds a required dependency or touches the write path.
+
 ## Limited EventKit Read Fallback
 
 `--via-eventkit` is a narrow fallback for automation hosts that cannot get Full Disk Access. It is supported only by `show`, `search`, `today`, and `upcoming`, and it is never selected automatically. Normal direct reads remain the primary read path because they expose Reminders metadata that EventKit does not.
@@ -181,5 +193,10 @@ REMCTL_PERMISSIONS_PATH=/path/to/remctl-permissions
 REMCTL_PATH=/path/to/remctl
 REMCTL_STORE_DIR=/path/to/reminders/store
 REMCTL_CONFIG_DIR=/path/to/config
+REMCTL_IMAGES=1
+REMCTL_IMAGE_MODE=kitty|iterm2|halfblock|ascii|none
+REMCTL_IMAGE_WIDTH=32
 NO_COLOR=1
 ```
+
+The `REMCTL_IMAGES*` variables mirror the `--images`, `--image-mode`, and `--image-width` flags; flags win over the environment. `REMCTL_IMAGES_FORCE=1` bypasses the TTY check for tests only and is not a supported output configuration.

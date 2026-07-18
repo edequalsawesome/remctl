@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import contextlib
 import base64
+import hashlib
 import io
 import json
 import os
+import re
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
@@ -7398,6 +7401,1341 @@ class CliTests(unittest.TestCase):
             self.assertFalse((bin_dir / "completions").exists())
             self.assertTrue((bin_dir / "unrelated").exists())
             self.assertFalse(config_dir.exists())
+
+# ── Inline Images (feature/inline-images) ────────────────────────────────────
+
+ATTACHMENT_JSON_KEYS = {
+    "filename",
+    "type",
+    "path",
+    "resolved",
+    "uti",
+    "width",
+    "height",
+}
+
+
+def _tiny_png_bytes(width=4, height=2):
+    """Deterministic truecolor PNG without Pillow: solid red / solid blue rows."""
+    import zlib
+
+    rows = [
+        [(255, 0, 0)] * width,  # top row: red
+        [(0, 0, 255)] * width,  # bottom row: blue
+    ]
+    raw = b""
+    for y in range(height):
+        raw += b"\x00" + b"".join(
+            bytes((r, g, b)) for (r, g, b) in rows[y % len(rows)]
+        )
+
+    def chunk(tag, data):
+        import binascii
+
+        body = tag + data
+        return (
+            struct.pack(">I", len(data))
+            + body
+            + struct.pack(">I", binascii.crc32(body) & 0xFFFFFFFF)
+        )
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+
+
+def _tiny_rgba_png_bytes(width=4, height=2):
+    """Deterministic RGBA PNG: semi-transparent red over semi-transparent blue."""
+    import zlib
+
+    rows = [
+        [(255, 0, 0, 128)] * width,
+        [(0, 0, 255, 255)] * width,
+    ]
+    raw = b""
+    for y in range(height):
+        raw += b"\x00" + b"".join(
+            bytes((r, g, b, a)) for (r, g, b, a) in rows[y % len(rows)]
+        )
+
+    def chunk(tag, data):
+        import binascii
+
+        body = tag + data
+        return (
+            struct.pack(">I", len(data))
+            + body
+            + struct.pack(">I", binascii.crc32(body) & 0xFFFFFFFF)
+        )
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+
+
+def _tiny_jpeg_bytes():
+    """Minimal valid baseline JPEG (4x2 white) used to exercise kitty f=106."""
+    return base64.b64decode(
+        "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsL"
+        "DBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/"
+        "2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIy"
+        "MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAACAAQDASIAAhEBAxEB"
+        "/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIE"
+        "AwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2Jy"
+        "ggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlq"
+        "c3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLD"
+        "xMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEB"
+        "AQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3"
+        "AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcY"
+        "GRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6"
+        "goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK"
+        "0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD3+iii"
+        "gD//2Q=="
+    )
+
+
+class InlineImageTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.remctl = load_module("remctl_cli_test", "remctl")
+        import remctl_images
+        import remctl_serialization
+
+        cls.images = remctl_images
+        cls.remctl_serialization = remctl_serialization
+        cls._default_protocol_probe = mock.patch.object(
+            cls.remctl,
+            "_probe_private_protocol_version",
+            return_value={"ok": True, "version": 1},
+        )
+        cls._default_protocol_probe.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._default_protocol_probe.stop()
+
+    def setUp(self):
+        self._color_enabled = self.remctl.C.enabled
+        # The attachment-dir lookup caches on Files/ mtime; isolate tests.
+        self.images._attachment_dir_cache.clear()
+        self.remctl._attachment_sha_capability_cache.clear()
+
+    def tearDown(self):
+        self.remctl.C.enabled = self._color_enabled
+        self.images._attachment_dir_cache.clear()
+        self.remctl._attachment_sha_capability_cache.clear()
+
+    # ── Shared fixtures ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _reminder_row(pk=42, title="Pick up prints", ckid="ATT-REM-1"):
+        return {
+            "Z_PK": pk,
+            "ZTITLE": title,
+            "ZNOTES": None,
+            "ZCOMPLETED": 0,
+            "ZFLAGGED": 0,
+            "ZPRIORITY": 0,
+            "ZISURGENTSTATEENABLEDFORCURRENTUSER": 0,
+            "ZDUEDATEDELTAALERTSDATA": None,
+            "ZDUEDATE": None,
+            "ZDISPLAYDATEDATE": None,
+            "ZALLDAY": 0,
+            "ZCOMPLETIONDATE": None,
+            "ZCREATIONDATE": None,
+            "ZPARENTREMINDER": None,
+            "ZLIST": 1,
+            "ZICSURL": None,
+            "ZCKIDENTIFIER": ckid,
+            "list_name": "Projects",
+            "recurrence_frequency": None,
+            "recurrence_interval": None,
+            "recurrence_count": None,
+            "recurrence_end_date": None,
+            "recurrence_days_of_week": None,
+            "recurrence_days_of_month": None,
+            "recurrence_months_of_year": None,
+            "recurrence_days_of_year": None,
+            "recurrence_weeks_of_year": None,
+            "recurrence_set_positions": None,
+        }
+
+    @staticmethod
+    def _attachment_db(*, saved_sha=True, object_sha=True):
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        # to_dict's subtask-count fallback needs a reminder table.
+        db.execute(
+            "CREATE TABLE ZREMCDREMINDER ("
+            "Z_PK INTEGER, ZPARENTREMINDER INTEGER, "
+            "ZMARKEDFORDELETION INTEGER, ZCOMPLETED INTEGER)"
+        )
+        saved_cols = (
+            "ZFILENAME TEXT, ZUTI TEXT, ZATTACHMENTTYPERAWVALUE TEXT, "
+            + ("ZSHA512SUM TEXT, " if saved_sha else "")
+            + "ZREMINDER INTEGER, ZMARKEDFORDELETION INTEGER"
+        )
+        db.execute(f"CREATE TABLE ZREMCDSAVEDATTACHMENT ({saved_cols})")
+        object_cols = (
+            "ZFILENAME TEXT, ZUTI TEXT, ZWIDTH INTEGER, ZHEIGHT INTEGER, "
+            + ("ZSHA512SUM TEXT, " if object_sha else "")
+            + "ZREMINDER2 INTEGER, ZMARKEDFORDELETION INTEGER"
+        )
+        db.execute(f"CREATE TABLE ZREMCDOBJECT ({object_cols})")
+        return db
+
+    @staticmethod
+    def _attachment_store(tmpdir, filename="photo.png", content=None):
+        """Create a Stores/ + Files/Account-X/Attachments layout; return pieces."""
+        content = content if content is not None else _tiny_png_bytes()
+        sha = hashlib.sha512(content).hexdigest()
+        store_dir = Path(tmpdir) / "Stores"
+        store_dir.mkdir()
+        attachments_dir = (
+            Path(tmpdir) / "Files" / "Account-X" / "Attachments"
+        )
+        attachments_dir.mkdir(parents=True)
+        (attachments_dir / f"{sha}{Path(filename).suffix}").write_bytes(content)
+        return store_dir, sha, content
+
+    def _run_cmd_info(self, row, db, args):
+        patches = [
+            mock.patch.object(self.remctl, "open_db", return_value=db),
+            mock.patch.object(self.remctl, "q_reminder", return_value=row),
+            mock.patch.object(self.remctl, "q_reminders", return_value=[]),
+            mock.patch.object(self.remctl, "q_section_memberships", return_value={}),
+            mock.patch.object(self.remctl, "q_alarms", return_value=[]),
+            mock.patch.object(self.remctl, "q_hashtags", return_value=[]),
+            mock.patch.object(self.remctl, "q_rich_link", return_value=None),
+            mock.patch.object(self.remctl, "q_assignment", return_value=None),
+        ]
+        stdout = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            for patcher in patches:
+                stack.enter_context(patcher)
+            with contextlib.redirect_stdout(stdout):
+                self.remctl.cmd_info(args)
+        return stdout.getvalue()
+
+    def _info_args(self, **overrides):
+        base = {
+            "id": 42,
+            "json": False,
+            "images": False,
+            "image_mode": None,
+            "image_width": 32,
+            "verbose": False,
+            "format": None,
+        }
+        base.update(overrides)
+        return SimpleNamespace(**base)
+
+    # ── 1. JSON shape ───────────────────────────────────────────────────
+
+    def test_info_json_attachment_entries_have_all_seven_keys(self):
+        db = self._attachment_db()
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "('photo.png', 'public.png', 640, 480, NULL, 42, 0)"
+        )
+        try:
+            out = self._run_cmd_info(
+                self._reminder_row(), db, self._info_args(json=True)
+            )
+        finally:
+            db.close()
+        attachments = json.loads(out)["attachments"]
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(set(attachments[0].keys()), ATTACHMENT_JSON_KEYS)
+
+    def test_show_json_includes_attachments_and_omits_key_when_absent(self):
+        db = self._attachment_db()
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "('photo.png', 'public.png', 640, 480, NULL, 42, 0)"
+        )
+        rows = [
+            self._reminder_row(pk=42, ckid="REM-A"),
+            self._reminder_row(pk=43, title="No attachments", ckid="REM-B"),
+        ]
+        try:
+            with (
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(
+                    self.remctl,
+                    "resolve_required_list_target_or_die",
+                    return_value={"id": 1, "title": "Projects"},
+                ),
+                mock.patch.object(self.remctl, "q_reminders", return_value=rows),
+                mock.patch.object(self.remctl, "q_sections", return_value=[]),
+                mock.patch.object(self.remctl, "q_rich_link", return_value=None),
+                mock.patch.object(self.remctl, "q_assignment", return_value=None),
+                mock.patch.object(
+                    self.remctl,
+                    "preload_extras",
+                    return_value=({42: 0, 43: 0}, {42: [], 43: []}),
+                ),
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.remctl.cmd_show(
+                    SimpleNamespace(
+                        list="Projects",
+                        list_id=None,
+                        completed=False,
+                        json=True,
+                        format=None,
+                        verbose=False,
+                        images=False,
+                        image_mode=None,
+                        image_width=32,
+                    )
+                )
+        finally:
+            db.close()
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(len(payload), 2)
+        with_attachment = next(item for item in payload if item["id"] == 42)
+        without_attachment = next(item for item in payload if item["id"] == 43)
+        self.assertEqual(
+            set(with_attachment["attachments"][0].keys()), ATTACHMENT_JSON_KEYS
+        )
+        self.assertEqual(with_attachment["attachments"][0]["filename"], "photo.png")
+        self.assertNotIn("attachments", without_attachment)
+
+    def test_search_json_includes_attachments(self):
+        db = self._attachment_db()
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "('photo.png', 'public.png', 640, 480, NULL, 42, 0)"
+        )
+        try:
+            with (
+                mock.patch.object(self.remctl, "open_db", return_value=db),
+                mock.patch.object(
+                    self.remctl,
+                    "q_search",
+                    return_value=[self._reminder_row()],
+                ),
+                mock.patch.object(self.remctl, "q_rich_link", return_value=None),
+                mock.patch.object(self.remctl, "q_assignment", return_value=None),
+                mock.patch.object(
+                    self.remctl,
+                    "preload_extras",
+                    return_value=({42: 0}, {42: []}),
+                ),
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.remctl.cmd_search(
+                    SimpleNamespace(
+                        query="prints",
+                        completed=False,
+                        json=True,
+                        format=None,
+                        verbose=False,
+                        images=False,
+                        image_mode=None,
+                        image_width=32,
+                    )
+                )
+        finally:
+            db.close()
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(
+            set(payload[0]["attachments"][0].keys()), ATTACHMENT_JSON_KEYS
+        )
+        self.assertEqual(payload[0]["attachments"][0]["uti"], "public.png")
+
+    def test_info_json_legacy_null_sha_row_is_unresolved(self):
+        db = self._attachment_db()
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "('photo.png', 'public.png', 640, 480, NULL, 42, 0)"
+        )
+        try:
+            out = self._run_cmd_info(
+                self._reminder_row(), db, self._info_args(json=True)
+            )
+        finally:
+            db.close()
+        entry = json.loads(out)["attachments"][0]
+        self.assertIsNone(entry["path"])
+        self.assertFalse(entry["resolved"])
+        self.assertEqual(entry["width"], 640)
+        self.assertEqual(entry["height"], 480)
+        self.assertEqual(entry["type"], "image")
+
+    def test_info_json_resolved_row_reports_path_and_dimensions(self):
+        db = self._attachment_db()
+        with tempfile.TemporaryDirectory() as tmp:
+            store_dir, sha, content = self._attachment_store(tmp)
+            db.execute(
+                "INSERT INTO ZREMCDOBJECT VALUES "
+                "('photo.png', 'public.png', 4, 2, ?, 42, 0)",
+                (sha,),
+            )
+            try:
+                with mock.patch.object(
+                    self.remctl, "STORE_DIR", store_dir
+                ):
+                    out = self._run_cmd_info(
+                        self._reminder_row(), db, self._info_args(json=True)
+                    )
+            finally:
+                db.close()
+        entry = json.loads(out)["attachments"][0]
+        self.assertTrue(entry["resolved"])
+        self.assertTrue(entry["path"].endswith(f"{sha}.png"))
+        self.assertEqual(entry["uti"], "public.png")
+        self.assertEqual(entry["width"], 4)
+        self.assertEqual(entry["height"], 2)
+
+    # ── 2. Resolution ───────────────────────────────────────────────────
+
+    def test_resolve_attachment_file_verified_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store_dir, sha, content = self._attachment_store(tmp)
+            resolved = self.images.resolve_attachment_file(
+                store_dir, sha, filename="photo.png", uti="public.png"
+            )
+        self.assertIsNotNone(resolved)
+        self.assertTrue(resolved.endswith(f"{sha}.png"))
+
+    def test_resolve_attachment_file_rejects_tampered_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store_dir, sha, _ = self._attachment_store(tmp)
+            target = (
+                Path(tmp) / "Files" / "Account-X" / "Attachments" / f"{sha}.png"
+            )
+            target.write_bytes(b"tampered bytes, not the original image")
+            resolved = self.images.resolve_attachment_file(
+                store_dir, sha, filename="photo.png", uti="public.png"
+            )
+        self.assertIsNone(resolved)
+
+    def test_resolve_attachment_file_extension_fallback_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # Row claims .png, file on disk is .jpg: UTI map resolves it.
+            content = _tiny_jpeg_bytes()
+            sha = hashlib.sha512(content).hexdigest()
+            store_dir = Path(tmp) / "Stores"
+            store_dir.mkdir()
+            attachments_dir = Path(tmp) / "Files" / "Account-X" / "Attachments"
+            attachments_dir.mkdir(parents=True)
+            (attachments_dir / f"{sha}.jpg").write_bytes(content)
+            resolved = self.images.resolve_attachment_file(
+                store_dir, sha, filename="photo.png", uti="public.jpeg"
+            )
+            self.assertIsNotNone(resolved)
+            self.assertTrue(resolved.endswith(f"{sha}.jpg"))
+        with tempfile.TemporaryDirectory() as tmp:
+            # Unknown filename suffix and unknown UTI: probing finds .heic.
+            content = b"heic-ish bytes"
+            sha = hashlib.sha512(content).hexdigest()
+            store_dir = Path(tmp) / "Stores"
+            store_dir.mkdir()
+            attachments_dir = Path(tmp) / "Files" / "Account-X" / "Attachments"
+            attachments_dir.mkdir(parents=True)
+            (attachments_dir / f"{sha}.heic").write_bytes(content)
+            resolved = self.images.resolve_attachment_file(
+                store_dir, sha, filename="photo.bmp", uti="com.example.unknown"
+            )
+            self.assertIsNotNone(resolved)
+            self.assertTrue(resolved.endswith(f"{sha}.heic"))
+            self.assertIsNotNone(
+                self.images.resolve_attachment_file(
+                    store_dir, sha, filename=None, uti="com.example.unknown"
+                )
+            )
+
+    def test_resolve_attachment_file_searches_multiple_account_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            content = _tiny_png_bytes()
+            sha = hashlib.sha512(content).hexdigest()
+            store_dir = Path(tmp) / "Stores"
+            store_dir.mkdir()
+            first = Path(tmp) / "Files" / "Account-A" / "Attachments"
+            second = Path(tmp) / "Files" / "Account-B" / "Attachments"
+            first.mkdir(parents=True)
+            second.mkdir(parents=True)
+            (second / f"{sha}.png").write_bytes(content)
+            resolved = self.images.resolve_attachment_file(
+                store_dir, sha, filename="photo.png", uti="public.png"
+            )
+            self.assertIsNotNone(resolved)
+            self.assertIn("Account-B", resolved)
+
+    def test_resolve_attachment_file_rejects_malformed_or_missing_sha(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store_dir, sha, _ = self._attachment_store(tmp)
+            self.assertIsNone(
+                self.images.resolve_attachment_file(
+                    store_dir, None, filename="photo.png"
+                )
+            )
+            self.assertIsNone(
+                self.images.resolve_attachment_file(
+                    store_dir, "not-a-sha", filename="photo.png"
+                )
+            )
+            self.assertEqual(
+                self.images.resolve_attachment_file(
+                    store_dir, sha.upper(), filename="photo.png"
+                ),
+                str(
+                    Path(tmp)
+                    / "Files"
+                    / "Account-X"
+                    / "Attachments"
+                    / f"{sha}.png"
+                ),
+            )
+        with tempfile.TemporaryDirectory() as empty:
+            store_dir = Path(empty) / "Stores"
+            store_dir.mkdir()
+            self.assertIsNone(
+                self.images.resolve_attachment_file(
+                    store_dir, sha, filename="photo.png"
+                )
+            )
+
+    # ── 3. Schema drift ─────────────────────────────────────────────────
+
+    def test_q_attachments_handles_tables_without_sha_columns(self):
+        db = self._attachment_db(saved_sha=False, object_sha=False)
+        db.execute(
+            "INSERT INTO ZREMCDSAVEDATTACHMENT VALUES "
+            "('legacy.png', 'public.png', 'image', 42, 0)"
+        )
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "('object.png', 'public.png', 100, 50, 42, 0)"
+        )
+        try:
+            rows = self.remctl.q_attachments(db, 42)
+            payload = self.remctl.attachment_rows_to_json(rows)
+        finally:
+            db.close()
+        self.assertEqual(len(payload), 2)
+        for entry in payload:
+            self.assertIsNone(entry["path"])
+            self.assertFalse(entry["resolved"])
+
+    def test_preload_attachments_handles_tables_without_sha_columns(self):
+        db = self._attachment_db(saved_sha=False, object_sha=False)
+        db.execute(
+            "INSERT INTO ZREMCDSAVEDATTACHMENT VALUES "
+            "('legacy.png', 'public.png', 'image', 42, 0)"
+        )
+        try:
+            grouped = self.remctl_serialization.preload_attachments(db, [42])
+        finally:
+            db.close()
+        self.assertEqual(len(grouped[42]), 1)
+
+    # ── 4. detect_image_mode ────────────────────────────────────────────
+
+    _IMAGE_ENV_KEYS = (
+        "REMCTL_IMAGE_MODE",
+        "TERM_PROGRAM",
+        "KONSOLE_VERSION",
+        "KITTY_WINDOW_ID",
+        "LC_TERMINAL",
+        "COLORTERM",
+        "TERM",
+    )
+
+    def _detect_mode(self, env):
+        scrubbed = {key: "" for key in self._IMAGE_ENV_KEYS}
+        # Empty strings keep keys present but inert; remove them instead.
+        with mock.patch.dict(os.environ, clear=False):
+            for key in self._IMAGE_ENV_KEYS:
+                os.environ.pop(key, None)
+            os.environ.update(env)
+            with mock.patch.object(sys.stdout, "isatty", return_value=False):
+                return self.images.detect_image_mode()
+
+    def test_detect_image_mode_override_wins(self):
+        self.assertEqual(
+            self._detect_mode(
+                {"REMCTL_IMAGE_MODE": "halfblock", "TERM_PROGRAM": "ghostty"}
+            ),
+            "halfblock",
+        )
+        self.assertIsNone(
+            self._detect_mode({"REMCTL_IMAGE_MODE": "none", "TERM_PROGRAM": "kitty"})
+        )
+
+    def test_detect_image_mode_terminals(self):
+        self.assertEqual(self._detect_mode({"TERM_PROGRAM": "ghostty"}), "kitty")
+        self.assertEqual(self._detect_mode({"TERM_PROGRAM": "kitty"}), "kitty")
+        self.assertEqual(self._detect_mode({"TERM_PROGRAM": "WezTerm"}), "kitty")
+        self.assertEqual(self._detect_mode({"KONSOLE_VERSION": "230800"}), "kitty")
+        self.assertEqual(self._detect_mode({"KITTY_WINDOW_ID": "1"}), "kitty")
+        self.assertEqual(self._detect_mode({"TERM_PROGRAM": "iTerm.app"}), "iterm2")
+        self.assertEqual(self._detect_mode({"LC_TERMINAL": "iTerm2"}), "iterm2")
+        self.assertEqual(self._detect_mode({"LC_TERMINAL": "blink"}), "iterm2")
+
+    def test_detect_image_mode_color_fallbacks(self):
+        self.assertEqual(
+            self._detect_mode({"COLORTERM": "truecolor"}), "halfblock"
+        )
+        self.assertEqual(self._detect_mode({"COLORTERM": "24bit"}), "halfblock")
+        self.assertEqual(
+            self._detect_mode({"TERM": "xterm-256color"}), "halfblock"
+        )
+        self.assertEqual(
+            self._detect_mode({"TERM": "xterm-truecolor"}), "halfblock"
+        )
+
+    def test_detect_image_mode_tty_and_non_tty_fallback(self):
+        with mock.patch.dict(os.environ, clear=False):
+            for key in self._IMAGE_ENV_KEYS:
+                os.environ.pop(key, None)
+            os.environ["TERM"] = "xterm"
+            with mock.patch.object(sys.stdout, "isatty", return_value=True):
+                self.assertEqual(self.images.detect_image_mode(), "ascii")
+            with mock.patch.object(sys.stdout, "isatty", return_value=False):
+                self.assertIsNone(self.images.detect_image_mode())
+
+    # ── 5. render_attachment per mode ───────────────────────────────────
+
+    def test_render_kitty_round_trips_png_payload(self):
+        payload = _tiny_png_bytes()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tiny.png"
+            path.write_bytes(payload)
+            rendered = self.images.render_attachment(path, "kitty", 8)
+        self.assertIsNotNone(rendered)
+        self.assertIn("\x1b_G", rendered)
+        self.assertIn("a=T,t=d,f=100,c=8", rendered)
+        chunks = re.findall(r"\x1b_G[^;]*;([A-Za-z0-9+/=]+)\x1b\\", rendered)
+        self.assertTrue(chunks)
+        self.assertEqual(base64.b64decode("".join(chunks)), payload)
+
+    def test_render_kitty_uses_jpeg_format_106(self):
+        payload = _tiny_jpeg_bytes()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tiny.jpg"
+            path.write_bytes(payload)
+            rendered = self.images.render_attachment(path, "kitty", 8)
+        self.assertIsNotNone(rendered)
+        self.assertIn("f=106", rendered)
+        chunks = re.findall(r"\x1b_G[^;]*;([A-Za-z0-9+/=]+)\x1b\\", rendered)
+        self.assertEqual(base64.b64decode("".join(chunks)), payload)
+
+    def test_render_iterm2_inline_file_escape(self):
+        payload = _tiny_png_bytes()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tiny.png"
+            path.write_bytes(payload)
+            rendered = self.images.render_attachment(path, "iterm2", 12)
+        self.assertIsNotNone(rendered)
+        self.assertTrue(rendered.startswith("\x1b]1337;File=inline=1;width=12"))
+        self.assertTrue(rendered.endswith("\x07"))
+        self.assertIn(base64.b64encode(payload).decode("ascii"), rendered)
+
+    def test_render_halfblock_emits_truecolor_blocks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tiny.png"
+            path.write_bytes(_tiny_png_bytes())
+            rendered = self.images.render_attachment(path, "halfblock", 4)
+        self.assertIsNotNone(rendered)
+        self.assertIn("\x1b[38;2;", rendered)
+        self.assertIn("\x1b[48;2;", rendered)
+        self.assertIn("▀", rendered)
+        self.assertIn("\x1b[0m", rendered)
+
+    def test_render_ascii_uses_luminance_ramp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tiny.png"
+            path.write_bytes(_tiny_png_bytes())
+            rendered = self.images.render_attachment(path, "ascii", 4)
+        self.assertIsNotNone(rendered)
+        lines = rendered.split("\n")
+        self.assertEqual(len(lines), 2)
+        for line in lines:
+            self.assertEqual(len(line), 4)
+            self.assertTrue(set(line) <= set(self.images._ASCII_RAMP))
+        # Red (lum ~54) must map lower on the ramp than blue (lum ~18) check:
+        # red row characters rank higher in the ramp than blue row characters.
+        ramp = self.images._ASCII_RAMP
+        self.assertGreater(ramp.index(lines[0][0]), ramp.index(lines[1][0]))
+
+    def test_render_attachment_never_raises_on_unrenderable_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "notes.txt"
+            path.write_text("plain text, not an image")
+            for mode in ("halfblock", "ascii"):
+                self.assertIsNone(self.images.render_attachment(path, mode, 8))
+            missing = Path(tmp) / "missing.png"
+            for mode in ("kitty", "iterm2", "halfblock", "ascii"):
+                self.assertIsNone(self.images.render_attachment(missing, mode, 8))
+        self.assertIsNone(self.images.render_attachment("/tmp/x.png", "nope", 8))
+        self.assertIsNone(self.images.render_attachment("/tmp/x.png", "kitty", 0))
+        self.assertIsNone(
+            self.images.render_attachment("/tmp/x.png", "kitty", "wide")
+        )
+
+    # ── 6. sips/BMP stdlib path ─────────────────────────────────────────
+
+    def test_halfblock_falls_back_to_sips_when_pillow_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tiny.png"
+            path.write_bytes(_tiny_png_bytes())
+            with mock.patch.object(
+                self.images,
+                "_pixel_rows_via_pillow",
+                side_effect=ImportError("Pillow not installed"),
+            ):
+                rendered = self.images.render_attachment(path, "halfblock", 4)
+        self.assertIsNotNone(rendered)
+        self.assertIn("\x1b[38;2;", rendered)
+        self.assertIn("\x1b[48;2;", rendered)
+        self.assertIn("▀", rendered)
+
+    def test_sips_path_handles_alpha_png_via_32bit_bmp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "alpha.png"
+            path.write_bytes(_tiny_rgba_png_bytes())
+            with mock.patch.object(
+                self.images,
+                "_pixel_rows_via_pillow",
+                side_effect=ImportError("Pillow not installed"),
+            ):
+                pixels = self.images._pixel_rows(path, 4)
+        self.assertIsNotNone(pixels)
+        width, height, rows = pixels
+        self.assertEqual(width, 4)
+        self.assertGreaterEqual(height, 1)
+        for row in rows:
+            for pixel in row:
+                self.assertEqual(len(pixel), 3)  # alpha flattened over black
+
+    # ── 7. CLI guards ───────────────────────────────────────────────────
+
+    def test_cmd_info_images_flag_is_noop_when_not_forced_and_piped(self):
+        db = self._attachment_db()
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "('photo.png', 'public.png', 4, 2, NULL, 42, 0)"
+        )
+        try:
+            plain = self._run_cmd_info(
+                self._reminder_row(), db, self._info_args()
+            )
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("REMCTL_IMAGES_FORCE", None)
+                with_images = self._run_cmd_info(
+                    self._reminder_row(),
+                    db,
+                    self._info_args(images=True, image_mode="halfblock"),
+                )
+        finally:
+            db.close()
+        self.assertEqual(plain, with_images)
+
+    def test_cmd_info_force_renders_halfblock_escapes(self):
+        db = self._attachment_db()
+        with tempfile.TemporaryDirectory() as tmp:
+            store_dir, sha, _ = self._attachment_store(tmp)
+            db.execute(
+                "INSERT INTO ZREMCDOBJECT VALUES "
+                "('photo.png', 'public.png', 4, 2, ?, 42, 0)",
+                (sha,),
+            )
+            try:
+                with (
+                    mock.patch.object(self.remctl, "STORE_DIR", store_dir),
+                    mock.patch.dict(
+                        os.environ,
+                        {
+                            "REMCTL_IMAGES_FORCE": "1",
+                            "REMCTL_IMAGE_MODE": "halfblock",
+                        },
+                        clear=False,
+                    ),
+                ):
+                    out = self._run_cmd_info(
+                        self._reminder_row(),
+                        db,
+                        self._info_args(images=True),
+                    )
+            finally:
+                db.close()
+        self.assertIn("\x1b[38;2;", out)
+        self.assertIn("Attachments (1)", out)
+
+    def test_cmd_info_json_with_images_force_has_no_escapes(self):
+        db = self._attachment_db()
+        with tempfile.TemporaryDirectory() as tmp:
+            store_dir, sha, _ = self._attachment_store(tmp)
+            db.execute(
+                "INSERT INTO ZREMCDOBJECT VALUES "
+                "('photo.png', 'public.png', 4, 2, ?, 42, 0)",
+                (sha,),
+            )
+            try:
+                with (
+                    mock.patch.object(self.remctl, "STORE_DIR", store_dir),
+                    mock.patch.dict(
+                        os.environ,
+                        {
+                            "REMCTL_IMAGES_FORCE": "1",
+                            "REMCTL_IMAGE_MODE": "halfblock",
+                        },
+                        clear=False,
+                    ),
+                ):
+                    out = self._run_cmd_info(
+                        self._reminder_row(),
+                        db,
+                        self._info_args(json=True, images=True),
+                    )
+            finally:
+                db.close()
+        self.assertNotIn("\x1b", out)
+        self.assertEqual(
+            json.loads(out)["attachments"][0]["filename"], "photo.png"
+        )
+
+    def test_cmd_show_table_format_with_images_force_has_no_escapes(self):
+        db = self._attachment_db()
+        with tempfile.TemporaryDirectory() as tmp:
+            store_dir, sha, _ = self._attachment_store(tmp)
+            db.execute(
+                "INSERT INTO ZREMCDOBJECT VALUES "
+                "('photo.png', 'public.png', 4, 2, ?, 42, 0)",
+                (sha,),
+            )
+            try:
+                with (
+                    mock.patch.object(self.remctl, "STORE_DIR", store_dir),
+                    mock.patch.object(self.remctl, "open_db", return_value=db),
+                    mock.patch.object(
+                        self.remctl,
+                        "resolve_required_list_target_or_die",
+                        return_value={"id": 1, "title": "Projects"},
+                    ),
+                    mock.patch.object(
+                        self.remctl,
+                        "q_reminders",
+                        return_value=[self._reminder_row()],
+                    ),
+                    mock.patch.object(self.remctl, "q_sections", return_value=[]),
+                    mock.patch.object(
+                        self.remctl,
+                        "preload_extras",
+                        return_value=({42: 0}, {42: []}),
+                    ),
+                    mock.patch.dict(
+                        os.environ,
+                        {
+                            "REMCTL_IMAGES_FORCE": "1",
+                            "REMCTL_IMAGE_MODE": "halfblock",
+                        },
+                        clear=False,
+                    ),
+                    contextlib.redirect_stdout(io.StringIO()) as stdout,
+                ):
+                    self.remctl.cmd_show(
+                        SimpleNamespace(
+                            list="Projects",
+                            list_id=None,
+                            completed=False,
+                            json=False,
+                            format="table",
+                            verbose=True,
+                            images=True,
+                            image_mode=None,
+                            image_width=32,
+                        )
+                    )
+            finally:
+                db.close()
+        self.assertNotIn("\x1b[38;2;", stdout.getvalue())
+
+    def test_cmd_info_fallback_strings_for_unresolved_and_unrenderable(self):
+        db = self._attachment_db()
+        # Row 1: NULL sha -> not downloaded. Row 2: resolved but not an image.
+        with tempfile.TemporaryDirectory() as tmp:
+            store_dir, sha, _ = self._attachment_store(
+                tmp, filename="notes.txt", content=b"just text"
+            )
+            db.execute(
+                "INSERT INTO ZREMCDOBJECT VALUES "
+                "('legacy.png', 'public.png', NULL, NULL, NULL, 42, 0)"
+            )
+            db.execute(
+                "INSERT INTO ZREMCDOBJECT VALUES "
+                "('notes.txt', 'public.plain-text', NULL, NULL, ?, 42, 0)",
+                (sha,),
+            )
+            try:
+                with (
+                    mock.patch.object(self.remctl, "STORE_DIR", store_dir),
+                    mock.patch.dict(
+                        os.environ,
+                        {
+                            "REMCTL_IMAGES_FORCE": "1",
+                            "REMCTL_IMAGE_MODE": "halfblock",
+                        },
+                        clear=False,
+                    ),
+                ):
+                    out = self._run_cmd_info(
+                        self._reminder_row(),
+                        db,
+                        self._info_args(images=True),
+                    )
+            finally:
+                db.close()
+        self.assertIn("(file not downloaded on this Mac)", out)
+        self.assertIn("(preview unavailable)", out)
+
+    # ── 8. fmt verbose hook ─────────────────────────────────────────────
+
+    def _cmd_show_human(self, db, *, verbose, extra_env=None):
+        env = {
+            "REMCTL_IMAGES_FORCE": "1",
+            "REMCTL_IMAGE_MODE": "halfblock",
+        }
+        if extra_env:
+            env.update(extra_env)
+        with (
+            mock.patch.object(self.remctl, "open_db", return_value=db),
+            mock.patch.object(
+                self.remctl,
+                "resolve_required_list_target_or_die",
+                return_value={"id": 1, "title": "Projects"},
+            ),
+            mock.patch.object(
+                self.remctl,
+                "q_reminders",
+                return_value=[self._reminder_row()],
+            ),
+            mock.patch.object(self.remctl, "q_sections", return_value=[]),
+            mock.patch.object(
+                self.remctl, "preload_extras", return_value=({42: 0}, {42: []})
+            ),
+            mock.patch.dict(os.environ, env, clear=False),
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+        ):
+            self.remctl.cmd_show(
+                SimpleNamespace(
+                    list="Projects",
+                    list_id=None,
+                    completed=False,
+                    json=False,
+                    format=None,
+                    verbose=verbose,
+                    images=True,
+                    image_mode=None,
+                    image_width=32,
+                )
+            )
+        return stdout.getvalue()
+
+    def test_cmd_show_images_verbose_renders_attachment_block(self):
+        db = self._attachment_db()
+        with tempfile.TemporaryDirectory() as tmp:
+            store_dir, sha, _ = self._attachment_store(tmp)
+            db.execute(
+                "INSERT INTO ZREMCDOBJECT VALUES "
+                "('photo.png', 'public.png', 4, 2, ?, 42, 0)",
+                (sha,),
+            )
+            try:
+                with mock.patch.object(self.remctl, "STORE_DIR", store_dir):
+                    out = self._cmd_show_human(db, verbose=True)
+            finally:
+                db.close()
+        self.assertIn("Attachment: photo.png (image)", out)
+        self.assertIn("\x1b[38;2;", out)
+
+    def test_cmd_show_images_without_verbose_stays_text_only(self):
+        db = self._attachment_db()
+        with tempfile.TemporaryDirectory() as tmp:
+            store_dir, sha, _ = self._attachment_store(tmp)
+            db.execute(
+                "INSERT INTO ZREMCDOBJECT VALUES "
+                "('photo.png', 'public.png', 4, 2, ?, 42, 0)",
+                (sha,),
+            )
+            try:
+                with mock.patch.object(self.remctl, "STORE_DIR", store_dir):
+                    out = self._cmd_show_human(db, verbose=False)
+            finally:
+                db.close()
+        self.assertNotIn("Attachment:", out)
+        self.assertNotIn("\x1b[38;2;", out)
+
+    # ── 9. Byte-compat ──────────────────────────────────────────────────
+
+    def test_cmd_info_human_output_without_images_has_no_escapes_or_fallbacks(self):
+        db = self._attachment_db()
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "('photo.png', 'public.png', 640, 480, NULL, 42, 0)"
+        )
+        try:
+            self.remctl.C.enabled = False
+            out = self._run_cmd_info(
+                self._reminder_row(), db, self._info_args()
+            )
+        finally:
+            db.close()
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("(file not downloaded on this Mac)", out)
+        self.assertNotIn("(preview unavailable)", out)
+        self.assertIn("  Attachments (1):\n    - photo.png (image)\n", out)
+
+    def test_cmd_info_images_disabled_and_enabled_unforced_are_byte_identical(self):
+        db = self._attachment_db()
+        db.execute(
+            "INSERT INTO ZREMCDSAVEDATTACHMENT VALUES "
+            "('doc.pdf', 'com.adobe.pdf', 'file', NULL, 42, 0)"
+        )
+        try:
+            self.remctl.C.enabled = False
+            baseline = self._run_cmd_info(
+                self._reminder_row(), db, self._info_args()
+            )
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("REMCTL_IMAGES_FORCE", None)
+                flagged = self._run_cmd_info(
+                    self._reminder_row(),
+                    db,
+                    self._info_args(images=True, image_mode="ascii"),
+                )
+        finally:
+            db.close()
+        self.assertEqual(baseline, flagged)
+
+    # ── 8. Review fixes: kitty q=2, halfblock odd heights, memo, caps ───
+
+    def test_kitty_escape_suppresses_terminal_response_on_first_chunk(self):
+        payload = _tiny_png_bytes()
+        rendered = self.images._kitty_escape(payload, 8, 100)
+        self.assertIsNotNone(rendered)
+        chunks = re.findall(r"\x1b_G([^;]*);[A-Za-z0-9+/=]*\x1b\\", rendered)
+        self.assertTrue(chunks)
+        self.assertIn("q=2", chunks[0])
+        for continuation in chunks[1:]:
+            self.assertNotIn("q=2", continuation)
+        # Multi-chunk payloads (b64 > 4096) still only quiet the first.
+        big = _tiny_png_bytes() * 4000
+        rendered_big = self.images._kitty_escape(big, 8, 100)
+        big_chunks = re.findall(r"\x1b_G([^;]*);[A-Za-z0-9+/=]*\x1b\\", rendered_big)
+        self.assertGreater(len(big_chunks), 1)
+        self.assertIn("q=2", big_chunks[0])
+        for continuation in big_chunks[1:]:
+            self.assertNotIn("q=2", continuation)
+
+    def test_halfblock_renders_last_row_on_odd_heights(self):
+        rows = [
+            [(255, 0, 0)] * 2,
+            [(0, 255, 0)] * 2,
+            [(0, 0, 255)] * 2,
+        ]
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(
+                self.images, "_pixel_rows", return_value=(2, 3, rows)
+            ),
+        ):
+            path = Path(tmp) / "odd.png"
+            path.write_bytes(b"not-really-a-png")
+            rendered = self.images.render_attachment(path, "halfblock", 2)
+        self.assertIsNotNone(rendered)
+        lines = rendered.split("\n")
+        self.assertEqual(len(lines), 2)
+        # The unpaired bottom row composites over black, not dropped.
+        self.assertIn("38;2;0;0;255m", lines[1])
+        self.assertIn("48;2;0;0;0m", lines[1])
+
+    def test_sha512_memo_avoids_rehashing_same_file(self):
+        content = _tiny_png_bytes()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memo.png"
+            path.write_bytes(content)
+            self.images._sha512_memo.clear()
+            try:
+                first = self.images._sha512_of(path)
+                with mock.patch.object(
+                    self.images.hashlib, "sha512", side_effect=AssertionError("rehashed")
+                ):
+                    second = self.images._sha512_of(path)
+            finally:
+                self.images._sha512_memo.clear()
+        self.assertEqual(first, hashlib.sha512(content).hexdigest())
+        self.assertEqual(second, first)
+        # Changing the file (new mtime/size key) rehashes instead of serving stale.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memo.png"
+            path.write_bytes(content)
+            self.images._sha512_memo.clear()
+            try:
+                before = self.images._sha512_of(path)
+                path.write_bytes(content + b"x")
+                after = self.images._sha512_of(path)
+            finally:
+                self.images._sha512_memo.clear()
+        self.assertNotEqual(before, after)
+
+    def test_resolve_attachment_file_uses_memo_across_calls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store_dir, sha, _ = self._attachment_store(tmp)
+            self.images._sha512_memo.clear()
+            try:
+                first = self.images.resolve_attachment_file(store_dir, sha)
+                with mock.patch.object(
+                    self.images.hashlib, "sha512", side_effect=AssertionError("rehashed")
+                ):
+                    second = self.images.resolve_attachment_file(store_dir, sha)
+            finally:
+                self.images._sha512_memo.clear()
+        self.assertIsNotNone(first)
+        self.assertEqual(first, second)
+
+    def test_oversized_files_skip_render_but_stay_in_json(self):
+        content = _tiny_png_bytes()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "big.png"
+            path.write_bytes(content)
+            real_stat = os.stat(path).st_size
+            with mock.patch.object(self.images, "MAX_IMAGE_BYTES", real_stat - 1):
+                for mode in ("kitty", "iterm2", "halfblock", "ascii"):
+                    self.assertIsNone(self.images.render_attachment(path, mode, 8))
+                # Hashing is capped too: resolution fails, JSON keeps metadata.
+                self.assertIsNone(self.images._sha512_of(path))
+
+    def test_attachment_sha_capability_cache_hits_across_connections(self):
+        db = self._attachment_db()
+        counting = self._counting_db(db)
+        try:
+            self.remctl._attachment_sha_capability_cache.clear()
+            try:
+                first = self.remctl._attachment_sha_capability(counting)
+                baseline = len(counting.queries)
+                second = self.remctl._attachment_sha_capability(counting)
+            finally:
+                self.remctl._attachment_sha_capability_cache.clear()
+        finally:
+            db.close()
+        self.assertEqual(first, second)
+        # Second call is served from the module-level cache: zero queries.
+        self.assertEqual(len(counting.queries), baseline)
+        self.assertGreater(baseline, 0)
+
+    # ── 9. Batch attachment loading (no N+1) ────────────────────────────
+
+    def _counting_db(self, db):
+        class CountingConnection:
+            def __init__(self, inner):
+                self._inner = inner
+                self.queries = []
+
+            def execute(self, sql, *args, **kwargs):
+                self.queries.append(sql)
+                return self._inner.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        return CountingConnection(db)
+
+    def test_show_json_uses_constant_attachment_queries(self):
+        db = self._attachment_db()
+        for pk in (42, 43, 44, 45):
+            db.execute(
+                "INSERT INTO ZREMCDOBJECT VALUES "
+                f"('photo{pk}.png', 'public.png', 640, 480, NULL, {pk}, 0)"
+            )
+        rows = [self._reminder_row(pk=pk, ckid=f"REM-{pk}") for pk in (42, 43, 44, 45)]
+        counting = self._counting_db(db)
+        try:
+            with (
+                mock.patch.object(self.remctl, "open_db", return_value=counting),
+                mock.patch.object(
+                    self.remctl,
+                    "resolve_required_list_target_or_die",
+                    return_value={"id": 1, "title": "Projects"},
+                ),
+                mock.patch.object(self.remctl, "q_reminders", return_value=rows),
+                mock.patch.object(self.remctl, "q_sections", return_value=[]),
+                mock.patch.object(self.remctl, "q_rich_link", return_value=None),
+                mock.patch.object(self.remctl, "q_assignment", return_value=None),
+                mock.patch.object(
+                    self.remctl,
+                    "preload_extras",
+                    return_value=(
+                        {pk: 0 for pk in (42, 43, 44, 45)},
+                        {pk: [] for pk in (42, 43, 44, 45)},
+                    ),
+                ),
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.remctl.cmd_show(
+                    SimpleNamespace(
+                        list="Projects",
+                        list_id=None,
+                        completed=False,
+                        json=True,
+                        format=None,
+                        verbose=False,
+                        images=False,
+                        image_mode=None,
+                        image_width=32,
+                    )
+                )
+        finally:
+            db.close()
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(len(payload), 4)
+        for item in payload:
+            self.assertEqual(len(item["attachments"]), 1)
+        attachment_queries = [
+            sql
+            for sql in counting.queries
+            if sql.lstrip().upper().startswith("SELECT")
+            and ("ZREMCDSAVEDATTACHMENT" in sql or "ZREMINDER2" in sql)
+        ]
+        # Batch path: one query per backing table regardless of page size.
+        self.assertLessEqual(len(attachment_queries), 2)
+
+    def test_to_dict_batch_map_matches_per_item_fallback(self):
+        db = self._attachment_db()
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "('photo.png', 'public.png', 640, 480, NULL, 42, 0)"
+        )
+        row = self._reminder_row()
+        try:
+            with (
+                mock.patch.object(self.remctl, "q_rich_link", return_value=None),
+                mock.patch.object(self.remctl, "q_assignment", return_value=None),
+            ):
+                sc, ht = {42: 0}, {42: []}
+                fallback = self.remctl.to_dict(row, db, _sc=sc, _ht=ht)
+                batch = self.remctl.to_dict(
+                    row, db, _sc=sc, _ht=ht,
+                    _att=self.remctl.preload_attachments(db, [42]),
+                )
+        finally:
+            db.close()
+        self.assertEqual(fallback, batch)
+
+    def test_hydrate_reminder_detail_skips_attachment_requery(self):
+        db = self._attachment_db()
+        try:
+            payload = {"id": 42, "attachments": [{"filename": "photo.png"}]}
+            with (
+                mock.patch.object(
+                    self.remctl, "q_attachments", side_effect=AssertionError("re-queried")
+                ),
+                mock.patch.object(self.remctl, "q_alarms", return_value=[]),
+            ):
+                result = self.remctl.hydrate_reminder_detail(db, payload, 42)
+        finally:
+            db.close()
+        self.assertEqual(result["attachments"], [{"filename": "photo.png"}])
+
+    def test_hydrate_reminder_detail_fills_attachments_when_absent(self):
+        db = self._attachment_db()
+        db.execute(
+            "INSERT INTO ZREMCDOBJECT VALUES "
+            "('photo.png', 'public.png', 640, 480, NULL, 42, 0)"
+        )
+        try:
+            with mock.patch.object(self.remctl, "q_alarms", return_value=[]):
+                result = self.remctl.hydrate_reminder_detail(db, {"id": 42}, 42)
+        finally:
+            db.close()
+        self.assertEqual(len(result["attachments"]), 1)
+        self.assertEqual(result["attachments"][0]["filename"], "photo.png")
+
+
+class ImageFlagParsingTests(unittest.TestCase):
+    """Global image flags must work before AND after the subcommand."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.remctl = load_module("remctl_cli_test", "remctl")
+
+    def _parse(self, argv):
+        parser, sub = self.remctl.build_parser()
+        return self.remctl.parse_cli_args(parser, sub, argv)
+
+    def test_images_before_subcommand_survives_redeclaration(self):
+        for argv in (
+            ["--images", "info", "847"],
+            ["--images", "today"],
+            ["--images", "show", "Work"],
+            ["--images", "search", "prints"],
+        ):
+            a = self._parse(argv)
+            self.assertTrue(a.images, argv)
+
+    def test_images_after_subcommand(self):
+        for argv in (
+            ["info", "847", "--images"],
+            ["today", "--images"],
+            ["show", "Work", "--images"],
+        ):
+            a = self._parse(argv)
+            self.assertTrue(a.images, argv)
+
+    def test_image_width_before_subcommand_is_not_mistaken_for_command(self):
+        a = self._parse(["--image-width", "64", "today"])
+        self.assertEqual(a.image_width, 64)
+        self.assertEqual(a.cmd, "today")
+
+    def test_image_mode_before_subcommand(self):
+        a = self._parse(["--image-mode", "kitty", "show", "Work"])
+        self.assertEqual(a.image_mode, "kitty")
+        self.assertEqual(a.cmd, "show")
+        self.assertEqual(a.list, "Work")
+
+    def test_image_flags_after_subcommand(self):
+        a = self._parse(["today", "--image-mode", "halfblock", "--image-width", "48"])
+        self.assertEqual(a.image_mode, "halfblock")
+        self.assertEqual(a.image_width, 48)
+
+    def test_image_flags_equals_form_before_subcommand(self):
+        a = self._parse(["--image-mode=ascii", "--image-width=24", "today"])
+        self.assertEqual(a.image_mode, "ascii")
+        self.assertEqual(a.image_width, 24)
+        self.assertEqual(a.cmd, "today")
+
+    def test_before_and_after_combine_last_wins(self):
+        a = self._parse(
+            ["--images", "--image-mode", "kitty", "info", "847", "--image-mode", "ascii"]
+        )
+        self.assertTrue(a.images)
+        self.assertEqual(a.image_mode, "ascii")
+        self.assertEqual(a.cmd, "info")
+
+    def test_defaults_unset_when_no_image_flags(self):
+        a = self._parse(["today"])
+        self.assertFalse(a.images)
+        self.assertIsNone(a.image_mode)
+        self.assertIsNone(a.image_width)
+
+    def test_unknown_command_still_rejected(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as ctx:
+            self._parse(["frobnicate"])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("unknown command", stderr.getvalue())
 
 
 if __name__ == "__main__":

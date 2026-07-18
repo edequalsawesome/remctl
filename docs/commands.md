@@ -29,6 +29,8 @@ remctl search "milk"
 remctl search "milk" --completed
 remctl today --via-eventkit --json
 remctl info 23880
+remctl info 847 --images
+remctl show Work --images --verbose
 remctl subtasks 23880
 remctl sections
 remctl tags
@@ -409,13 +411,79 @@ JSON output preserves machine-readable fields:
     "frequency": "weekly",
     "interval": 1,
     "daysOfWeek": [2, 4, 6]
-  }
+  },
+  "attachments": [
+    {
+      "filename": "mockup.png",
+      "type": 1,
+      "path": "/Users/you/Library/Group Containers/group.com.apple.reminders/Container_v1/Files/Account-ABCD/Attachments/<sha512>.png",
+      "resolved": true,
+      "uti": "public.png",
+      "width": 1200,
+      "height": 800
+    }
+  ]
 }
 ```
 
 `dueDate` is the actual Reminders due date. When Reminders stores a separate display/alert date, such as a normal alarm 15 minutes before the due date or an all-day display date, JSON also includes `displayDate`; agents should not treat `displayDate` as the due date. For ordinary rescheduling with `edit -d`, RemCTL carries forward a single absolute alarm when that alarm matches the old due/display time, so Reminders.app's visible time moves with the due date instead of staying stale. `edit -d clear` removes a single matching absolute alarm/display time while preserving unrelated custom alarms.
 
 Normal read-command JSON includes numeric `id` values. `--via-eventkit` is the exception: it returns `source: "eventkit"`, `fidelity: "limited"`, and per-item `eventKitId` values instead of numeric IDs. Those identifiers are not accepted by RemCTL numeric-ID commands.
+
+## Inline Images
+
+```bash
+remctl info 847 --images
+remctl show Work --images --verbose
+remctl today --images --verbose
+remctl info 847 --images --image-mode halfblock --image-width 48
+```
+
+`--images` renders image attachments inline in human output. `info` always renders its attachments when `--images` is passed; list commands (`show`, `today`, `upcoming`, `overdue`, `flagged`, `urgent`, `search`) render attachments only together with `--verbose`, so ordinary list output stays compact. Rendering happens only on a real TTY — it is skipped in pipes, `--json`, and table mode, so automation never sees escape sequences.
+
+Two flags control the render, with matching environment variables (flags win over env):
+
+| Flag | Env | Default | Notes |
+| --- | --- | --- | --- |
+| `--images` | `REMCTL_IMAGES=1` | off | Render image attachments inline |
+| `--image-mode MODE` | `REMCTL_IMAGE_MODE` | auto-detect | One of `kitty`, `iterm2`, `halfblock`, `ascii`, `none` |
+| `--image-width N` | `REMCTL_IMAGE_WIDTH` | `32` | Render width in terminal cells |
+
+Without `--image-mode`, RemCTL picks the best protocol for the current terminal:
+
+| Mode | Used on | Fallback behavior |
+| --- | --- | --- |
+| `kitty` | Ghostty, Kitty, WezTerm, Konsole (Kitty graphics protocol) | — |
+| `iterm2` | iTerm2; Blink on iOS over SSH (iTerm2 inline image protocol) | — |
+| `halfblock` | Terminals advertising truecolor/256color | Used when no graphics protocol is detected |
+| `ascii` | Any other real TTY | Last-resort ASCII art rendering |
+| `none` | — | Disables rendering explicitly |
+
+Rendering has no required dependencies: Pillow is used when it is importable, otherwise macOS `sips` decodes pixels through a stdlib BMP path, so a stock macOS install works out of the box. Attachments larger than 16 MB are reported in JSON but skipped for inline rendering (`(preview unavailable)`), and `halfblock`/`ascii` rendering assumes a dark terminal background.
+
+Two failure markers can appear in place of a render: `(file not downloaded on this Mac)` for legacy attachments whose file is not present locally, and `(preview unavailable)` when a resolved file cannot be rendered.
+
+`REMCTL_IMAGES_FORCE=1` bypasses the TTY check. It exists for tests only; do not use it in scripts or normal output, since it can emit escape sequences into non-terminal consumers.
+
+## Attachments in JSON
+
+`info --json` and list-command JSON (`show`, `today`, `upcoming`, `overdue`, `flagged`, `urgent`, `search`) include an `attachments` array on any reminder that has attachments; the key is omitted when a reminder has none. Subtask attachments remain visible only through `info --json`.
+
+Each entry has this shape:
+
+```json
+{
+  "filename": "mockup.png",
+  "type": 1,
+  "path": "/Users/you/Library/Group Containers/group.com.apple.reminders/Container_v1/Files/Account-ABCD/Attachments/<sha512>.png",
+  "resolved": true,
+  "uti": "public.png",
+  "width": 1200,
+  "height": 800
+}
+```
+
+`path` is the sha512-verified on-disk file inside Reminders' group container. Agents can read that file directly — vision-capable models can open the image. For legacy attachments that were never downloaded to this Mac, `path` is `null` and `resolved` is `false`; treat those as unavailable rather than an error.
 
 ## Due Date Formats
 
@@ -463,7 +531,7 @@ remctl add "Title" -l Projects --private --section "Section" -d "2026-05-12 15:0
 remctl info <numericId> --json
 ```
 
-`add --json` returns `numericId` when the new reminder is immediately visible in the local database. Use that ID for `info`; fall back to resolving by title from `show <list> --json` only if `numericId` is absent. `info --json` includes private rich-link URLs, parent and subtask image attachments, EventKit alarms, location alarms, Early Reminders, and recurrence metadata, so raw SQLite verification should not be needed for normal reminder metadata tasks.
+`add --json` returns `numericId` when the new reminder is immediately visible in the local database. Use that ID for `info`; fall back to resolving by title from `show <list> --json` only if `numericId` is absent. `info --json` includes private rich-link URLs, parent and subtask image attachments, EventKit alarms, location alarms, Early Reminders, and recurrence metadata, so raw SQLite verification should not be needed for normal reminder metadata tasks. Attachment entries include a sha512-verified `path` to the local file (or `path: null` with `resolved: false` for legacy attachments not downloaded on this Mac); list-command JSON carries the same `attachments` array for parent reminders. See [Inline Images](#inline-images) and [Attachments in JSON](#attachments-in-json).
 
 If a `--private` write partially fails after the reminder already exists, `add --json` returns `{"status":"partial", ...}` (text mode prints an explicit "Do NOT re-run add" line) carrying the created `numericId`. Re-run `edit` on that ID to finish the remaining metadata; do not re-run `add`, which would duplicate the reminder.
 

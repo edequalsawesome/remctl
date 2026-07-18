@@ -33,6 +33,7 @@ from remctl_runtime import (
 from remctl_serialization import (
     DUE_DATE_DELTA_UNITS,
     due_date_delta_alerts_from_row,
+    preload_attachments,
     preload_extras as shared_preload_extras,
     recurrence_from_row,
     serialize_reminder,
@@ -2126,43 +2127,54 @@ def q_assignment(db, reminder_pk):
     except (AttributeError, sqlite3.OperationalError):
         return None
 
+# sqlite3.Connection rejects attribute assignment, so the capability cache
+# lives module-side. Keyed by database file path when the connection reports
+# one (PRAGMA database_list); in-memory DBs and test mocks fall back to
+# id(db). id-reuse after GC could theoretically alias a dead connection's
+# entry, but the worst case is a stale schema guess for a fresh connection
+# whose queries would then fail soft — acceptable for a read-only guard.
+_attachment_sha_capability_cache = {}
+_ATTACHMENT_SHA_CACHE_MAX = 64
+
+
 def _attachment_sha_capability(db):
     """Per-db cache of which attachment tables expose ZSHA512SUM (schema drift guard)."""
+    id_key = ("id", id(db))
+    cached = _attachment_sha_capability_cache.get(id_key)
+    if cached is not None:
+        return cached
+    # New connection: alias to the database file path so other connections to
+    # the same store share one entry. In-memory DBs/mocks report no path and
+    # stay keyed by id. id-reuse after GC could alias a dead connection's
+    # entry; the worst case is a stale schema guess whose queries fail soft.
     try:
-        cache = db._remctl_attachment_sha_cap
-    except AttributeError:
-        cache = {}
+        rows = db.execute("PRAGMA database_list").fetchall()
+        path = next((row[2] for row in rows if row[1] == "main" and row[2]), None)
+    except Exception:
+        path = None
+    path_key = ("path", path) if path else None
+    if path_key is not None:
+        cached = _attachment_sha_capability_cache.get(path_key)
+        if cached is not None:
+            _attachment_sha_capability_cache[id_key] = cached
+            return cached
     result = {}
     for table in ("ZREMCDSAVEDATTACHMENT", "ZREMCDOBJECT"):
-        if table not in cache:
-            try:
-                columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
-                cache[table] = "ZSHA512SUM" in columns
-            except Exception:
-                cache[table] = False
-        result[table] = cache[table]
-    try:
-        db._remctl_attachment_sha_cap = cache
-    except AttributeError:
-        pass
+        try:
+            columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+            result[table] = "ZSHA512SUM" in columns
+        except Exception:
+            result[table] = False
+    if len(_attachment_sha_capability_cache) >= _ATTACHMENT_SHA_CACHE_MAX:
+        _attachment_sha_capability_cache.clear()
+    _attachment_sha_capability_cache[id_key] = result
+    if path_key is not None:
+        _attachment_sha_capability_cache[path_key] = result
     return result
 
 
 def q_attachments(db, pk):
     capability = _attachment_sha_capability(db)
-    if capability.get("ZREMCDSAVEDATTACHMENT") and capability.get("ZREMCDOBJECT"):
-        return db.execute(
-            "SELECT ZFILENAME, ZUTI, ZATTACHMENTTYPERAWVALUE, ZSHA512SUM, "
-            "NULL AS ZWIDTH, NULL AS ZHEIGHT FROM ZREMCDSAVEDATTACHMENT "
-            "WHERE ZREMINDER = ? AND ZMARKEDFORDELETION = 0 "
-            "UNION ALL "
-            "SELECT ZFILENAME, ZUTI, "
-            "CASE WHEN ZWIDTH IS NOT NULL OR ZHEIGHT IS NOT NULL THEN 'image' ELSE 'file' END AS ZATTACHMENTTYPERAWVALUE, "
-            "ZSHA512SUM, ZWIDTH, ZHEIGHT "
-            "FROM ZREMCDOBJECT "
-            "WHERE ZREMINDER2 = ? AND ZFILENAME IS NOT NULL AND ZFILENAME != '' AND ZMARKEDFORDELETION = 0 "
-            "ORDER BY ZFILENAME", (pk, pk)
-        ).fetchall()
     saved_sha = "ZSHA512SUM" if capability.get("ZREMCDSAVEDATTACHMENT") else "NULL AS ZSHA512SUM"
     object_sha = "ZSHA512SUM" if capability.get("ZREMCDOBJECT") else "NULL AS ZSHA512SUM"
     return db.execute(
@@ -2233,10 +2245,10 @@ def q_due_date_delta_alerts(db, reminder_ckid):
     ).fetchall()
 
 
-def attachment_rows_to_json(rows, db=None):
-    return [attachment_row_to_json(row, db=db) for row in rows]
+def attachment_rows_to_json(rows):
+    return [attachment_row_to_json(row) for row in rows]
 
-def attachment_row_to_json(row, db=None):
+def attachment_row_to_json(row):
     filename = _row_get(row, "ZFILENAME")
     uti = _row_get(row, "ZUTI")
     sha = _row_get(row, "ZSHA512SUM")
@@ -2445,9 +2457,12 @@ def should_clear_matching_absolute_alarm(db, reminder):
     return any(_same_datetime_second(alarm_dt, candidate) for candidate in (old_due, old_display))
 
 def hydrate_reminder_detail(db, payload, reminder_id):
-    attachments = attachment_rows_to_json(q_attachments(db, reminder_id), db=db)
-    if attachments:
-        payload["attachments"] = attachments
+    if "attachments" not in payload:
+        # to_dict already resolves attachments when it runs with a db; skip
+        # the re-query/re-resolution in that case (info --json path).
+        attachments = attachment_rows_to_json(q_attachments(db, reminder_id))
+        if attachments:
+            payload["attachments"] = attachments
     alarms = alarm_rows_to_json(q_alarms(db, reminder_id))
     if alarms:
         payload["alarms"] = alarms
@@ -2807,7 +2822,7 @@ def fmt(r, db=None, verbose=False, indent="", _sc=None, _ht=None, _img=None):
                     parts.append(rendered)
     return "\n".join(parts)
 
-def to_dict(r, db=None, section=None, _sc=None, _ht=None):
+def to_dict(r, db=None, section=None, _sc=None, _ht=None, _att=None):
     payload = serialize_reminder(
         r,
         ts=ts,
@@ -2822,7 +2837,13 @@ def to_dict(r, db=None, section=None, _sc=None, _ht=None):
     )
     if db is not None and _item_has(r, "Z_PK"):
         try:
-            attachment_payload = attachment_rows_to_json(q_attachments(db, r["Z_PK"]), db=db)
+            if _att is not None:
+                # Batch path: callers preload the page's attachment rows once
+                # and hand them in, avoiding a per-reminder query.
+                att_rows = _att.get(r["Z_PK"], [])
+            else:
+                att_rows = q_attachments(db, r["Z_PK"])
+            attachment_payload = attachment_rows_to_json(att_rows)
         except Exception:
             attachment_payload = []
         if attachment_payload:
@@ -2847,9 +2868,7 @@ def reminders_to_dicts(items, db=None, memberships=None):
         rich_link_resolver=q_rich_link,
         fallback_subtask_count=q_subtask_count,
         fallback_hashtags=lambda inner_db, pk: [t["ZNAME"] for t in q_hashtags(inner_db, pk)],
-        attachment_rows_to_json=(
-            (lambda rows: attachment_rows_to_json(rows, db=db)) if db is not None else None
-        ),
+        attachment_rows_to_json=attachment_rows_to_json if db is not None else None,
     )
     if db is not None:
         for item, payload in zip(items, payloads):
@@ -7858,6 +7877,7 @@ def cmd_show_group(a, db, group_ref):
     items = q_reminders_for_lists(db, child_ids, completed=a.completed, top_level=True)
     pks = [item["Z_PK"] for item in items]
     sc, ht = preload_extras(db, pks)
+    att = preload_attachments(db, pks)
     memberships_by_list = {}
     for child in children:
         sections = q_sections(db, child["Z_PK"])
@@ -7868,7 +7888,7 @@ def cmd_show_group(a, db, group_ref):
             list_pk = _row_get(item, "ZLIST")
             child = child_by_id.get(list_pk)
             section = memberships_by_list.get(list_pk, {}).get(item["ZCKIDENTIFIER"])
-            item_payload = to_dict(item, db, section=section, _sc=sc, _ht=ht)
+            item_payload = to_dict(item, db, section=section, _sc=sc, _ht=ht, _att=att)
             if child:
                 item_payload["list"] = list_group_stub(child)
                 group_payload = {
@@ -7941,11 +7961,12 @@ def cmd_show(a):
     items = q_reminders(db, list_pk=pk, completed=a.completed, top_level=True)
     pks = [i["Z_PK"] for i in items]
     sc, ht = preload_extras(db, pks)
+    att = preload_attachments(db, pks)
     secs = q_sections(db, pk)
     memberships = q_section_memberships(db, pk) if secs else {}
     if a.json:
         payload = [
-            to_dict(i, db, section=memberships.get(i["ZCKIDENTIFIER"]), _sc=sc, _ht=ht)
+            to_dict(i, db, section=memberships.get(i["ZCKIDENTIFIER"]), _sc=sc, _ht=ht, _att=att)
             for i in items
         ]
         if list_ref.get("isGroceries"):
@@ -8708,8 +8729,9 @@ def cmd_search(a):
     items = q_search(db, a.query, completed=a.completed)
     pks = [i["Z_PK"] for i in items]
     sc, ht = preload_extras(db, pks)
+    att = preload_attachments(db, pks)
     if a.json:
-        print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht) for i in items], indent=2))
+        print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht, _att=att) for i in items], indent=2))
         return
     if getattr(a, 'format', None) == 'table':
         print_reminder_table(items, db, args=a)
@@ -8731,8 +8753,9 @@ def cmd_today(a):
     items = q_due_today(db, include_overdue=not a.no_overdue)
     pks = [i["Z_PK"] for i in items]
     sc, ht = preload_extras(db, pks)
+    att = preload_attachments(db, pks)
     if a.json:
-        print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht) for i in items], indent=2))
+        print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht, _att=att) for i in items], indent=2))
         return
     if getattr(a, 'format', None) == 'table':
         print_reminder_table(items, db, args=a)
@@ -8761,8 +8784,9 @@ def cmd_flagged(a):
     items = q_flagged(db)
     pks = [i["Z_PK"] for i in items]
     sc, ht = preload_extras(db, pks)
+    att = preload_attachments(db, pks)
     if a.json:
-        print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht) for i in items], indent=2))
+        print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht, _att=att) for i in items], indent=2))
         return
     if getattr(a, 'format', None) == 'table':
         print_reminder_table(items, db, args=a)
@@ -8781,8 +8805,9 @@ def cmd_urgent(a):
     items = q_urgent(db)
     pks = [i["Z_PK"] for i in items]
     sc, ht = preload_extras(db, pks)
+    att = preload_attachments(db, pks)
     if a.json:
-        print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht) for i in items], indent=2))
+        print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht, _att=att) for i in items], indent=2))
         return
     if getattr(a, 'format', None) == 'table':
         print_reminder_table(items, db, args=a)
@@ -8821,9 +8846,10 @@ def cmd_subtasks(a):
     subs = q_reminders(db, parent_pk=a.id, completed=True)
     sub_pks = [s["Z_PK"] for s in subs]
     sc, ht = preload_extras(db, sub_pks)
+    att = preload_attachments(db, [a.id, *sub_pks])
     if a.json:
-        d = to_dict(parent, db)
-        d["subtasks"] = [to_dict(s, db, _sc=sc, _ht=ht) for s in subs]
+        d = to_dict(parent, db, _att=att)
+        d["subtasks"] = [to_dict(s, db, _sc=sc, _ht=ht, _att=att) for s in subs]
         print(json.dumps(d, indent=2))
         return
     print(f"Parent: {safe_display(parent['ZTITLE'])}")
@@ -9188,8 +9214,9 @@ def cmd_upcoming(a):
     items = q_upcoming(db, days=days)
     pks = [i["Z_PK"] for i in items]
     sc, ht = preload_extras(db, pks)
+    att = preload_attachments(db, pks)
     if a.json:
-        print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht) for i in items], indent=2))
+        print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht, _att=att) for i in items], indent=2))
         return
     if getattr(a, 'format', None) == 'table':
         print_reminder_table(items, db, args=a)
@@ -9222,8 +9249,9 @@ def cmd_overdue(a):
     items = q_overdue(db)
     pks = [i["Z_PK"] for i in items]
     sc, ht = preload_extras(db, pks)
+    att = preload_attachments(db, pks)
     if a.json:
-        print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht) for i in items], indent=2))
+        print(json.dumps([to_dict(i, db, _sc=sc, _ht=ht, _att=att) for i in items], indent=2))
         return
     if getattr(a, 'format', None) == 'table':
         print_reminder_table(items, db, args=a)
@@ -9825,6 +9853,9 @@ _remctl() {
                 '--completed[Include completed reminders]' \
                 '--via-eventkit[Limited read-only EventKit fallback; no numeric ids or private metadata]' \
                 '(-v --verbose)'{-v,--verbose}'[Verbose output]' \
+                '--images[Render image attachments inline]' \
+                '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock ascii none)' \
+                '--image-width[Image render width in cells]:width:' \
                 '--json[JSON output]'
             return
             ;;
@@ -9833,6 +9864,9 @@ _remctl() {
                 '--completed[Include completed reminders]' \
                 '--via-eventkit[Limited read-only EventKit fallback; no numeric ids or private metadata]' \
                 '(-v --verbose)'{-v,--verbose}'[Verbose output]' \
+                '--images[Render image attachments inline]' \
+                '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock ascii none)' \
+                '--image-width[Image render width in cells]:width:' \
                 '--json[JSON output]'
             return
             ;;
@@ -9841,6 +9875,9 @@ _remctl() {
                 '--no-overdue[Exclude overdue reminders]' \
                 '--via-eventkit[Limited read-only EventKit fallback; no numeric ids or private metadata]' \
                 '(-v --verbose)'{-v,--verbose}'[Verbose output]' \
+                '--images[Render image attachments inline]' \
+                '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock ascii none)' \
+                '--image-width[Image render width in cells]:width:' \
                 '--json[JSON output]'
             return
             ;;
@@ -9848,6 +9885,35 @@ _remctl() {
             _arguments \
                 '--via-eventkit[Limited read-only EventKit fallback; no numeric ids or private metadata]' \
                 '(-v --verbose)'{-v,--verbose}'[Verbose output]' \
+                '--images[Render image attachments inline]' \
+                '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock ascii none)' \
+                '--image-width[Image render width in cells]:width:' \
+                '--json[JSON output]'
+            return
+            ;;
+        overdue|flagged|urgent)
+            _arguments \
+                '(-v --verbose)'{-v,--verbose}'[Verbose output]' \
+                '--images[Render image attachments inline]' \
+                '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock ascii none)' \
+                '--image-width[Image render width in cells]:width:' \
+                '--json[JSON output]'
+            return
+            ;;
+        subtasks)
+            _arguments \
+                '(-v --verbose)'{-v,--verbose}'[Verbose output]' \
+                '--images[Render image attachments inline]' \
+                '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock ascii none)' \
+                '--image-width[Image render width in cells]:width:' \
+                '--json[JSON output]'
+            return
+            ;;
+        info)
+            _arguments \
+                '--images[Render image attachments inline]' \
+                '--image-mode[Image rendering protocol]:mode:(kitty iterm2 halfblock ascii none)' \
+                '--image-width[Image render width in cells]:width:' \
                 '--json[JSON output]'
             return
             ;;
@@ -11280,7 +11346,9 @@ def format_command_columns(commands, width=88):
 
 
 def first_command_token(argv):
-    skip_value_for = {"--format"}
+    # Flags that consume the following token as their value; the value must
+    # not be mistaken for the command name.
+    skip_value_for = {"--format", "--image-mode", "--image-width"}
     iterator = iter(argv)
     for token in iterator:
         if token in {"-h", "--help", "--version"}:
@@ -11289,6 +11357,8 @@ def first_command_token(argv):
             next(iterator, None)
             continue
         if token.startswith("--format="):
+            continue
+        if token.startswith("--image-mode=") or token.startswith("--image-width="):
             continue
         if token == "--no-color":
             continue
@@ -11307,7 +11377,32 @@ def suggest_command(command, choices):
     return None
 
 
-def main():
+def parse_cli_args(parser, subparsers, argv=None):
+    """Parse argv with a friendly unknown-command error instead of argparse's.
+
+    argv defaults to sys.argv[1:]. Kept separate from main() so tests can
+    drive the real parser without running a command.
+    """
+    args = sys.argv[1:] if argv is None else argv
+    command_token = first_command_token(args)
+    if command_token and command_token not in subparsers.choices:
+        print(f"remctl: error: unknown command: {command_token!r}", file=sys.stderr)
+        suggestion = suggest_command(command_token, subparsers.choices)
+        if suggestion:
+            print(f"Did you mean: remctl {suggestion}", file=sys.stderr)
+        print("Available commands:", file=sys.stderr)
+        for line in format_command_columns(subparsers.choices):
+            print(f"  {line}", file=sys.stderr)
+        print("Run `remctl <command> --help` for command-specific options.", file=sys.stderr)
+        sys.exit(2)
+    return parser.parse_args(args)
+
+
+def build_parser():
+    """Construct the full CLI parser; returns (parser, subparsers action).
+
+    Separated from main() so tests can drive real argument parsing.
+    """
     p = argparse.ArgumentParser(
         prog=CLI_NAME,
         description="Power-user Reminders CLI — reads sections/subtasks/tags/attachments/colors, "
@@ -11351,9 +11446,11 @@ def main():
     def js(c): c.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     def img(c):
         # Re-declare the global image flags so they also parse after the command name.
-        c.add_argument("--images", action="store_true", help=argparse.SUPPRESS)
-        c.add_argument("--image-mode", choices=list(IMAGE_MODES), default=None, help=argparse.SUPPRESS)
-        c.add_argument("--image-width", type=int, default=None, help=argparse.SUPPRESS)
+        # argparse.SUPPRESS keeps an unused re-declaration from overwriting the
+        # value the global option already stored in the namespace.
+        c.add_argument("--images", action="store_true", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+        c.add_argument("--image-mode", choices=list(IMAGE_MODES), default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+        c.add_argument("--image-width", type=int, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     def display_format(c):
         c.add_argument(
             "--format",
@@ -12037,19 +12134,13 @@ def main():
     )
     c.add_argument("shell", nargs="?", default="zsh", choices=["bash", "zsh", "fish"], help="Shell type")
 
+    return p, sub
+
+
+def main():
+    p, sub = build_parser()
     # --- Parse ---
-    command_token = first_command_token(sys.argv[1:])
-    if command_token and command_token not in sub.choices:
-        print(f"remctl: error: unknown command: {command_token!r}", file=sys.stderr)
-        suggestion = suggest_command(command_token, sub.choices)
-        if suggestion:
-            print(f"Did you mean: remctl {suggestion}", file=sys.stderr)
-        print("Available commands:", file=sys.stderr)
-        for line in format_command_columns(sub.choices):
-            print(f"  {line}", file=sys.stderr)
-        print("Run `remctl <command> --help` for command-specific options.", file=sys.stderr)
-        sys.exit(2)
-    a = p.parse_args()
+    a = parse_cli_args(p, sub)
     command_format = getattr(a, "command_format", None)
     if command_format:
         a.format = command_format
