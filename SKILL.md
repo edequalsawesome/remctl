@@ -60,6 +60,7 @@ High-value guardrails:
 - Location alarms use the `edit --private --location-*` guardrail but are saved through the EventKit bridge as structured-location alarms; verify them in `info --json` under `alarms`.
 - Private rich URLs require public `http` or `https` hosts; loopback, `.local`, private, link-local, multicast, reserved, and unresolved hosts fail before writing. Non-private `--url` is only a notes fallback.
 - Human output strips terminal control characters from Reminders text; use JSON when exact raw values matter.
+- Plain human list output may end reminder lines with trailing `🔗` (rich link) and/or `🌄` (image attachment) badges. Those badges are never in JSON — read the `attachments` and `url` JSON fields instead.
 - Invalid due dates, recurrence, normal alarms, priorities, and location payloads fail before writing. `upcoming DAYS` accepts 1 through 3650 days.
 - Date-only `add -d` inputs such as `today`, `tomorrow`, `2026-06-01`, `+3d`, and `next friday` create all-day reminders; explicit times create timed reminders.
 - Do not verify smart-list pinning with `lists --json`; use `smart-lists --json`.
@@ -290,7 +291,7 @@ remctl info <numericId> --json
 
 `add --private` validates section/assignee/URL inputs before creating the reminder. If a private step still fails after creation, JSON output is `{"status": "partial", "id", "numericId", "failed", "error"}` (text mode: `Created reminder #N but failed to apply <action>; re-run edit to finish. Do NOT re-run add (would duplicate).`). On `partial`, re-run `edit` to finish the metadata; never re-run `add`.
 
-`info --json` includes section, actual due date, optional display/alert date, tags, subtasks, parent and subtask attachments, EventKit alarms, location alarms, Early Reminders, deep link, and private rich-link `url` when present. Avoid raw SQLite checks unless the CLI output lacks a field you need.
+`info --json` includes section, actual due date, optional display/alert date, tags, subtasks, parent and subtask attachments, EventKit alarms, location alarms, Early Reminders, deep link, and private rich-link `url` when present. List-command JSON (`show`, `today`, `upcoming`, `overdue`, `flagged`, `urgent`, `search`) also includes `attachments` for parent reminders; the key is omitted when a reminder has none. Each attachment entry is `{filename, type, path, resolved, uti, width, height}`. Consume `path` directly: it is the sha512-verified local file, so read the file from disk — vision-capable agents can open the image. `path: null` with `resolved: false` means a legacy attachment that is not downloaded on this Mac; treat it as unavailable, not as an error. Avoid raw SQLite checks unless the CLI output lacks a field you need.
 
 ## Permissions
 

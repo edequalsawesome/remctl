@@ -22,7 +22,7 @@ remctl
 
 Why this architecture exists:
 
-- **Direct SQLite reads** expose sections, subtasks, tags, attachments, deep links, list colors and badges, recurrence metadata, normal alarms, location alarms, and Early Reminder metadata in tens of milliseconds.
+- **Direct SQLite reads** expose sections, subtasks, tags, attachments (with sha512-verified local file paths), deep links, list colors and badges, recurrence metadata, normal alarms, location alarms, and Early Reminder metadata in tens of milliseconds.
 - **Limited EventKit reads** are available only with `--via-eventkit` on `show`, `search`, `today`, and `upcoming`. This is a fallback for automation hosts that cannot get Full Disk Access. It is never the default and does not return RemCTL numeric IDs.
 - **EventKit writes** keep Reminders and iCloud in charge of mutations. RemCTL does not write directly to the database.
 - **Private metadata writes** are unsupported and explicitly opt-in with `--private`. They use Apple's private ReminderKit APIs, not direct SQLite mutation, and should be treated as experimental power-user functionality.
@@ -53,7 +53,7 @@ If you install to `~/.local/bin`, use the same prefix every time:
 PREFIX="$HOME/.local" ./install.sh --bootstrap
 ```
 
-Full setup details live in [docs/installation.md](docs/installation.md).
+Full setup details live in [docs/installation.md](docs/installation.md). Release notes live in [CHANGELOG.md](CHANGELOG.md).
 
 ## Uninstalling
 
@@ -300,6 +300,7 @@ RemCTL output is designed for both humans and agents:
 - `edit -d` carries a single absolute alarm forward when it matches the old due/display time, keeping Reminders.app's visible time aligned for ordinary reschedules
 - `edit -d clear` removes a single matching absolute alarm/display time; `edit --alarm clear` removes normal alarms explicitly
 - normal EventKit alarms and location alarms appear in `info --json` as `alarms`
+- image attachments appear in `info --json` and list-command JSON as `attachments` entries with `filename`, `type`, `path`, `resolved`, `uti`, `width`, and `height`; `path` is the sha512-verified local file, or `null` with `resolved: false` when the attachment is not downloaded on this Mac
 - shared-list assignments appear in human output as `@Name` and in `info --json` as `assignment`
 - Early Reminders appear in `info` output (text and JSON) as labels such as `15 minutes before`
 - recurring reminders show a repeat badge such as `↻ weekly Mon, Wed`
@@ -312,6 +313,34 @@ RemCTL output is designed for both humans and agents:
 remctl today --json
 remctl --format table upcoming 14
 NO_COLOR=1 remctl today
+```
+
+## Inline Images
+
+Reminders with image attachments can render them right in the terminal:
+
+```bash
+remctl info 847 --images
+remctl show Projects --images --verbose
+remctl today --images --verbose --image-mode halfblock --image-width 48
+```
+
+`info --images` renders every image attachment inline. List commands (`show`, `today`, `upcoming`, `overdue`, `flagged`, `urgent`, `search`) render attachments too, but only with `--verbose` so ordinary list output stays compact. Rendering happens only on a real TTY — never in pipes, `--json`, or table mode — so scripts are never surprised by escape sequences.
+
+RemCTL picks the best protocol for the current terminal automatically: the Kitty graphics protocol on Ghostty, Kitty, WezTerm, and Konsole; iTerm2's inline image protocol on iTerm2 (and Blink on iOS over SSH); a truecolor half-block renderer elsewhere. Terminals with no usable protocol simply skip inline rendering — the plain attachment filename lines always remain. Override detection with `--image-mode kitty|iterm2|halfblock|none` and set the render width in cells with `--image-width N` (default: ~40% of the terminal width, capped 24–100; half-block caps at 64). The matching environment variables are `REMCTL_IMAGES=1`, `REMCTL_IMAGE_MODE`, and `REMCTL_IMAGE_WIDTH`; flags win over env.
+
+There is nothing new to install. Rendering uses Pillow if it is importable, otherwise macOS `sips` plus a small stdlib BMP decoder — either path works on a stock Mac.
+
+For agents, the same attachments are machine-readable instead: `info --json` and list-command JSON (`show`, `today`, `upcoming`, `overdue`, `flagged`, `urgent`, `search`) include an `attachments` array on any reminder that has them. Each entry carries `filename`, `type`, `path`, `resolved`, `uti`, `width`, and `height`. `path` is the sha512-verified on-disk file under Reminders' group container, so a vision-capable agent can open the image directly; a legacy attachment that was never downloaded to this Mac reports `path: null` with `resolved: false`.
+
+## List Badges
+
+Plain human list output ends each reminder line with one or two trailing emoji badges when they apply: `🔗` means the reminder has at least one rich link, `🌄` means at least one image attachment. When both apply they print in that order, space-separated, after tags and any `[N subtasks]` count. Completed reminders keep their badges. The badges appear in `show`, `search`, `today`, `upcoming`, `overdue`, `flagged`, `urgent`, `group show`, and on subtask lines in `subtasks`/`info` — plain human output only. They are never in `--json`, CSV export, `--format table`, or `--via-eventkit` payloads; agents should read the `attachments` and `url` JSON fields instead.
+
+```text
+[ ] #30165 Try Halo app on iOS again 🌄
+[ ] #30174 Read the new MacStories piece 🔗
+[ ] #30180 Review layout mockups 🔗 🌄
 ```
 
 ## macOS Permissions
@@ -354,7 +383,7 @@ remctl doctor --for-agent --json
 
 Do not use `--via-eventkit` by default. Use it only when a supported basic read command is blocked by Full Disk Access and the task can tolerate limited EventKit fidelity. In this mode JSON returns a wrapper with `source: "eventkit"`, `fidelity: "limited"`, and `items`; item identifiers are `eventKitId`, not RemCTL numeric `id`. Never pass `eventKitId` to `info`, `edit`, `done`, `delete`, `link`, `open`, `subtasks`, or any other numeric-ID command. If the task needs sections, tags, rich links, urgent state, templates, smart-list internals, or chainable IDs, fix Full Disk Access instead.
 
-For fast agent writes, call `remctl add ... --json`, use the returned `numericId` when present, then verify with `remctl info <numericId> --json`. `add --private` validates section/assignee/URL inputs before creating the reminder; if a private step still fails after creation, output is `{"status": "partial", "id", "numericId", "failed", "error"}` in JSON (text mode: `Created reminder #N but failed to apply <action>; re-run edit to finish. Do NOT re-run add (would duplicate).`). On `partial`, re-run `edit` to finish the metadata; never re-run `add`. For list moves, use the `id` returned by `remctl edit ... -l ... --json`; a verified clone-delete fallback can replace the original reminder and return `oldId` plus a new `id`. `info` includes private rich-link URLs, parent and subtask image attachments, EventKit alarms, location alarms, Early Reminders, and recurrence metadata, so agents should not need raw SQLite checks for ordinary reminder metadata verification.
+For fast agent writes, call `remctl add ... --json`, use the returned `numericId` when present, then verify with `remctl info <numericId> --json`. `add --private` validates section/assignee/URL inputs before creating the reminder; if a private step still fails after creation, output is `{"status": "partial", "id", "numericId", "failed", "error"}` in JSON (text mode: `Created reminder #N but failed to apply <action>; re-run edit to finish. Do NOT re-run add (would duplicate).`). On `partial`, re-run `edit` to finish the metadata; never re-run `add`. For list moves, use the `id` returned by `remctl edit ... -l ... --json`; a verified clone-delete fallback can replace the original reminder and return `oldId` plus a new `id`. `info` includes private rich-link URLs, parent and subtask image attachments, EventKit alarms, location alarms, Early Reminders, and recurrence metadata, so agents should not need raw SQLite checks for ordinary reminder metadata verification. Parent reminder attachments also appear in list-command JSON (`show`, `today`, `upcoming`, `overdue`, `flagged`, `urgent`, `search`); each `attachments` entry includes a sha512-verified `path` to the local file that vision-capable agents can open directly, or `path: null` with `resolved: false` when the attachment is a legacy row that was never downloaded to this Mac.
 
 Use JSON for automation when exact raw text matters. Human output is terminal-safe and strips control characters; JSON preserves the underlying Reminders values.
 
@@ -406,6 +435,7 @@ remctl doctor
 | `remctl-private.m` | Unsupported private ReminderKit metadata helper source |
 | `remctl-permissions.swift` | Swift/AppKit guided Full Disk Access helper source |
 | `remctl_runtime.py` | Shared paths, config, date windows, safety helpers |
+| `remctl_images.py` | Attachment file resolution and inline terminal image rendering |
 | `remctl_serialization.py` | Shared reminder JSON serialization |
 | `remctl_smart_lists.py` | Smart-list filter decoding and safe v1 encoding |
 | `scripts/live_edit_matrix.py` | Opt-in live edit-mode matrix for due/display/alarm regressions |
