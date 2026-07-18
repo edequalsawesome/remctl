@@ -494,7 +494,7 @@ Each entry has this shape:
 ```json
 {
   "filename": "mockup.png",
-  "type": 1,
+  "type": "image",
   "path": "/Users/you/Library/Group Containers/group.com.apple.reminders/Container_v1/Files/Account-ABCD/Attachments/<sha512>.png",
   "resolved": true,
   "uti": "public.png",
